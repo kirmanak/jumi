@@ -34,7 +34,7 @@ runs:
       run: |
         mkdir -p /tmp/jumi
         curl -sL -H "Authorization: token ${GITEA_TOKEN}" \
-          "${{ github.server_url }}/api/v1/repos/kirmanak/jumi/archive/main.tar.gz" \
+          "${{ github.server_url }}/api/v1/repos/personal/jumi/archive/main.tar.gz" \
           | tar xz -C /tmp/jumi --strip-components=1
 
     - name: Load tool versions
