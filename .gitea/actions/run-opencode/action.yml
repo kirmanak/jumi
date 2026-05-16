@@ -3,11 +3,15 @@ description: Download, set up, and run the OpenCode AI agent
 
 inputs:
   gitea-token:
-    description: Gitea API token (used for downloading scripts and agent API calls)
+    description: Gitea API token
     required: true
   opencode-model:
     description: OpenCode model identifier
     required: true
+  litellm-api-key:
+    description: LiteLLM API key
+    required: false
+    default: ""
   bot-username:
     description: Bot account login name
     required: false
@@ -47,8 +51,15 @@ runs:
     - name: Set up OpenCode
       shell: bash
       run: |
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64)  PLATFORM=linux-x64 ;;
+          aarch64) PLATFORM=linux-arm64 ;;
+          arm64)   PLATFORM=linux-arm64 ;;
+          *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+        esac
         mkdir -p ~/.local/bin
-        curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
+        curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-${PLATFORM}.tar.gz" \
           -o /tmp/opencode.tar.gz
         tar -xzf /tmp/opencode.tar.gz -C /tmp
         mv /tmp/opencode ~/.local/bin/opencode
@@ -67,6 +78,7 @@ runs:
         GITHUB_EVENT_PATH: ${{ github.event_path }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_WORKSPACE: ${{ github.workspace }}
+        LITELLM_AI_KEY: ${{ inputs.litellm-api-key }}
         OPENCODE_CONFIG: /tmp/jumi/.gitea/opencode.json
       run: bun run src/main.ts
       working-directory: /tmp/jumi/scripts/opencode
