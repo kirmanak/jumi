@@ -1,10 +1,10 @@
 import type {
   GiteaComment,
   GiteaIssue,
-  GiteaPermission,
   GiteaPR,
   GiteaPRFile,
   GiteaReview,
+  GiteaUser,
 } from "./types.ts";
 
 /**
@@ -80,14 +80,8 @@ export class GiteaAPI {
 
   // ── Permissions ──────────────────────────────────────────────────────────────
 
-  async getCollaboratorPermission(
-    owner: string,
-    repo: string,
-    username: string
-  ): Promise<GiteaPermission> {
-    return this.get<GiteaPermission>(
-      `/repos/${owner}/${repo}/collaborators/${username}/permission`
-    );
+  async getAssignees(owner: string, repo: string): Promise<GiteaUser[]> {
+    return this.getAll<GiteaUser>(`/repos/${owner}/${repo}/assignees`);
   }
 
   /** Returns true if the user has at least "write" access */
@@ -96,13 +90,8 @@ export class GiteaAPI {
     repo: string,
     username: string
   ): Promise<boolean> {
-    if (username === owner) return true;
-    try {
-      const perm = await this.getCollaboratorPermission(owner, repo, username);
-      return ["owner", "admin", "write"].includes(perm.role);
-    } catch {
-      return false;
-    }
+    const assignees = await this.getAssignees(owner, repo);
+    return assignees.some((a) => a.login === username);
   }
 
   // ── Reactions ────────────────────────────────────────────────────────────────

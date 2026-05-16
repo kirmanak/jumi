@@ -28,7 +28,9 @@ export interface GiteaLabel {
 }
 
 export interface GiteaPermission {
-  role: "owner" | "admin" | "write" | "read" | "none";
+  permission: string;
+  role_name: string;
+  user: GiteaUser;
 }
 
 // ── Issue / Comment ──────────────────────────────────────────────────────────

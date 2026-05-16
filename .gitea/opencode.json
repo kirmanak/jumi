@@ -1,16 +1,36 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "small_model": "github-copilot/gpt-5-mini",
+  "model": "litellm/large",
+  "small_model": "litellm/small",
   "provider": {
-    "opencode-go": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM",
       "options": {
-        "apiKey": "{env:OPENCODE_GO_API_KEY}"
+        "baseURL": "https://litellm.kirmanak.stream/v1",
+        "apiKey": "{env:LITELLM_AI_KEY}"
+      },
+      "models": {
+        "large": {
+          "name": "LiteLLM (Large)",
+          "reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content"
+          }
+        },
+        "small": {
+          "name": "LiteLLM (Small)",
+          "reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content"
+          }
+        }
       }
-    },
-    "github-copilot": {
-      "options": {
-        "apiKey": "{env:COPILOT_GITHUB_KEY}"
-      }
+    }
+  },
+  "agent": {
+    "compaction": {
+      "model": "litellm/small"
     }
   },
   "share": "disabled",
@@ -18,6 +38,7 @@
     "external_directory": "allow",
     "doom_loop": "deny",
     "bash": "allow",
-    "read": "allow"
+    "read": "allow",
+    "question": "deny"
   }
 }

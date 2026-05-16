@@ -183,6 +183,29 @@ ${formatReviews(reviews)}
 Please address the request in the trigger comment above.`;
 }
 
+// ── Caveman-review skill ────────────────────────────────────────────────────
+
+const CAVEMAN_REVIEW_SKILL = `Write code review comments terse and actionable. One line per finding. Location, problem, fix. No throat-clearing.
+
+Focus on correctness and whether the change leaves the repository in a working condition. Do NOT comment on style, naming, formatting, micro-optimizations, or minor improvements that can be added later. Only flag issues that cause bugs, break compatibility, or introduce fragile patterns.
+
+Format: \`L<line>: <problem>. <fix>.\` — or \`<file>:L<line>: ...\` when reviewing multi-file diffs.
+
+Severity prefix (optional, when mixed):
+- 🔴 bug: — broken behavior, will cause incident
+- 🟡 risk: — works but fragile (race, missing null check, swallowed error)
+- ❓ q: — genuine question, not a suggestion
+
+Do NOT use any nit/style severity level. Style and naming suggestions are out of scope for this review.
+
+Drop: "I noticed that...", "It seems like...", "You might want to consider...", "This is just a suggestion but...", "Great work!" / "Looks good overall but..." (say it once at the top, not per comment), restating what the line does (the reviewer can read the diff), hedging ("perhaps", "maybe", "I think" — if unsure use q:), any comment about style/naming/formatting/micro-optimizations.
+
+Keep: exact line numbers, exact symbol/function/variable names in backticks, concrete fix (not "consider refactoring this"), the *why* if the fix isn't obvious from the problem statement.
+
+Auto-Clarity: drop terse mode for security findings (CVE-class bugs need full explanation + reference), architectural disagreements (need rationale, not just a one-liner), and onboarding contexts where the author is new and needs the "why". In those cases write a normal paragraph, then resume terse for the rest.
+
+Boundaries: reviews only — does not write the code fix, does not approve/request-changes, does not run linters. Output the comment(s) ready to paste into the PR. "stop caveman-review" or "normal mode": revert to verbose review style.`;
+
 // ── PR opened (auto-review) prompt ──────────────────────────────────────────
 
 export interface PROpenedPromptOptions {
@@ -208,10 +231,14 @@ ${formatPRFiles(prFiles)}
   </pull_request>
 </gitea_action_context>
 
-Please review the pull request above. Provide a concise review comment covering:
-- Overall assessment
-- Any bugs, security issues, or correctness concerns
-- Style or best-practice suggestions (if significant)
+Review the pull request above using the caveman-review skill below.
 
+<caveman-review-skill>
+${CAVEMAN_REVIEW_SKILL}
+</caveman-review-skill>
+
+Follow the format strictly: one line per finding as \`L<line>: <severity prefix:> <problem>. <fix>.\`
+Start with a one-line overall assessment, then list findings.
+Only comment on bugs, risks, and questions — skip all style, naming, and minor suggestions.
 Do NOT make any file changes. Respond with a plain markdown comment only.`;
 }
