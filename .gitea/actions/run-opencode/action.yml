@@ -8,13 +8,6 @@ inputs:
   opencode-model:
     description: OpenCode model identifier
     required: true
-  opencode-go-api-key:
-    description: OpenCode Go API key
-    required: true
-  copilot-github-key:
-    description: Copilot GitHub key
-    required: false
-    default: ""
   bot-username:
     description: Bot account login name
     required: false
@@ -33,7 +26,7 @@ runs:
         GITEA_TOKEN: ${{ inputs.gitea-token }}
       run: |
         mkdir -p /tmp/jumi
-        curl -sL -H "Authorization: token ${GITEA_TOKEN}" \
+        curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" \
           "${{ github.server_url }}/api/v1/repos/personal/jumi/archive/main.tar.gz" \
           | tar xz -C /tmp/jumi --strip-components=1
 
@@ -44,7 +37,7 @@ runs:
     - name: Set up Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       with:
-        bun-version: latest
+        bun-version: ${{ env.BUN_VERSION }}
 
     - name: Install script dependencies
       shell: bash
@@ -55,13 +48,11 @@ runs:
       shell: bash
       run: |
         mkdir -p ~/.local/bin
-        if [ ! -e ~/.local/bin/opencode ]; then
-          curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
-            -o /tmp/opencode.tar.gz
-          tar -xzf /tmp/opencode.tar.gz -C /tmp
-          mv /tmp/opencode ~/.local/bin/opencode
-          chmod 755 ~/.local/bin/opencode
-        fi
+        curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
+          -o /tmp/opencode.tar.gz
+        tar -xzf /tmp/opencode.tar.gz -C /tmp
+        mv /tmp/opencode ~/.local/bin/opencode
+        chmod 755 ~/.local/bin/opencode
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run OpenCode agent
@@ -76,8 +67,6 @@ runs:
         GITHUB_EVENT_PATH: ${{ github.event_path }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_WORKSPACE: ${{ github.workspace }}
-        OPENCODE_GO_API_KEY: ${{ inputs.opencode-go-api-key }}
-        COPILOT_GITHUB_KEY: ${{ inputs.copilot-github-key }}
         OPENCODE_CONFIG: /tmp/jumi/.gitea/opencode.json
       run: bun run src/main.ts
       working-directory: /tmp/jumi/scripts/opencode

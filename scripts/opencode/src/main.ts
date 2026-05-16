@@ -171,12 +171,14 @@ async function handleIssueComment(
         api.getPRReviews(owner, repo, issue.number),
       ]);
 
-      if (pr.head.repo.full_name !== payload.repository.full_name) {
+      if (!pr.head.repo || pr.head.repo.full_name !== payload.repository.full_name) {
         await api.updateComment(
           owner,
           repo,
           placeholder.id,
-          "Cross-repository pull requests are not supported."
+          pr.head.repo
+            ? "Cross-repository pull requests are not supported."
+            : "The source repository for this pull request is no longer available."
         );
         return;
       }
