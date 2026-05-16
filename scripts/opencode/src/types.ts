@@ -65,7 +65,8 @@ export interface GiteaPRBranch {
   label: string;
   ref: string;
   sha: string;
-  repo: GiteaRepo;
+  /** null when the source repo (e.g. fork) has been deleted */
+  repo: GiteaRepo | null;
   repo_id: number;
 }
 
