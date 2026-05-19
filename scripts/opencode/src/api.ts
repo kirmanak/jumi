@@ -1,10 +1,7 @@
 import type {
   GiteaComment,
-  GiteaIssue,
   GiteaPR,
   GiteaPRFile,
-  GiteaReview,
-  GiteaUser,
 } from "./types.ts";
 
 /**
@@ -57,12 +54,6 @@ export class GiteaAPI {
   private post<T>(path: string, body: unknown) {
     return this.request<T>("POST", path, body);
   }
-  private patch<T>(path: string, body: unknown) {
-    return this.request<T>("PATCH", path, body);
-  }
-  private delete<T = void>(path: string, body?: unknown) {
-    return this.request<T>("DELETE", path, body);
-  }
 
   // Paginated GET — collects all pages (page size 50)
   private async getAll<T>(path: string): Promise<T[]> {
@@ -76,92 +67,6 @@ export class GiteaAPI {
       page++;
     }
     return results;
-  }
-
-  // ── Permissions ──────────────────────────────────────────────────────────────
-
-  async getAssignees(owner: string, repo: string): Promise<GiteaUser[]> {
-    return this.getAll<GiteaUser>(`/repos/${owner}/${repo}/assignees`);
-  }
-
-  /** Returns true if the user has at least "write" access */
-  async hasWriteAccess(
-    owner: string,
-    repo: string,
-    username: string
-  ): Promise<boolean> {
-    const assignees = await this.getAssignees(owner, repo);
-    return assignees.some((a) => a.login === username);
-  }
-
-  // ── Reactions ────────────────────────────────────────────────────────────────
-
-  async addCommentReaction(
-    owner: string,
-    repo: string,
-    commentId: number,
-    content: string // e.g. "eyes", "+1", "rocket"
-  ): Promise<void> {
-    await this.post<unknown>(
-      `/repos/${owner}/${repo}/issues/comments/${commentId}/reactions`,
-      { content }
-    );
-  }
-
-  async deleteCommentReaction(
-    owner: string,
-    repo: string,
-    commentId: number,
-    content: string
-  ): Promise<void> {
-    await this.delete(
-      `/repos/${owner}/${repo}/issues/comments/${commentId}/reactions`,
-      { content }
-    );
-  }
-
-  // ── Issues ────────────────────────────────────────────────────────────────────
-
-  async getIssue(
-    owner: string,
-    repo: string,
-    index: number
-  ): Promise<GiteaIssue> {
-    return this.get<GiteaIssue>(`/repos/${owner}/${repo}/issues/${index}`);
-  }
-
-  async getIssueComments(
-    owner: string,
-    repo: string,
-    index: number
-  ): Promise<GiteaComment[]> {
-    return this.getAll<GiteaComment>(
-      `/repos/${owner}/${repo}/issues/${index}/comments`
-    );
-  }
-
-  async createIssueComment(
-    owner: string,
-    repo: string,
-    index: number,
-    body: string
-  ): Promise<GiteaComment> {
-    return this.post<GiteaComment>(
-      `/repos/${owner}/${repo}/issues/${index}/comments`,
-      { body }
-    );
-  }
-
-  async updateComment(
-    owner: string,
-    repo: string,
-    commentId: number,
-    body: string
-  ): Promise<GiteaComment> {
-    return this.patch<GiteaComment>(
-      `/repos/${owner}/${repo}/issues/comments/${commentId}`,
-      { body }
-    );
   }
 
   // ── Pull Requests ─────────────────────────────────────────────────────────────
@@ -180,41 +85,17 @@ export class GiteaAPI {
     );
   }
 
-  async getPRReviews(
-    owner: string,
-    repo: string,
-    index: number
-  ): Promise<GiteaReview[]> {
-    // Gitea returns reviews with empty comments array; we enrich them below
-    const reviews = await this.getAll<GiteaReview>(
-      `/repos/${owner}/${repo}/pulls/${index}/reviews`
-    );
-    // Fetch inline comments for each review in parallel
-    const enriched = await Promise.all(
-      reviews.map(async (r) => {
-        try {
-          const comments = await this.getAll<
-            import("./types.ts").GiteaReviewComment
-          >(`/repos/${owner}/${repo}/pulls/${index}/reviews/${r.id}/comments`);
-          return { ...r, comments };
-        } catch {
-          return r;
-        }
-      })
-    );
-    return enriched;
-  }
+  // ── Issues / Comments ─────────────────────────────────────────────────────────
 
-  async createPR(
+  async createIssueComment(
     owner: string,
     repo: string,
-    opts: {
-      title: string;
-      body: string;
-      head: string;
-      base: string;
-    }
-  ): Promise<GiteaPR> {
-    return this.post<GiteaPR>(`/repos/${owner}/${repo}/pulls`, opts);
+    index: number,
+    body: string
+  ): Promise<GiteaComment> {
+    return this.post<GiteaComment>(
+      `/repos/${owner}/${repo}/issues/${index}/comments`,
+      { body }
+    );
   }
 }

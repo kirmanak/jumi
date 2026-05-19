@@ -33,7 +33,6 @@ This repository can also run OpenCode on itself. The following workflows are ena
 
 | Workflow | Trigger | Description |
 |----------|---------|-------------|
-| `opencode.yml` | `/oc` or `/opencode` comment on issues/PRs | Runs the OpenCode agent interactively |
 | `opencode-review.yml` | Pull request creation/update | Auto-reviews PRs with OpenCode |
 
 ### Required Configuration
@@ -56,7 +55,6 @@ The following secrets and variables must be configured in the repository:
   opencode.json        # OpenCode agent configuration
   tool-versions.env    # Pinned OPENCODE_VERSION (managed by Renovate)
   workflows/
-    opencode.yml       # Interactive /oc command handler
     opencode-review.yml # PR auto-review
 scripts/
   opencode/            # OpenCode Gitea agent (Bun/TS)
