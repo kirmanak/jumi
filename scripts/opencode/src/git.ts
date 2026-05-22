@@ -25,12 +25,14 @@ export async function runOpenCode(
   await Bun.write(tmpPath, prompt);
 
   try {
-    const proc = Bun.spawn(["opencode", "run", "--print-logs", "-m", model], {
-      cwd: workdir,
-      stdin: Bun.file(tmpPath),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const proc = Bun.spawn(
+      ["opencode", "run", "--print-logs", "--dir", workdir, "-m", model],
+      {
+        stdin: Bun.file(tmpPath),
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
 
     // Consume stdout, stderr, and the exit code concurrently.
     // Reading stderr in parallel is required to prevent a deadlock when the
