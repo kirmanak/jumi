@@ -9,7 +9,7 @@ jobs:
   image:
     runs-on: large-ubuntu-latest
     env:
-      IMAGE: gitea.kirmanak.stream/kirmanak/jumi-reviewer
+      IMAGE: gitea.kirmanak.stream/personal/jumi-reviewer
       REGISTRY: gitea.kirmanak.stream
 
     steps:

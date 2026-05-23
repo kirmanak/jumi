@@ -25,8 +25,8 @@ The service intentionally does not checkout or execute PR-head code. It reviews 
 The image workflow publishes:
 
 ```text
-gitea.kirmanak.stream/kirmanak/jumi-reviewer:<commit-sha>
-gitea.kirmanak.stream/kirmanak/jumi-reviewer:latest
+gitea.kirmanak.stream/personal/jumi-reviewer:<commit-sha>
+gitea.kirmanak.stream/personal/jumi-reviewer:latest
 ```
 
 Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml`:
@@ -39,7 +39,7 @@ Required repository variables:
 
 | Name | Description |
 |------|-------------|
-| `CONTAINER_REGISTRY_USER` | Gitea user that can push packages for `kirmanak` |
+| `CONTAINER_REGISTRY_USER` | Gitea user that can push packages for `personal` |
 
 Pull requests run the same lint/typecheck/test gate and build the image without publishing it.
 
