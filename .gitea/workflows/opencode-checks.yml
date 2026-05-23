@@ -31,7 +31,7 @@ jobs:
         working-directory: scripts/opencode
 
   image-build:
-    runs-on: ubuntu-latest
+    runs-on: large-ubuntu-latest
     needs: checks
 
     steps:
