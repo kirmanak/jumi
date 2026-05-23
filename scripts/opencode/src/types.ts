@@ -69,9 +69,19 @@ export interface GiteaPRFile {
 // ── Webhook payloads ─────────────────────────────────────────────────────────
 
 export interface GiteaPRPayload {
-  action: "opened" | "closed" | "reopened" | "synchronized" | "edited";
+  action: "opened" | "closed" | "reopened" | "synchronized" | "synchronize" | "edited";
   number: number;
   pull_request: GiteaPR;
   repository: GiteaRepo;
   sender: GiteaUser;
+}
+
+export interface ReviewJob {
+  delivery: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  action: GiteaPRPayload["action"];
+  headSha: string;
+  receivedAt: string;
 }

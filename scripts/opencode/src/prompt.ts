@@ -1,8 +1,4 @@
-import type {
-  GiteaPR,
-  GiteaPRFile,
-  GiteaRepo,
-} from "./types.ts";
+import type { GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
 /** Escape XML special characters in text content */
 function escapeXml(str: string): string {
@@ -26,9 +22,7 @@ function escapeCdata(str: string): string {
 function formatPRFiles(files: GiteaPRFile[]): string {
   return files
     .map((f) => {
-      const patch = f.patch
-        ? `\n      <patch><![CDATA[${escapeCdata(f.patch)}]]></patch>`
-        : "";
+      const patch = f.patch ? `\n      <patch><![CDATA[${escapeCdata(f.patch)}]]></patch>` : "";
       return (
         `    <file name="${escapeXml(f.filename)}" status="${f.status}" ` +
         `additions="${f.additions}" deletions="${f.deletions}">${patch}\n    </file>`
@@ -39,14 +33,14 @@ function formatPRFiles(files: GiteaPRFile[]): string {
 
 // ── Preamble ────────────────────────────────────────────────────────────────
 
-const PREAMBLE = `You are OpenCode, an AI coding assistant integrated into a Gitea repository.
+const PREAMBLE = `You are OpenCode, an AI code review assistant integrated into a Gitea repository.
 
 <rules>
-  <rule>Do NOT manually run git commit or git push — the workflow will handle that.</rule>
-  <rule>Do NOT add any text outside of file edits unless you are responding conversationally (i.e. if no code changes are needed, reply with a plain markdown comment).</rule>
-  <rule>When asked to make code changes, apply them directly to the files in the working directory.</rule>
-  <rule>Always write clear, idiomatic code that matches the style of the existing codebase.</rule>
-  <rule>If you cannot fulfill a request, explain why in plain text.</rule>
+  <rule>Do NOT edit files.</rule>
+  <rule>Do NOT run commands.</rule>
+  <rule>Do NOT manually run git commit or git push.</rule>
+  <rule>Review only the pull request context provided by the prompt.</rule>
+  <rule>Respond with a plain markdown PR review comment only.</rule>
 </rules>`;
 
 // ── Caveman-review skill ────────────────────────────────────────────────────
@@ -78,10 +72,14 @@ export interface PROpenedPromptOptions {
   repo: GiteaRepo;
   pr: GiteaPR;
   prFiles: GiteaPRFile[];
+  reviewNotes?: string[];
 }
 
 export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
-  const { repo, pr, prFiles } = opts;
+  const { repo, pr, prFiles, reviewNotes = [] } = opts;
+  const formattedNotes = reviewNotes.length
+    ? `\n  <review_notes>\n${reviewNotes.map((note) => `    <note>${escapeXml(note)}</note>`).join("\n")}\n  </review_notes>`
+    : "";
 
   return `${PREAMBLE}
 
@@ -94,7 +92,7 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
     <pull_request_changed_files>
 ${formatPRFiles(prFiles)}
     </pull_request_changed_files>
-  </pull_request>
+  </pull_request>${formattedNotes}
 </gitea_action_context>
 
 Review the pull request above using the caveman-review skill below.

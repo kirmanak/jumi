@@ -1,0 +1,80 @@
+import { describe, expect, test } from "bun:test";
+import { parsePullRequestPayload, validateWebhookPayload, verifyGiteaSignature } from "../src/webhook.ts";
+import { encodeJson, makePayload, makeRepo, signBody } from "./fixtures.ts";
+
+describe("verifyGiteaSignature", () => {
+  test("accepts valid signatures with or without sha256 prefix", async () => {
+    const body = new TextEncoder().encode("payload");
+    const signature = await signBody(body, "secret");
+
+    expect(await verifyGiteaSignature(body, "secret", signature)).toBe(true);
+    expect(await verifyGiteaSignature(body, "secret", `sha256=${signature}`)).toBe(true);
+  });
+
+  test("rejects missing and invalid signatures", async () => {
+    const body = new TextEncoder().encode("payload");
+
+    expect(await verifyGiteaSignature(body, "secret", null)).toBe(false);
+    expect(await verifyGiteaSignature(body, "secret", "bad-signature")).toBe(false);
+  });
+});
+
+describe("parsePullRequestPayload", () => {
+  test("parses a valid pull request payload", () => {
+    const payload = makePayload();
+    expect(parsePullRequestPayload(encodeJson(payload)).repository.full_name).toBe("kirmanak/demo");
+  });
+
+  test("rejects malformed payloads", () => {
+    expect(() => parsePullRequestPayload(encodeJson({ action: "opened" }))).toThrow("missing repository");
+    expect(() => parsePullRequestPayload(new TextEncoder().encode("not-json"))).toThrow();
+  });
+});
+
+describe("validateWebhookPayload", () => {
+  const policy = {
+    giteaUrl: "https://gitea.kirmanak.stream",
+    allowedOrgs: ["kirmanak"],
+    allowedRepos: [],
+  };
+
+  test("creates a review job for an allowed PR event", () => {
+    const result = validateWebhookPayload(makePayload(), policy);
+
+    expect("skip" in result).toBe(false);
+    if (!("skip" in result)) {
+      expect(result.owner).toBe("kirmanak");
+      expect(result.repo).toBe("demo");
+      expect(result.prNumber).toBe(7);
+      expect(result.headSha).toBe("headsha");
+    }
+  });
+
+  test("skips unsupported actions", () => {
+    expect(validateWebhookPayload(makePayload({ action: "closed" }), policy)).toEqual({
+      skip: "unsupported action closed",
+    });
+  });
+
+  test("rejects disallowed orgs, repos, and origins", () => {
+    expect(() =>
+      validateWebhookPayload(makePayload({ repository: makeRepo({ full_name: "evil/demo" }) }), policy)
+    ).toThrow("not allowed");
+
+    expect(() => validateWebhookPayload(makePayload(), { ...policy, allowedRepos: ["kirmanak/other"] })).toThrow(
+      "is not allowed"
+    );
+
+    expect(() =>
+      validateWebhookPayload(
+        makePayload({
+          repository: makeRepo({
+            html_url: "https://evil.test/kirmanak/demo",
+            clone_url: "https://evil.test/kirmanak/demo.git",
+          }),
+        }),
+        policy
+      )
+    ).toThrow("does not match configured Gitea origin");
+  });
+});

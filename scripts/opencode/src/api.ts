@@ -1,8 +1,4 @@
-import type {
-  GiteaComment,
-  GiteaPR,
-  GiteaPRFile,
-} from "./types.ts";
+import type { GiteaComment, GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
 /**
  * Minimal Gitea REST API client.
@@ -14,7 +10,7 @@ export class GiteaAPI {
 
   constructor(serverUrl: string, token: string) {
     // Ensure no trailing slash
-    this.base = serverUrl.replace(/\/$/, "") + "/api/v1";
+    this.base = `${serverUrl.replace(/\/$/, "")}/api/v1`;
     this.token = token;
   }
 
@@ -28,11 +24,7 @@ export class GiteaAPI {
     };
   }
 
-  private async request<T>(
-    method: string,
-    path: string,
-    body?: unknown
-  ): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.base}${path}`;
     const res = await fetch(url, {
       method,
@@ -54,6 +46,13 @@ export class GiteaAPI {
   private post<T>(path: string, body: unknown) {
     return this.request<T>("POST", path, body);
   }
+  private patch<T>(path: string, body: unknown) {
+    return this.request<T>("PATCH", path, body);
+  }
+
+  private repoPath(owner: string, repo: string): string {
+    return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  }
 
   // Paginated GET — collects all pages (page size 50)
   private async getAll<T>(path: string): Promise<T[]> {
@@ -69,33 +68,33 @@ export class GiteaAPI {
     return results;
   }
 
+  // ── Repositories ───────────────────────────────────────────────────────────
+
+  async getRepo(owner: string, repo: string): Promise<GiteaRepo> {
+    return this.get<GiteaRepo>(`/repos/${this.repoPath(owner, repo)}`);
+  }
+
   // ── Pull Requests ─────────────────────────────────────────────────────────────
 
   async getPR(owner: string, repo: string, index: number): Promise<GiteaPR> {
-    return this.get<GiteaPR>(`/repos/${owner}/${repo}/pulls/${index}`);
+    return this.get<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`);
   }
 
-  async getPRFiles(
-    owner: string,
-    repo: string,
-    index: number
-  ): Promise<GiteaPRFile[]> {
-    return this.getAll<GiteaPRFile>(
-      `/repos/${owner}/${repo}/pulls/${index}/files`
-    );
+  async getPRFiles(owner: string, repo: string, index: number): Promise<GiteaPRFile[]> {
+    return this.getAll<GiteaPRFile>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/files`);
   }
 
   // ── Issues / Comments ─────────────────────────────────────────────────────────
 
-  async createIssueComment(
-    owner: string,
-    repo: string,
-    index: number,
-    body: string
-  ): Promise<GiteaComment> {
-    return this.post<GiteaComment>(
-      `/repos/${owner}/${repo}/issues/${index}/comments`,
-      { body }
-    );
+  async createIssueComment(owner: string, repo: string, index: number, body: string): Promise<GiteaComment> {
+    return this.post<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`, { body });
+  }
+
+  async getIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]> {
+    return this.getAll<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`);
+  }
+
+  async updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment> {
+    return this.patch<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/comments/${commentId}`, { body });
   }
 }
