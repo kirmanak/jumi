@@ -13,16 +13,18 @@ afterEach(() => {
   else process.env.GITEA_BOT_TOKEN = originalSecret;
 });
 
-async function withFakeOpenCode(script: string, run: (binDir: string) => Promise<void>) {
+async function withFakeOpenCode(script: string, run: (binDir: string, workdir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "fake-opencode-"));
+  const workdir = await mkdtemp(join(tmpdir(), "fake-opencode-work-"));
   try {
     const bin = join(dir, "opencode");
     await writeFile(bin, script);
     await chmod(bin, 0o755);
     process.env.PATH = `${dir}:${originalPath ?? ""}`;
-    await run(dir);
+    await run(dir, workdir);
   } finally {
     await rm(dir, { recursive: true, force: true });
+    await rm(workdir, { recursive: true, force: true });
   }
 }
 
@@ -33,10 +35,10 @@ describe("runOpenCode", () => {
       `#!/bin/sh
 printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s SECRET=%s ARGS=%s\\033[0m\n' "$HOME" "$OPENCODE_MODEL" "$OPENCODE_CONFIG" "$OPENCODE_DISABLE_PROJECT_CONFIG" "$GITEA_BOT_TOKEN" "$*"
 `,
-      async () => {
+      async (_binDir, workdir) => {
         const output = await runOpenCode("prompt", {
           model: "openai/gpt-5.5",
-          workdir: "/work",
+          workdir,
           configPath: "/config.json",
           home: "/data",
           sanitizeEnv: true,
@@ -47,7 +49,8 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s SECRET=%s ARGS=%s\\033[0m
         expect(output).toContain("CONFIG=/config.json");
         expect(output).toContain("DISABLE=1");
         expect(output).toContain("SECRET=");
-        expect(output).toContain("--dir /work -m openai/gpt-5.5");
+        expect(output).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
+        expect(output).not.toContain("--print-logs");
         expect(output).not.toContain("\u001b[");
       }
     );
@@ -58,10 +61,10 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s SECRET=%s ARGS=%s\\033[0m
       `#!/bin/sh
 printf 'abcdefghijklmnopqrstuvwxyz'
 `,
-      async () => {
+      async (_binDir, workdir) => {
         const output = await runOpenCode("prompt", {
           model: "model",
-          workdir: "/work",
+          workdir,
           maxOutputBytes: 5,
           sanitizeEnv: true,
         });
@@ -77,9 +80,25 @@ printf 'abcdefghijklmnopqrstuvwxyz'
 printf 'bad things' >&2
 exit 7
 `,
-      async () => {
-        await expect(runOpenCode("prompt", { model: "model", workdir: "/work", sanitizeEnv: true })).rejects.toThrow(
+      async (_binDir, workdir) => {
+        await expect(runOpenCode("prompt", { model: "model", workdir, sanitizeEnv: true })).rejects.toThrow(
           "opencode exited with code 7:\nbad things"
+        );
+      }
+    );
+  });
+
+  test("caps stderr captured from failed opencode runs", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+python3 - <<'PY' >&2
+print('x' * 100000)
+PY
+exit 7
+`,
+      async (_binDir, workdir) => {
+        await expect(runOpenCode("prompt", { model: "model", workdir, sanitizeEnv: true })).rejects.toThrow(
+          "[opencode stderr truncated at"
         );
       }
     );
