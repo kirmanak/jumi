@@ -2,6 +2,7 @@ import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
 import type { GiteaComment, GiteaCommitStatusPayload, GiteaPR, GiteaPRFile, GiteaRepo, ReviewJob } from "./types.ts";
+import { checkoutPullRequestWorkspace } from "./workspace.ts";
 
 export interface ReviewApi {
   getRepo(owner: string, repo: string): Promise<GiteaRepo>;
@@ -19,6 +20,15 @@ export interface ReviewApi {
 }
 
 export type OpenCodeRunner = (prompt: string, opts: OpenCodeRunOptions) => Promise<string>;
+export type WorkspacePreparer = (opts: {
+  workdir: string;
+  repo: GiteaRepo;
+  pr: GiteaPR;
+  giteaUrl: string;
+  username: string;
+  token: string;
+  logger?: (message: string) => void;
+}) => Promise<void>;
 
 export interface ReviewOptions {
   api: ReviewApi;
@@ -28,6 +38,8 @@ export interface ReviewOptions {
   expectedHeadSha?: string;
   model: string;
   workspace: string;
+  giteaUrl: string;
+  giteaToken: string;
   botUsername: string;
   opencodeConfig?: string;
   home?: string;
@@ -37,6 +49,7 @@ export interface ReviewOptions {
   maxPatchBytes?: number;
   maxOutputBytes?: number;
   openCodeRunner?: OpenCodeRunner;
+  workspacePreparer?: WorkspacePreparer;
   logger?: (message: string) => void;
 }
 
@@ -180,7 +193,20 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       opts.api.getPRFiles(opts.owner, opts.repo, pr.number),
     ]);
 
-    const { files, notes } = prepareFiles(prFiles, opts.maxFiles ?? 100, opts.maxPatchBytes ?? 500_000);
+    const maxFiles = opts.maxFiles ?? 100;
+    const maxPatchBytes = opts.maxPatchBytes ?? 500_000;
+    const { files, notes } = prepareFiles(prFiles, maxFiles, maxPatchBytes);
+
+    const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
+    await prepareWorkspace({
+      workdir: opts.workspace,
+      repo: repoInfo,
+      pr,
+      giteaUrl: opts.giteaUrl,
+      username: opts.botUsername,
+      token: opts.giteaToken,
+      logger: log,
+    });
 
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,

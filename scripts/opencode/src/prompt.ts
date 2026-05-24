@@ -36,10 +36,12 @@ function formatPRFiles(files: GiteaPRFile[]): string {
 const PREAMBLE = `You are OpenCode, an AI code review assistant integrated into a Gitea repository.
 
 <rules>
+  <rule>The current working directory is a full checkout of the pull request head.</rule>
+  <rule>Use the checked-out repository for review. Navigate files with read/list/glob/grep tools.</rule>
+  <rule>If shell access is available, use the configured read-only git command allowlist to inspect diffs, history, refs, and commits.</rule>
+  <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
   <rule>Do NOT edit files.</rule>
-  <rule>Do NOT run commands.</rule>
-  <rule>Do NOT manually run git commit or git push.</rule>
-  <rule>Review only the pull request context provided by the prompt.</rule>
+  <rule>Do NOT run mutating git commands, builds, package installs, or arbitrary network shell commands.</rule>
   <rule>Respond with a plain markdown PR review comment only.</rule>
 </rules>`;
 
@@ -85,6 +87,7 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
 
 <gitea_action_context>
   <repository full_name="${escapeXml(repo.full_name)}" default_branch="${escapeXml(repo.default_branch)}" />
+  <repository_checkout path="." local_branch="jumi/pr-${pr.number}" head_branch="${escapeXml(pr.head.ref)}" head_sha="${escapeXml(pr.head.sha)}" target_branch="${escapeXml(pr.base.ref)}" target_ref="jumi/target" target_remote_ref="origin/${escapeXml(pr.base.ref)}" target_sha="${escapeXml(pr.base.sha)}" />
 
   <pull_request number="${pr.number}" state="${pr.state}" author="${escapeXml(pr.user.login)}" created_at="${pr.created_at}" head="${escapeXml(pr.head.ref)}" base="${escapeXml(pr.base.ref)}">
     <title>${escapeXml(pr.title)}</title>
@@ -95,7 +98,9 @@ ${formatPRFiles(prFiles)}
   </pull_request>${formattedNotes}
 </gitea_action_context>
 
-Review the pull request above using the caveman-review skill below.
+Review the pull request above using the checked-out repository and the caveman-review skill below. The PR head is checked out on jumi/pr-${pr.number}; the stable target ref is jumi/target. Prefer stable refs like jumi/target and HEAD in shell commands instead of untrusted branch names.
+
+The shell allowlist includes common read-only git inspection commands: git diff variants for jumi/target...HEAD, git log variants for jumi/target..HEAD, git show for HEAD and jumi/target, git ls-files, git rev-parse, git merge-base, selected git branch queries, and git remote -v. Use web search/fetch to check upstream docs when correctness depends on external behavior. Do not run commands that mutate the checkout, fetch new refs, build the project, install packages, or make network calls from the shell.
 
 <caveman-review-skill>
 ${CAVEMAN_REVIEW_SKILL}

@@ -50,6 +50,8 @@ export function createReviewQueue(
           expectedHeadSha: job.headSha,
           model: config.model,
           workspace,
+          giteaUrl: config.giteaUrl,
+          giteaToken: config.giteaToken,
           botUsername: config.botUsername,
           opencodeConfig: config.opencodeConfig,
           home: config.home,

@@ -22,7 +22,10 @@ const baseOptions = {
   prNumber: 7,
   model: "openai/gpt-5.5",
   workspace: "/work",
+  giteaUrl: "https://gitea.kirmanak.stream",
+  giteaToken: "bot-token",
   botUsername: "jumi",
+  workspacePreparer: async () => undefined,
   logger: () => undefined,
 };
 
@@ -214,6 +217,52 @@ describe("reviewPullRequest", () => {
     expect(getPRCalls).toBe(2);
     expect(commentRead).toBe(false);
     expect(created).toBe(false);
+  });
+
+  test("checks out the repository before running OpenCode and tells it the target branch", async () => {
+    let checkout: unknown;
+    let prompt = "";
+    let runnerWorkdir = "";
+
+    await reviewPullRequest({
+      ...baseOptions,
+      api: makeApi({ getPR: async () => makePR({ base: makeBranch({ ref: "main", sha: "basesha" }) }) }),
+      workspacePreparer: async (opts) => {
+        checkout = {
+          workdir: opts.workdir,
+          repo: opts.repo.full_name,
+          pr: opts.pr.number,
+          targetBranch: opts.pr.base.ref,
+          headSha: opts.pr.head.sha,
+          giteaUrl: opts.giteaUrl,
+          username: opts.username,
+          token: opts.token,
+        };
+      },
+      openCodeRunner: async (value, opts) => {
+        prompt = value;
+        runnerWorkdir = opts.workdir;
+        return "Review";
+      },
+    });
+
+    expect(checkout).toEqual({
+      workdir: "/work",
+      repo: "kirmanak/demo",
+      pr: 7,
+      targetBranch: "main",
+      headSha: "headsha",
+      giteaUrl: "https://gitea.kirmanak.stream",
+      username: "jumi",
+      token: "bot-token",
+    });
+    expect(runnerWorkdir).toBe("/work");
+    expect(prompt).toContain('target_branch="main"');
+    expect(prompt).toContain('target_ref="jumi/target"');
+    expect(prompt).toContain('target_remote_ref="origin/main"');
+    expect(prompt).toContain("stable refs like jumi/target and HEAD");
+    expect(prompt).toContain("git log variants for jumi/target..HEAD");
+    expect(prompt).toContain("web search/fetch");
   });
 
   test("adds review notes when file and patch limits are hit", async () => {

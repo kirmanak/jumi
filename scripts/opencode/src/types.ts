@@ -59,7 +59,7 @@ export interface GiteaPR {
 
 export interface GiteaPRFile {
   filename: string;
-  status: "added" | "modified" | "deleted" | "renamed";
+  status: "added" | "modified" | "changed" | "deleted" | "renamed";
   additions: number;
   deletions: number;
   changes: number;

@@ -16,6 +16,22 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("]]]]><![CDATA[>");
   });
 
+  test("includes checkout target branch context", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).toContain('local_branch="jumi/pr-7"');
+    expect(prompt).toContain('target_branch="main"');
+    expect(prompt).toContain('target_ref="jumi/target"');
+    expect(prompt).toContain('target_remote_ref="origin/main"');
+    expect(prompt).toContain("stable refs like jumi/target and HEAD");
+    expect(prompt).toContain("git log variants for jumi/target..HEAD");
+    expect(prompt).toContain("web search/fetch");
+  });
+
   test("includes review notes", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
