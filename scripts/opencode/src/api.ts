@@ -1,4 +1,4 @@
-import type { GiteaComment, GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
+import type { GiteaComment, GiteaCommitStatusPayload, GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
 /**
  * Minimal Gitea REST API client.
@@ -96,5 +96,19 @@ export class GiteaAPI {
 
   async updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment> {
     return this.patch<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/comments/${commentId}`, { body });
+  }
+
+  // ── Commit statuses ───────────────────────────────────────────────────────────
+
+  async createCommitStatus(
+    owner: string,
+    repo: string,
+    sha: string,
+    status: GiteaCommitStatusPayload
+  ): Promise<GiteaCommitStatusPayload> {
+    return this.post<GiteaCommitStatusPayload>(
+      `/repos/${this.repoPath(owner, repo)}/statuses/${encodeURIComponent(sha)}`,
+      status
+    );
   }
 }

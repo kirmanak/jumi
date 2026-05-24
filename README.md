@@ -4,7 +4,7 @@ Self-hosted Gitea PR review automation for the [`kirmanak`](https://gitea.kirman
 
 ## Reviewer Service
 
-`jumi-reviewer` is a long-running webhook service. Gitea sends pull request webhooks to the service, the service verifies the webhook, runs OpenCode with persisted ChatGPT/OpenAI auth, and posts or updates one sticky PR review comment.
+`jumi-reviewer` is a long-running webhook service. Gitea sends pull request webhooks to the service, the service verifies the webhook, runs OpenCode with persisted ChatGPT/OpenAI auth, posts a commit status on the PR head SHA, and posts or updates one sticky PR review comment.
 
 Flow:
 
@@ -15,7 +15,7 @@ Gitea org webhook
   -> signature/org validation
   -> single-worker review queue
   -> OpenCode review
-  -> sticky Gitea PR comment
+  -> commit status + sticky Gitea PR comment
 ```
 
 The service intentionally does not checkout or execute PR-head code. It reviews Gitea's PR metadata and file patches from the trusted Gitea API.
@@ -99,6 +99,8 @@ Create one Gitea organization webhook for `kirmanak`:
 | Secret | Same value as `GITEA_WEBHOOK_SECRET` |
 | Trigger On | Pull request events |
 | Active | Checked |
+
+The service processes `opened`, `reopened`, and new-commit synchronization actions only; PR description edits are acknowledged and skipped.
 
 The service also exposes:
 

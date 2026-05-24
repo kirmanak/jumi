@@ -39,6 +39,11 @@ describe("GiteaAPI", () => {
     const api = new GiteaAPI("https://gitea.example.test", "token-1");
     await api.createIssueComment("owner", "repo", 7, "new body");
     await api.updateIssueComment("owner", "repo", 9, "updated body");
+    await api.createCommitStatus("owner", "repo", "sha/1", {
+      state: "pending",
+      context: "jumi/opencode-review",
+      description: "running",
+    });
 
     expect(requests[0]).toEqual({
       url: "https://gitea.example.test/api/v1/repos/owner/repo/issues/7/comments",
@@ -49,6 +54,11 @@ describe("GiteaAPI", () => {
       url: "https://gitea.example.test/api/v1/repos/owner/repo/issues/comments/9",
       method: "PATCH",
       body: JSON.stringify({ body: "updated body" }),
+    });
+    expect(requests[2]).toEqual({
+      url: "https://gitea.example.test/api/v1/repos/owner/repo/statuses/sha%2F1",
+      method: "POST",
+      body: JSON.stringify({ state: "pending", context: "jumi/opencode-review", description: "running" }),
     });
   });
 

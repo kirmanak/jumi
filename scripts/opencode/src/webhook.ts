@@ -6,7 +6,7 @@ export interface WebhookPolicy {
   allowedRepos: readonly string[];
 }
 
-const REVIEW_ACTIONS = new Set(["opened", "reopened", "synchronized", "synchronize", "edited"]);
+const REVIEW_ACTIONS = new Set(["opened", "reopened", "synchronized", "synchronize"]);
 const encoder = new TextEncoder();
 
 function toHex(bytes: Uint8Array): string {

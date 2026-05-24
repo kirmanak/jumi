@@ -38,19 +38,25 @@ describe("validateWebhookPayload", () => {
     allowedRepos: [],
   };
 
-  test("creates a review job for an allowed PR event", () => {
-    const result = validateWebhookPayload(makePayload(), policy);
+  test("creates a review job for opened, reopened, and new-commit PR events", () => {
+    for (const action of ["opened", "reopened", "synchronized", "synchronize"]) {
+      const result = validateWebhookPayload(makePayload({ action }), policy);
 
-    expect("skip" in result).toBe(false);
-    if (!("skip" in result)) {
-      expect(result.owner).toBe("kirmanak");
-      expect(result.repo).toBe("demo");
-      expect(result.prNumber).toBe(7);
-      expect(result.headSha).toBe("headsha");
+      expect("skip" in result).toBe(false);
+      if (!("skip" in result)) {
+        expect(result.owner).toBe("kirmanak");
+        expect(result.repo).toBe("demo");
+        expect(result.prNumber).toBe(7);
+        expect(result.headSha).toBe("headsha");
+        expect(result.action).toBe(action);
+      }
     }
   });
 
-  test("skips unsupported actions", () => {
+  test("skips description edits and unsupported actions", () => {
+    expect(validateWebhookPayload(makePayload({ action: "edited" }), policy)).toEqual({
+      skip: "unsupported action edited",
+    });
     expect(validateWebhookPayload(makePayload({ action: "closed" }), policy)).toEqual({
       skip: "unsupported action closed",
     });

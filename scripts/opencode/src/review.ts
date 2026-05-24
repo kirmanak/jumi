@@ -1,7 +1,7 @@
 import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
-import type { GiteaComment, GiteaPR, GiteaPRFile, GiteaRepo, ReviewJob } from "./types.ts";
+import type { GiteaComment, GiteaCommitStatusPayload, GiteaPR, GiteaPRFile, GiteaRepo, ReviewJob } from "./types.ts";
 
 export interface ReviewApi {
   getRepo(owner: string, repo: string): Promise<GiteaRepo>;
@@ -10,6 +10,12 @@ export interface ReviewApi {
   getIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]>;
   createIssueComment(owner: string, repo: string, index: number, body: string): Promise<GiteaComment>;
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment>;
+  createCommitStatus(
+    owner: string,
+    repo: string,
+    sha: string,
+    status: GiteaCommitStatusPayload
+  ): Promise<GiteaCommitStatusPayload>;
 }
 
 export type OpenCodeRunner = (prompt: string, opts: OpenCodeRunOptions) => Promise<string>;
@@ -56,6 +62,52 @@ function markerFor(owner: string, repo: string, prNumber: number): string {
 
 function buildCommentBody(marker: string, headSha: string, output: string): string {
   return `${marker}\n### Jumi OpenCode review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`;
+}
+
+const CHECK_CONTEXT = "jumi/opencode-review";
+const MAX_STATUS_DESCRIPTION_BYTES = 255;
+
+function truncateStatusDescription(description: string): string {
+  const bytes = encoder.encode(description);
+  if (bytes.byteLength <= MAX_STATUS_DESCRIPTION_BYTES) return description;
+  const suffix = "…";
+  const budget = MAX_STATUS_DESCRIPTION_BYTES - encoder.encode(suffix).byteLength;
+  const chars: string[] = [];
+  let used = 0;
+
+  for (const char of description) {
+    const charBytes = encoder.encode(char).byteLength;
+    if (used + charBytes > budget) break;
+    chars.push(char);
+    used += charBytes;
+  }
+
+  return `${chars.join("").replace(/\p{Mark}+$/u, "")}${suffix}`;
+}
+
+async function postReviewStatus(
+  opts: ReviewOptions,
+  headSha: string,
+  state: GiteaCommitStatusPayload["state"],
+  description: string,
+  targetUrl?: string
+): Promise<void> {
+  await opts.api.createCommitStatus(opts.owner, opts.repo, headSha, {
+    state,
+    context: CHECK_CONTEXT,
+    description: truncateStatusDescription(description),
+    target_url: targetUrl,
+  });
+}
+
+function statusDescriptionForResult(result: ReviewResult): string {
+  if (result.status === "posted") return "Jumi review posted";
+  if (result.status === "updated") return "Jumi review updated";
+  return `Jumi review skipped: ${result.reason ?? "not needed"}`;
+}
+
+function statusStateForResult(result: ReviewResult): GiteaCommitStatusPayload["state"] {
+  return result.status === "skipped" ? "warning" : "success";
 }
 
 function skipReasonForPR(pr: GiteaPR): string | undefined {
@@ -119,50 +171,99 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   const initialSkipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, reviewedHeadSha);
   if (initialSkipReason) return { status: "skipped", reason: initialSkipReason };
 
-  log(`Fetching ${repoFullName}#${pr.number} files`);
-  const [repoInfo, prFiles] = await Promise.all([
-    opts.api.getRepo(opts.owner, opts.repo),
-    opts.api.getPRFiles(opts.owner, opts.repo, pr.number),
-  ]);
+  await postReviewStatus(opts, reviewedHeadSha, "pending", "Jumi review is running", pr.html_url);
 
-  const { files, notes } = prepareFiles(prFiles, opts.maxFiles ?? 100, opts.maxPatchBytes ?? 500_000);
+  try {
+    log(`Fetching ${repoFullName}#${pr.number} files`);
+    const [repoInfo, prFiles] = await Promise.all([
+      opts.api.getRepo(opts.owner, opts.repo),
+      opts.api.getPRFiles(opts.owner, opts.repo, pr.number),
+    ]);
 
-  const prompt = buildPROpenedPrompt({
-    repo: repoInfo,
-    pr,
-    prFiles: files,
-    reviewNotes: notes,
-  });
+    const { files, notes } = prepareFiles(prFiles, opts.maxFiles ?? 100, opts.maxPatchBytes ?? 500_000);
 
-  log(`Running OpenCode for ${repoFullName}#${pr.number}`);
-  const output = await openCodeRunner(prompt, {
-    model: opts.model,
-    workdir: opts.workspace,
-    configPath: opts.opencodeConfig,
-    home: opts.home,
-    sanitizeEnv: opts.sanitizeOpenCodeEnv,
-    timeoutMs: opts.timeoutMs,
-    maxOutputBytes: opts.maxOutputBytes,
-  });
+    const prompt = buildPROpenedPrompt({
+      repo: repoInfo,
+      pr,
+      prFiles: files,
+      reviewNotes: notes,
+    });
 
-  if (!output.trim()) {
-    return { status: "skipped", reason: "OpenCode produced no output" };
+    log(`Running OpenCode for ${repoFullName}#${pr.number}`);
+    const output = await openCodeRunner(prompt, {
+      model: opts.model,
+      workdir: opts.workspace,
+      configPath: opts.opencodeConfig,
+      home: opts.home,
+      sanitizeEnv: opts.sanitizeOpenCodeEnv,
+      timeoutMs: opts.timeoutMs,
+      maxOutputBytes: opts.maxOutputBytes,
+    });
+
+    if (!output.trim()) {
+      const result: ReviewResult = { status: "skipped", reason: "OpenCode produced no output" };
+      await postReviewStatus(
+        opts,
+        reviewedHeadSha,
+        statusStateForResult(result),
+        statusDescriptionForResult(result),
+        pr.html_url
+      );
+      return result;
+    }
+
+    const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+    const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
+    if (currentSkipReason) {
+      const result: ReviewResult = { status: "skipped", reason: currentSkipReason };
+      await postReviewStatus(
+        opts,
+        reviewedHeadSha,
+        statusStateForResult(result),
+        statusDescriptionForResult(result),
+        currentPR.html_url
+      );
+      return result;
+    }
+
+    const marker = markerFor(opts.owner, opts.repo, currentPR.number);
+    const body = buildCommentBody(marker, reviewedHeadSha, output);
+    const comments = await opts.api.getIssueComments(opts.owner, opts.repo, currentPR.number);
+    const existing = comments.find(
+      (comment) => comment.user.login === opts.botUsername && comment.body.includes(marker)
+    );
+
+    if (existing) {
+      const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
+      const result: ReviewResult = { status: "updated", commentId: updated.id };
+      await postReviewStatus(
+        opts,
+        reviewedHeadSha,
+        statusStateForResult(result),
+        statusDescriptionForResult(result),
+        currentPR.html_url
+      );
+      return result;
+    }
+
+    const created = await opts.api.createIssueComment(opts.owner, opts.repo, currentPR.number, body);
+    const result: ReviewResult = { status: "posted", commentId: created.id };
+    await postReviewStatus(
+      opts,
+      reviewedHeadSha,
+      statusStateForResult(result),
+      statusDescriptionForResult(result),
+      currentPR.html_url
+    );
+    return result;
+  } catch (err) {
+    await postReviewStatus(
+      opts,
+      reviewedHeadSha,
+      "failure",
+      `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`,
+      pr.html_url
+    );
+    throw err;
   }
-
-  const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
-  const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
-  if (currentSkipReason) return { status: "skipped", reason: currentSkipReason };
-
-  const marker = markerFor(opts.owner, opts.repo, currentPR.number);
-  const body = buildCommentBody(marker, reviewedHeadSha, output);
-  const comments = await opts.api.getIssueComments(opts.owner, opts.repo, currentPR.number);
-  const existing = comments.find((comment) => comment.user.login === opts.botUsername && comment.body.includes(marker));
-
-  if (existing) {
-    const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
-    return { status: "updated", commentId: updated.id };
-  }
-
-  const created = await opts.api.createIssueComment(opts.owner, opts.repo, currentPR.number, body);
-  return { status: "posted", commentId: created.id };
 }
