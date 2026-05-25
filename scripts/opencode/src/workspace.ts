@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { GiteaPR, GiteaRepo, ReviewJob } from "./types.ts";
@@ -74,9 +73,48 @@ function validateCloneUrl(value: string, giteaUrl: string): string {
   return clone.toString();
 }
 
+function gitCredentialHelper(): string {
+  return [
+    "!f() {",
+    'if [ "$1" != "get" ]; then exit 0; fi;',
+    'protocol="";',
+    'host="";',
+    "while IFS= read -r line; do",
+    '[ -n "$line" ] || break;',
+    'case "$line" in',
+    `protocol=*) protocol="\${line#protocol=}" ;;`,
+    `host=*) host="\${line#host=}" ;;`,
+    "esac;",
+    "done;",
+    'if { [ "$protocol" = "https" ] || [ "$protocol" = "http" ]; } && [ "$host" = "$GIT_AUTH_HOST" ]; then',
+    "printf 'username=%s\\n' \"$GIT_AUTH_USERNAME\";",
+    "printf 'password=%s\\n' \"$GIT_AUTH_TOKEN\";",
+    "fi;",
+    "}; f",
+  ].join(" ");
+}
+
+function gitConfigArgs(): string[] {
+  return [
+    "-c",
+    "credential.helper=",
+    "-c",
+    `credential.helper=${gitCredentialHelper()}`,
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "filter.lfs.required=false",
+    "-c",
+    "filter.lfs.smudge=",
+    "-c",
+    "filter.lfs.process=",
+    "-c",
+    "protocol.file.allow=never",
+  ];
+}
+
 function gitEnv(auth: GitAuth): Record<string, string | undefined> {
-  const giteaUrl = normalizeGiteaUrl(auth.giteaUrl);
-  const basic = Buffer.from(`${auth.username}:${auth.token}`).toString("base64");
+  const gitea = new URL(normalizeGiteaUrl(auth.giteaUrl));
   return {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
@@ -88,21 +126,9 @@ function gitEnv(auth: GitAuth): Record<string, string | undefined> {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_LFS_SKIP_SMUDGE: "1",
-    GIT_CONFIG_COUNT: "7",
-    GIT_CONFIG_KEY_0: `http.${giteaUrl}.extraheader`,
-    GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
-    GIT_CONFIG_KEY_1: "credential.helper",
-    GIT_CONFIG_VALUE_1: "",
-    GIT_CONFIG_KEY_2: "core.hooksPath",
-    GIT_CONFIG_VALUE_2: "/dev/null",
-    GIT_CONFIG_KEY_3: "filter.lfs.required",
-    GIT_CONFIG_VALUE_3: "false",
-    GIT_CONFIG_KEY_4: "filter.lfs.smudge",
-    GIT_CONFIG_VALUE_4: "",
-    GIT_CONFIG_KEY_5: "filter.lfs.process",
-    GIT_CONFIG_VALUE_5: "",
-    GIT_CONFIG_KEY_6: "protocol.file.allow",
-    GIT_CONFIG_VALUE_6: "never",
+    GIT_AUTH_HOST: gitea.host,
+    GIT_AUTH_USERNAME: auth.username,
+    GIT_AUTH_TOKEN: auth.token,
   };
 }
 
@@ -134,6 +160,9 @@ export async function createReviewWorkspace(root: string, job: ReviewJob): Promi
 
 export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWorkspaceOptions): Promise<void> {
   const git = opts.gitRunner ?? runGit;
+  const configArgs = gitConfigArgs();
+  const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
+    git([...configArgs, ...args], runOpts);
   const env = gitEnv({ giteaUrl: opts.giteaUrl, username: opts.username, token: opts.token });
   const headSha = assertSha(opts.pr.head.sha, "PR head");
   const baseSha = assertSha(opts.pr.base.sha, "PR target");
@@ -143,34 +172,43 @@ export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWork
   const baseCloneUrl = validateCloneUrl(opts.repo.clone_url, opts.giteaUrl);
 
   opts.logger?.(`Cloning ${opts.repo.full_name} into review workspace`);
-  await git(["clone", baseCloneUrl, opts.workdir], { cwd: dirname(opts.workdir), env });
+  await runConfiguredGit(["clone", baseCloneUrl, opts.workdir], { cwd: dirname(opts.workdir), env });
 
   opts.logger?.(`Fetching target branch ${opts.pr.base.ref}`);
-  await git(["fetch", "origin", `+refs/heads/${opts.pr.base.ref}:refs/remotes/origin/${opts.pr.base.ref}`], {
-    cwd: opts.workdir,
-    env,
-  });
-  await git(["branch", "--force", targetBranch, baseSha], { cwd: opts.workdir, env });
+  await runConfiguredGit(
+    ["fetch", "origin", `+refs/heads/${opts.pr.base.ref}:refs/remotes/origin/${opts.pr.base.ref}`],
+    {
+      cwd: opts.workdir,
+      env,
+    }
+  );
+  await runConfiguredGit(["branch", "--force", targetBranch, baseSha], { cwd: opts.workdir, env });
 
   try {
     opts.logger?.(`Fetching PR ref ${prRef}`);
-    await git(["fetch", "origin", `+${prRef}:${remotePrRef}`], { cwd: opts.workdir, env });
+    await runConfiguredGit(["fetch", "origin", `+${prRef}:${remotePrRef}`], { cwd: opts.workdir, env });
   } catch (err) {
     if (!opts.pr.head.repo?.clone_url) throw err;
     const headCloneUrl = validateCloneUrl(opts.pr.head.repo.clone_url, opts.giteaUrl);
     opts.logger?.(`Fetching PR head branch ${opts.pr.head.ref} from source repository`);
-    await git(["remote", "add", "pr-head", headCloneUrl], { cwd: opts.workdir, env });
-    await git(["fetch", "pr-head", `+refs/heads/${opts.pr.head.ref}:refs/remotes/pr-head/${opts.pr.head.ref}`], {
-      cwd: opts.workdir,
-      env,
-    });
+    await runConfiguredGit(["remote", "add", "pr-head", headCloneUrl], { cwd: opts.workdir, env });
+    await runConfiguredGit(
+      ["fetch", "pr-head", `+refs/heads/${opts.pr.head.ref}:refs/remotes/pr-head/${opts.pr.head.ref}`],
+      {
+        cwd: opts.workdir,
+        env,
+      }
+    );
   }
 
   opts.logger?.(`Checking out PR head ${headSha} with target branch ${targetBranch}`);
-  await git(["checkout", "--force", "-B", `jumi/pr-${opts.pr.number}`, headSha], { cwd: opts.workdir, env });
-  const checkedOutHead = await git(["rev-parse", "HEAD"], { cwd: opts.workdir, env });
+  await runConfiguredGit(["checkout", "--force", "-B", `jumi/pr-${opts.pr.number}`, headSha], {
+    cwd: opts.workdir,
+    env,
+  });
+  const checkedOutHead = await runConfiguredGit(["rev-parse", "HEAD"], { cwd: opts.workdir, env });
   if (checkedOutHead !== headSha) throw new Error(`Checked out ${checkedOutHead}, expected PR head ${headSha}`);
-  const checkedOutBase = await git(["rev-parse", targetBranch], { cwd: opts.workdir, env });
+  const checkedOutBase = await runConfiguredGit(["rev-parse", targetBranch], { cwd: opts.workdir, env });
   if (checkedOutBase !== baseSha)
     throw new Error(`Target ref ${targetBranch} is ${checkedOutBase}, expected ${baseSha}`);
 }

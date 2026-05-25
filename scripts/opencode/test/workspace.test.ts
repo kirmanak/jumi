@@ -18,6 +18,24 @@ function makeCheckoutFixture() {
   return { repo, pr };
 }
 
+function stripGitConfigArgs(args: string[]): string[] {
+  const result = [...args];
+  while (result[0] === "-c") result.splice(0, 2);
+  return result;
+}
+
+function gitConfigValues(args: string[], key: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] !== "-c") continue;
+    const config = args[index + 1];
+    const prefix = `${key}=`;
+    if (config.startsWith(prefix)) values.push(config.slice(prefix.length));
+    index += 1;
+  }
+  return values;
+}
+
 describe("review workspace", () => {
   test("creates a unique empty workspace under the configured root", async () => {
     const root = await mkdtemp(join(tmpdir(), "jumi-workspace-test-"));
@@ -36,9 +54,10 @@ describe("review workspace", () => {
     const { repo, pr } = makeCheckoutFixture();
     const calls: Array<{ args: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
     const gitRunner: GitRunner = async (args, opts) => {
+      const gitArgs = stripGitConfigArgs(args);
       calls.push({ args, cwd: opts.cwd, env: opts.env });
-      if (args[0] === "rev-parse" && args[1] === "HEAD") return "a".repeat(40);
-      if (args[0] === "rev-parse" && args[1] === "jumi/target") return "b".repeat(40);
+      if (gitArgs[0] === "rev-parse" && gitArgs[1] === "HEAD") return "a".repeat(40);
+      if (gitArgs[0] === "rev-parse" && gitArgs[1] === "jumi/target") return "b".repeat(40);
       return "";
     };
 
@@ -52,7 +71,7 @@ describe("review workspace", () => {
       gitRunner,
     });
 
-    expect(calls.map((call) => call.args)).toEqual([
+    expect(calls.map((call) => stripGitConfigArgs(call.args))).toEqual([
       ["clone", "https://gitea.kirmanak.stream/personal/housing_app.git", "/work/review-48"],
       ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"],
       ["branch", "--force", "jumi/target", "b".repeat(40)],
@@ -66,8 +85,15 @@ describe("review workspace", () => {
     expect(calls[0].env.GIT_CONFIG_NOSYSTEM).toBe("1");
     expect(calls[0].env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
     expect(calls[0].env.GIT_LFS_SKIP_SMUDGE).toBe("1");
-    expect(calls[0].env.GIT_CONFIG_KEY_0).toBe("http.https://gitea.kirmanak.stream/.extraheader");
-    expect(calls[0].env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Basic ")).toBe(true);
+    expect(calls[0].env.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(calls[0].env.GIT_AUTH_USERNAME).toBe("jumi");
+    expect(calls[0].env.GIT_AUTH_TOKEN).toBe("bot-token");
+    expect(calls[0].env.GIT_AUTH_HOST).toBe("gitea.kirmanak.stream");
+    expect(gitConfigValues(calls[0].args, "credential.helper")).toContain("");
+    expect(
+      gitConfigValues(calls[0].args, "credential.helper").some((helper) => helper.includes("GIT_AUTH_TOKEN"))
+    ).toBe(true);
+    expect(gitConfigValues(calls[0].args, "credential.helper").join("\n")).not.toContain("bot-token");
     expect(JSON.stringify(calls.map((call) => call.args))).not.toContain("bot-token");
   });
 
@@ -75,12 +101,13 @@ describe("review workspace", () => {
     const { repo, pr } = makeCheckoutFixture();
     const calls: string[][] = [];
     const gitRunner: GitRunner = async (args) => {
+      const gitArgs = stripGitConfigArgs(args);
       calls.push(args);
-      if (args[0] === "fetch" && args[1] === "origin" && args[2].startsWith("+refs/pull/")) {
+      if (gitArgs[0] === "fetch" && gitArgs[1] === "origin" && gitArgs[2].startsWith("+refs/pull/")) {
         throw new Error("missing pull ref");
       }
-      if (args[0] === "rev-parse" && args[1] === "HEAD") return "a".repeat(40);
-      if (args[0] === "rev-parse" && args[1] === "jumi/target") return "b".repeat(40);
+      if (gitArgs[0] === "rev-parse" && gitArgs[1] === "HEAD") return "a".repeat(40);
+      if (gitArgs[0] === "rev-parse" && gitArgs[1] === "jumi/target") return "b".repeat(40);
       return "";
     };
 
@@ -94,19 +121,19 @@ describe("review workspace", () => {
       gitRunner,
     });
 
-    expect(calls).toContainEqual([
+    expect(calls.map(stripGitConfigArgs)).toContainEqual([
       "remote",
       "add",
       "pr-head",
       "https://gitea.kirmanak.stream/personal/housing_app.git",
     ]);
-    expect(calls).toContainEqual([
+    expect(calls.map(stripGitConfigArgs)).toContainEqual([
       "fetch",
       "pr-head",
       "+refs/heads/feature/release:refs/remotes/pr-head/feature/release",
     ]);
-    expect(calls).toContainEqual(["checkout", "--force", "-B", "jumi/pr-48", "a".repeat(40)]);
-    expect(calls.at(-2)).toEqual(["rev-parse", "HEAD"]);
-    expect(calls.at(-1)).toEqual(["rev-parse", "jumi/target"]);
+    expect(calls.map(stripGitConfigArgs)).toContainEqual(["checkout", "--force", "-B", "jumi/pr-48", "a".repeat(40)]);
+    expect(stripGitConfigArgs(calls.at(-2) ?? [])).toEqual(["rev-parse", "HEAD"]);
+    expect(stripGitConfigArgs(calls.at(-1) ?? [])).toEqual(["rev-parse", "jumi/target"]);
   });
 });
