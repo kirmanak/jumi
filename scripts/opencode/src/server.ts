@@ -1,6 +1,7 @@
 import { GiteaAPI } from "./api.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
+import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { ReviewQueue } from "./queue.ts";
 import { reviewPullRequest } from "./review.ts";
@@ -121,6 +122,13 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
 
 async function main() {
   const config = loadConfig();
+  await ensureOpenCodeWellKnownAuth({
+    home: config.home,
+    url: config.opencodeWellKnownUrl,
+    key: config.opencodeWellKnownKey,
+    token: config.opencodeWellKnownToken,
+    logger: log,
+  });
   const queue = createReviewQueue(config);
 
   const server = Bun.serve({

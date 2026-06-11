@@ -16,6 +16,9 @@ describe("loadConfig", () => {
     expect(config.allowedRepos).toEqual([]);
     expect(config.botUsername).toBe("jumi");
     expect(config.model).toBe("openai/gpt-5.5");
+    expect(config.opencodeWellKnownUrl).toBe("https://kirmanak.stream");
+    expect(config.opencodeWellKnownKey).toBe("OPENCODE_WELLKNOWN_TOKEN");
+    expect(config.opencodeWellKnownToken).toBe("unused");
     expect(config.queueConcurrency).toBe(1);
   });
 

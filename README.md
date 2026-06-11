@@ -63,8 +63,11 @@ Optional environment variables:
 | `GITEA_ALLOWED_ORGS` | `kirmanak` | Comma-separated allowed orgs |
 | `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
 | `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment |
-| `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID |
-| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Hardened OpenCode config path |
+| `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
+| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Hardened reviewer-specific OpenCode permission config path |
+| `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. The service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy. |
+| `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
+| `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
 | `HOME` | `/data` in the image | OpenCode auth storage root |
 | `WORKDIR` | `/work` in the image | Temporary review workspace root |
 | `QUEUE_CONCURRENCY` | `1` | Review worker concurrency |
@@ -83,6 +86,20 @@ Mount a persistent volume at `/data` and seed OpenCode auth at:
 ```
 
 Use an existing `opencode /connect` login from this machine or run `opencode /connect` with `HOME=/data` during setup. The service relies on the persisted OAuth refresh/access state, not provider API keys in env vars.
+
+On startup, Jumi also preserves the existing auth file and adds this entry when it is missing:
+
+```json
+{
+  "https://kirmanak.stream": {
+    "type": "wellknown",
+    "key": "OPENCODE_WELLKNOWN_TOKEN",
+    "token": "unused"
+  }
+}
+```
+
+That makes OpenCode load shared defaults from `https://kirmanak.stream/.well-known/opencode` before this repository's local review policy, without requiring deployment-specific init-container wiring.
 
 The service runs OpenCode with a sanitized environment. Gitea tokens and webhook secrets are not passed to the OpenCode child process.
 The container runtime process runs as non-root UID/GID `10001:10001`.

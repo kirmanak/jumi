@@ -10,6 +10,9 @@ export interface ServiceConfig {
   botUsername: string;
   model: string;
   opencodeConfig?: string;
+  opencodeWellKnownUrl?: string;
+  opencodeWellKnownKey: string;
+  opencodeWellKnownToken: string;
   home: string;
   workdir: string;
   queueConcurrency: number;
@@ -68,6 +71,10 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     botUsername: optionalEnv(env, "BOT_USERNAME", "jumi") ?? "jumi",
     model: optionalEnv(env, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
     opencodeConfig: optionalEnv(env, "OPENCODE_CONFIG"),
+    opencodeWellKnownUrl: optionalEnv(env, "OPENCODE_WELLKNOWN_URL", "https://kirmanak.stream"),
+    opencodeWellKnownKey:
+      optionalEnv(env, "OPENCODE_WELLKNOWN_KEY", "OPENCODE_WELLKNOWN_TOKEN") ?? "OPENCODE_WELLKNOWN_TOKEN",
+    opencodeWellKnownToken: optionalEnv(env, "OPENCODE_WELLKNOWN_TOKEN", "unused") ?? "unused",
     home: optionalEnv(env, "HOME", "/data") ?? "/data",
     workdir: optionalEnv(env, "WORKDIR", "/work") ?? "/work",
     queueConcurrency: intEnv(env, "QUEUE_CONCURRENCY", 1),

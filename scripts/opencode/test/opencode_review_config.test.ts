@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 interface OpenCodeReviewConfig {
+  model?: unknown;
+  small_model?: unknown;
+  enabled_providers?: unknown;
   permission: {
     bash: Record<string, "allow" | "ask" | "deny">;
     webfetch: "allow" | "ask" | "deny";
@@ -30,6 +33,12 @@ describe("opencode review config", () => {
   const config = JSON.parse(
     readFileSync(join(process.cwd(), "../../.gitea/opencode-review.json"), "utf8")
   ) as OpenCodeReviewConfig;
+
+  test("keeps model/provider defaults in the shared remote config", () => {
+    expect(config.model).toBeUndefined();
+    expect(config.small_model).toBeUndefined();
+    expect(config.enabled_providers).toBeUndefined();
+  });
 
   test("allows docs lookup while keeping mutation-oriented tools denied", () => {
     expect(config.permission.webfetch).toBe("allow");
