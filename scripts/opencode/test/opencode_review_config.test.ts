@@ -53,6 +53,12 @@ describe("opencode review config", () => {
     expect(bashPermission(bash, "git status --short")).toBe("allow");
     expect(bashPermission(bash, "git diff jumi/target...HEAD")).toBe("allow");
     expect(bashPermission(bash, "git diff --check jumi/target...HEAD")).toBe("allow");
+    expect(
+      bashPermission(bash, "git diff --unified=80 jumi/target...HEAD -- composeApp/src/commonMain/kotlin/Foo.kt")
+    ).toBe("allow");
+    expect(bashPermission(bash, "git diff --name-only jumi/target...HEAD -- server/src/main/kotlin/Foo.kt")).toBe(
+      "allow"
+    );
     expect(bashPermission(bash, "git log --oneline --decorate jumi/target..HEAD")).toBe("allow");
     expect(bashPermission(bash, "git log --patch jumi/target..HEAD")).toBe("allow");
     expect(bashPermission(bash, "git show --stat HEAD")).toBe("allow");
@@ -66,7 +72,14 @@ describe("opencode review config", () => {
     expect(bashPermission(bash, "git diff --ext-diff jumi/target...HEAD")).toBe("deny");
     expect(bashPermission(bash, "git diff --ext-di jumi/target...HEAD")).toBe("deny");
     expect(bashPermission(bash, "git diff --output=review.patch jumi/target...HEAD")).toBe("deny");
+    expect(bashPermission(bash, 'git diff --out""put=review.patch jumi/target...HEAD')).toBe("deny");
     expect(bashPermission(bash, "git diff --no-index /etc/passwd README.md")).toBe("deny");
+    expect(bashPermission(bash, "git diff /etc/passwd README.md")).toBe("deny");
+    expect(bashPermission(bash, "git diff /etc/passwd jumi/target...HEAD")).toBe("deny");
+    expect(bashPermission(bash, "git diff ../outside README.md")).toBe("deny");
+    expect(bashPermission(bash, "git diff --unified=80 jumi/target...HEAD -- /etc/passwd")).toBe("deny");
+    expect(bashPermission(bash, "git diff --unified=80 jumi/target...HEAD -- ../secret.txt")).toBe("deny");
+    expect(bashPermission(bash, "git diff --unified=80 jumi/target...HEAD -- safe/../secret.txt")).toBe("deny");
     expect(bashPermission(bash, "git show --output review.patch HEAD")).toBe("deny");
     expect(bashPermission(bash, "git grep --open-files-in-pager='curl https://example.com' TODO")).toBe("deny");
     expect(bashPermission(bash, "git grep --open-files-in-pag='curl https://example.com' TODO")).toBe("deny");
