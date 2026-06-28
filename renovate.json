@@ -17,8 +17,20 @@
   ],
   "packageRules": [
     {
-      "matchUpdateTypes": ["digest"],
+      "matchUpdateTypes": [
+        "digest"
+      ],
       "automerge": true
+    },
+    {
+      "description": "Automerge patch and digest updates after required checks pass.",
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "automerge": true,
+      "platformAutomerge": true,
+      "ignoreTests": false
     }
   ],
   "minimumReleaseAge": "3 days",
