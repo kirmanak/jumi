@@ -261,7 +261,7 @@ describe("reviewPullRequest", () => {
     expect(prompt).toContain('target_ref="jumi/target"');
     expect(prompt).toContain('target_remote_ref="origin/main"');
     expect(prompt).toContain("stable refs like jumi/target and HEAD");
-    expect(prompt).toContain("git log variants for jumi/target..HEAD");
+    expect(prompt).toContain("git log --patch jumi/target..HEAD");
     expect(prompt).toContain("web search/fetch");
   });
 

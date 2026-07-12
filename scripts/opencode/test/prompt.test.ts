@@ -28,8 +28,24 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain('target_ref="jumi/target"');
     expect(prompt).toContain('target_remote_ref="origin/main"');
     expect(prompt).toContain("stable refs like jumi/target and HEAD");
-    expect(prompt).toContain("git log variants for jumi/target..HEAD");
+    expect(prompt).toContain("git log --patch jumi/target..HEAD");
     expect(prompt).toContain("web search/fetch");
+  });
+
+  test("steers the reviewer away from denied compound shell commands", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).toContain("Run exactly one git command per shell tool call");
+    expect(prompt).toContain("Never combine commands with &&, ;, pipes, redirection, or command substitution");
+    expect(prompt).toContain("If a shell command is denied, do not retry or vary it");
+    expect(prompt).toContain("switch exclusively to read/list/glob/grep");
+    expect(prompt).not.toContain("one of the exact allowed examples below");
+    expect(prompt).toContain("git diff --stat jumi/target...HEAD");
+    expect(prompt).toContain("git diff --unified=80 jumi/target...HEAD -- path/to/file");
   });
 
   test("includes review notes", () => {
