@@ -39,13 +39,17 @@ describe("buildPROpenedPrompt", () => {
       prFiles: [],
     });
 
-    expect(prompt).toContain("Run exactly one git command per shell tool call");
+    expect(prompt).toContain("Run exactly one shell command per tool call");
     expect(prompt).toContain("Never combine commands with &&, ;, pipes, redirection, or command substitution");
     expect(prompt).toContain("If a shell command is denied, do not retry or vary it");
     expect(prompt).toContain("switch exclusively to read/list/glob/grep");
     expect(prompt).not.toContain("one of the exact allowed examples below");
     expect(prompt).toContain("git diff --stat jumi/target...HEAD");
     expect(prompt).toContain("git diff --unified=80 jumi/target...HEAD -- path/to/file");
+    expect(prompt).toContain("git blame path/to/file");
+    expect(prompt).toContain("rg -n TODO path/");
+    expect(prompt).not.toContain("LSP is also allowed");
+    expect(prompt).not.toContain("read/list/glob/grep/lsp");
   });
 
   test("includes review notes", () => {

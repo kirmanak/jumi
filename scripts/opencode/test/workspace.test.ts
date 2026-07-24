@@ -89,6 +89,8 @@ describe("review workspace", () => {
     expect(calls[0].env.GIT_AUTH_USERNAME).toBe("jumi");
     expect(calls[0].env.GIT_AUTH_TOKEN).toBe("bot-token");
     expect(calls[0].env.GIT_AUTH_HOST).toBe("gitea.kirmanak.stream");
+    expect(gitConfigValues(calls[0].args, "core.hooksPath")).toEqual(["/dev/null"]);
+    expect(gitConfigValues(calls[0].args, "core.symlinks")).toEqual(["false"]);
     expect(gitConfigValues(calls[0].args, "credential.helper")).toContain("");
     expect(
       gitConfigValues(calls[0].args, "credential.helper").some((helper) => helper.includes("GIT_AUTH_TOKEN"))

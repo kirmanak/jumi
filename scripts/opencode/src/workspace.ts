@@ -103,6 +103,8 @@ function gitConfigArgs(): string[] {
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
+    "core.symlinks=false",
+    "-c",
     "filter.lfs.required=false",
     "-c",
     "filter.lfs.smudge=",

@@ -37,9 +37,9 @@ const PREAMBLE = `You are OpenCode, an AI code review assistant integrated into 
 
 <rules>
   <rule>The current working directory is a full checkout of the pull request head.</rule>
-  <rule>Use the checked-out repository for review. Navigate files with read/list/glob/grep tools.</rule>
-  <rule>If shell access is available, use the configured read-only git command allowlist to inspect diffs, history, refs, and commits.</rule>
-  <rule>Run exactly one git command per shell tool call.</rule>
+  <rule>Prefer built-in read/list/glob/grep tools for file contents and search; they enforce external_directory. Use shell only for read-only git inspection and simple in-repo readers when needed.</rule>
+  <rule>If shell access is available, use the configured read-only command allowlist: git inspection, ripgrep/grep/find/listing, and simple file readers (head/tail/cat/jq/etc.) on workspace-relative paths only.</rule>
+  <rule>Run exactly one shell command per tool call.</rule>
   <rule>Never combine commands with &amp;&amp;, ;, pipes, redirection, or command substitution.</rule>
   <rule>If a shell command is denied, do not retry or vary it; switch exclusively to read/list/glob/grep.</rule>
   <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
@@ -103,7 +103,7 @@ ${formatPRFiles(prFiles)}
 
 Review the pull request above using the checked-out repository and the caveman-review skill below. The PR head is checked out on jumi/pr-${pr.number}; the stable target ref is jumi/target. Prefer stable refs like jumi/target and HEAD in shell commands instead of untrusted branch names.
 
-The shell allowlist accepts only specific read-only git command shapes. Run exactly one git command per shell tool call. Never combine commands with &&, ;, pipes, redirection, or command substitution. Safe examples include \`git diff --stat jumi/target...HEAD\`, \`git diff --unified=80 jumi/target...HEAD -- path/to/file\`, \`git log --patch jumi/target..HEAD\`, and \`git show HEAD\`. If a shell command is denied, do not retry or vary it; switch exclusively to read/list/glob/grep. Use web search/fetch to check upstream docs when correctness depends on external behavior. Do not run commands that mutate the checkout, fetch new refs, build the project, install packages, or make network calls from the shell.
+The shell allowlist is broad for read-only inspection: flexible git diff/log/show/blame/grep/cat-file/ls-tree/rev-parse/merge-base (and similar), plus rg/grep/find/ls/head/tail/cat/jq and related readers. Run exactly one shell command per tool call. Never combine commands with &&, ;, pipes, redirection, or command substitution. Safe examples include \`git diff --stat jumi/target...HEAD\`, \`git diff --unified=80 jumi/target...HEAD -- path/to/file\`, \`git log --patch jumi/target..HEAD\`, \`git blame path/to/file\`, \`git show HEAD:path/to/file\`, and \`rg -n TODO path/\`. Prefer stable refs like jumi/target and HEAD instead of untrusted branch names. If a shell command is denied, do not retry or vary it; switch exclusively to read/list/glob/grep. Use web search/fetch to check upstream docs when correctness depends on external behavior. Do not run commands that mutate the checkout, fetch new refs, build the project, install packages, or make network calls from the shell.
 
 <caveman-review-skill>
 ${CAVEMAN_REVIEW_SKILL}

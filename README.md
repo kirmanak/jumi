@@ -139,7 +139,7 @@ The service rejects requests that fail any of these checks:
 | Scope | Repository owner must be in `GITEA_ALLOWED_ORGS` |
 | Repo allowlist | `GITEA_ALLOWED_REPOS` is enforced when set |
 
-OpenCode permissions are locked down in `.gitea/opencode-review.json`: file edits, external directory access, tasks, questions, skills, and LSP are denied. Documentation lookup is allowed through OpenCode web fetch/search tools. Bash is denied by default, with an allowlist for read-only Git inspection commands plus explicit deny rules for known mutation, command-execution, file-write, and shell-metacharacter escape hatches.
+OpenCode permissions are locked down in `.gitea/opencode-review.json`: file edits, external directory access, tasks, questions, skills, and LSP are denied. Documentation lookup is allowed through OpenCode web fetch/search tools. Bash is denied by default, with a broad allowlist for read-only Git inspection and common read-only file/search commands (`rg`/`grep`/`find`/`ls`/`head`/`cat`/`jq`, etc.), plus explicit deny rules for known mutation, command-execution, file-write, `rg --pre`, `find -exec`, and shell-metacharacter escape hatches. The reviewer image installs `git`, `ripgrep`, `jq`, and `file` so those allowlisted readers are actually available at runtime.
 
 ## Local Development
 

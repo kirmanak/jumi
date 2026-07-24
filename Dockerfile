@@ -30,10 +30,14 @@ COPY .gitea/opencode-review.json /app/.gitea/opencode-review.json
 FROM oven/bun:${BUN_VERSION}-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git \
+  && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
-RUN git --version && /usr/local/bin/opencode version
+RUN git --version \
+  && rg --version \
+  && jq --version \
+  && file --version \
+  && /usr/local/bin/opencode version
 
 WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./
