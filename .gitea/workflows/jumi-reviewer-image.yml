@@ -5,9 +5,15 @@ on:
     branches: [main]
     tags: ["v*"]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # false: avoid cancelled mid-build steps reporting oddly green on Gitea act.
+  cancel-in-progress: false
+
 jobs:
   image:
-    runs-on: large-ubuntu-latest
+    # GARM K8s runners (Buildah baked into garm-act-runner). Not Akka/Kaniko.
+    runs-on: ubuntu-latest
     env:
       IMAGE: gitea.kirmanak.stream/personal/jumi-reviewer
       REGISTRY: gitea.kirmanak.stream
