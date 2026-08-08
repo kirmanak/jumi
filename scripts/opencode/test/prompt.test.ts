@@ -28,7 +28,7 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain('target_ref="jumi/target"');
     expect(prompt).toContain('target_remote_ref="origin/main"');
     expect(prompt).toContain("stable refs like jumi/target and HEAD");
-    expect(prompt).toContain("git log --patch jumi/target..HEAD");
+    expect(prompt).toContain("git log --oneline jumi/target..HEAD");
     expect(prompt).toContain("web search/fetch");
   });
 
@@ -45,7 +45,11 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("switch exclusively to read/list/glob/grep");
     expect(prompt).not.toContain("one of the exact allowed examples below");
     expect(prompt).toContain("git diff --stat jumi/target...HEAD");
-    expect(prompt).toContain("git diff --unified=80 jumi/target...HEAD -- path/to/file");
+    expect(prompt).toContain("git diff --unified=3 jumi/target...HEAD -- path/to/file");
+    expect(prompt).toContain("Never use high --unified values");
+    expect(prompt).toContain("Never pass a directory, glob, or omit the path");
+    expect(prompt).not.toContain("--unified=80");
+    expect(prompt).not.toContain("git log --patch");
     expect(prompt).toContain("git blame path/to/file");
     expect(prompt).toContain("rg -n TODO path/");
     expect(prompt).not.toContain("LSP is also allowed");
