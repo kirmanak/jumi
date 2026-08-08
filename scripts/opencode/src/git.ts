@@ -1,5 +1,17 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  byteLength,
+  defaultOpenCodeDbPath,
+  finalizeMemoryTracker,
+  formatBytes,
+  logDiagnostic,
+  type MemoryPeakState,
+  type MemorySample,
+  pathSizeBytes,
+  sampleMemory,
+  trackMemoryPeak,
+} from "./diagnostics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
 
@@ -26,6 +38,11 @@ export interface OpenCodeRunOptions {
   sanitizeEnv?: boolean;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /** Optional review label for structured diagnostics (e.g. org/repo#123). */
+  reviewLabel?: string;
+  /** RSS sample interval for the OpenCode child (ms). Default 5000. */
+  memorySampleIntervalMs?: number;
+  logger?: (message: string) => void;
 }
 
 function buildEnv(opts: OpenCodeRunOptions, tempRoot: string): Record<string, string> | undefined {
@@ -55,7 +72,7 @@ async function readStreamLimited(
   stream: ReadableStream<Uint8Array>,
   label: string,
   maxBytes?: number
-): Promise<string> {
+): Promise<{ text: string; totalBytes: number }> {
   const chunks: Uint8Array[] = [];
   let capturedBytes = 0;
   let totalBytes = 0;
@@ -91,16 +108,51 @@ async function readStreamLimited(
   }
 
   const output = new TextDecoder().decode(captured);
-  return maxBytes && maxBytes > 0 && totalBytes > maxBytes ? `${output}${truncateNote(label, maxBytes)}` : output;
+  const text = maxBytes && maxBytes > 0 && totalBytes > maxBytes ? `${output}${truncateNote(label, maxBytes)}` : output;
+  return { text, totalBytes };
+}
+
+function countToolishLines(stderr: string): number {
+  if (!stderr) return 0;
+  let n = 0;
+  for (const line of stderr.split("\n")) {
+    if (/^\s*(➜|→|✱|•)\s/.test(line) || /\b(Bash|Read|Grep|Glob|Edit|Write)\b/.test(line)) n += 1;
+  }
+  return n;
 }
 
 export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Promise<string> {
+  const log = opts.logger ?? ((message: string) => console.log(message));
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
 
   const tmpDir = await mkdtemp(join(tempRoot, "opencode-prompt-"));
   const tmpPath = join(tmpDir, "prompt.txt");
   await writeFile(tmpPath, prompt);
+
+  const home = opts.home ?? process.env.HOME ?? opts.workdir;
+  const dbPath = process.env.OPENCODE_DB?.startsWith("/") ? process.env.OPENCODE_DB : defaultOpenCodeDbPath(home);
+  const promptBytes = byteLength(prompt);
+  const dbBefore = await pathSizeBytes(dbPath);
+  const parentBefore = await sampleMemory(process.pid);
+
+  logDiagnostic(log, "opencode_start", {
+    review: opts.reviewLabel,
+    model: opts.model,
+    prompt_bytes: promptBytes,
+    prompt_bytes_h: formatBytes(promptBytes),
+    opencode_db: dbPath,
+    opencode_db_bytes: dbBefore,
+    opencode_db_h: formatBytes(dbBefore),
+    parent_rss_bytes: parentBefore.rssBytes,
+    parent_rss_h: formatBytes(parentBefore.rssBytes),
+    cgroup_bytes: parentBefore.cgroupBytes,
+    cgroup_h: formatBytes(parentBefore.cgroupBytes),
+    timeout_ms: opts.timeoutMs ?? 0,
+  });
+
+  let tracker: MemoryPeakState | undefined;
+  let finalSample: MemorySample | undefined;
 
   try {
     const proc = Bun.spawn(["opencode", "run", "--dir", opts.workdir, "-m", opts.model], {
@@ -110,6 +162,24 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
       env: buildEnv(opts, tempRoot),
     });
 
+    const childPid = proc.pid;
+    let trackerStartedAt = Date.now();
+    tracker = trackMemoryPeak(childPid, opts.memorySampleIntervalMs ?? 5_000, (sample, peaks) => {
+      logDiagnostic(log, "opencode_sample", {
+        review: opts.reviewLabel,
+        sample: peaks.n,
+        child_rss_bytes: sample.rssBytes,
+        child_rss_h: formatBytes(sample.rssBytes),
+        child_rss_peak_bytes: peaks.rss,
+        child_rss_peak_h: formatBytes(peaks.rss),
+        cgroup_bytes: sample.cgroupBytes,
+        cgroup_h: formatBytes(sample.cgroupBytes),
+        cgroup_peak_bytes: peaks.cgroup,
+        cgroup_peak_h: formatBytes(peaks.cgroup),
+        elapsed_ms: Date.now() - trackerStartedAt,
+      });
+    });
+    trackerStartedAt = tracker.startedAtMs;
     const timeout = opts.timeoutMs && opts.timeoutMs > 0 ? setTimeout(() => proc.kill(), opts.timeoutMs) : undefined;
 
     // Consume stdout, stderr, and the exit code concurrently.
@@ -117,16 +187,61 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
     // child writes more than the OS pipe buffer (~64KB) to stderr. Keep only a
     // bounded prefix so verbose OpenCode logs cannot grow the reviewer heap
     // without bound.
-    const [stdoutRaw, stderrRaw, exitCode] = await Promise.all([
-      readStreamLimited(proc.stdout, "opencode output", opts.maxOutputBytes),
-      readStreamLimited(proc.stderr, "opencode stderr", OPENCODE_STDERR_MAX_BYTES),
-      proc.exited,
-    ]);
+    let stdoutResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
+    let stderrResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
+    let exitCode: number | null = null;
+    let runError: unknown;
+    try {
+      [stdoutResult, stderrResult, exitCode] = await Promise.all([
+        readStreamLimited(proc.stdout, "opencode output", opts.maxOutputBytes),
+        readStreamLimited(proc.stderr, "opencode stderr", OPENCODE_STDERR_MAX_BYTES),
+        proc.exited,
+      ]);
+    } catch (err) {
+      runError = err;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      finalSample = await finalizeMemoryTracker(tracker, childPid);
+    }
 
-    if (timeout) clearTimeout(timeout);
+    const dbAfter = await pathSizeBytes(dbPath);
+    const parentAfter = await sampleMemory(process.pid);
 
-    const stdout = stripAnsi(stdoutRaw).trim();
-    const stderr = stripAnsi(stderrRaw).trim();
+    const stdout = stripAnsi(stdoutResult.text).trim();
+    const stderr = stripAnsi(stderrResult.text).trim();
+    const toolishLines = countToolishLines(stderr);
+
+    logDiagnostic(log, "opencode_end", {
+      review: opts.reviewLabel,
+      exit_code: exitCode,
+      duration_ms: Date.now() - tracker.startedAtMs,
+      samples: tracker.samples,
+      child_rss_start_bytes: tracker.start.rssBytes,
+      child_rss_start_h: formatBytes(tracker.start.rssBytes),
+      child_rss_peak_bytes: tracker.peakRssBytes,
+      child_rss_peak_h: formatBytes(tracker.peakRssBytes),
+      child_rss_end_bytes: finalSample.rssBytes,
+      child_rss_end_h: formatBytes(finalSample.rssBytes),
+      cgroup_start_bytes: tracker.start.cgroupBytes,
+      cgroup_start_h: formatBytes(tracker.start.cgroupBytes),
+      cgroup_peak_bytes: tracker.peakCgroupBytes,
+      cgroup_peak_h: formatBytes(tracker.peakCgroupBytes),
+      cgroup_end_bytes: finalSample.cgroupBytes,
+      cgroup_end_h: formatBytes(finalSample.cgroupBytes),
+      parent_rss_end_bytes: parentAfter.rssBytes,
+      parent_rss_end_h: formatBytes(parentAfter.rssBytes),
+      stdout_bytes: stdoutResult.totalBytes,
+      stdout_bytes_h: formatBytes(stdoutResult.totalBytes),
+      stderr_bytes: stderrResult.totalBytes,
+      stderr_bytes_h: formatBytes(stderrResult.totalBytes),
+      stderr_toolish_lines: toolishLines,
+      opencode_db_bytes: dbAfter,
+      opencode_db_h: formatBytes(dbAfter),
+      opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
+      run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
+    });
+
+    if (runError) throw runError;
 
     if (exitCode !== 0) {
       throw new Error(`opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`);
@@ -138,6 +253,7 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
 
     return stdout;
   } finally {
+    tracker?.stop();
     await rm(tmpDir, { recursive: true, force: true });
   }
 }

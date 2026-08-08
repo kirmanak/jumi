@@ -1,3 +1,4 @@
+import { byteLength, formatBytes, logDiagnostic } from "./diagnostics.ts";
 import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
@@ -136,10 +137,6 @@ function skipReasonForHeadChange(pr: GiteaPR, expectedHeadSha: string): string |
   return `PR head changed from ${expectedHeadSha} to ${pr.head.sha}`;
 }
 
-function byteLength(value: string): number {
-  return encoder.encode(value).byteLength;
-}
-
 function prepareFiles(
   files: GiteaPRFile[],
   maxFiles: number,
@@ -195,7 +192,24 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
     const maxFiles = opts.maxFiles ?? 100;
     const maxPatchBytes = opts.maxPatchBytes ?? 500_000;
+    const rawPatchBytes = prFiles.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const { files, notes } = prepareFiles(prFiles, maxFiles, maxPatchBytes);
+    const includedPatchBytes = files.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
+    const reviewLabel = `${repoFullName}#${pr.number}`;
+
+    logDiagnostic(log, "review_files", {
+      review: reviewLabel,
+      head: reviewedHeadSha,
+      files_total: prFiles.length,
+      files_included: files.length,
+      max_files: maxFiles,
+      raw_patch_bytes: rawPatchBytes,
+      raw_patch_bytes_h: formatBytes(rawPatchBytes),
+      included_patch_bytes: includedPatchBytes,
+      included_patch_bytes_h: formatBytes(includedPatchBytes),
+      max_patch_bytes: maxPatchBytes,
+      notes: notes.length,
+    });
 
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
     await prepareWorkspace({
@@ -215,6 +229,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       reviewNotes: notes,
     });
 
+    logDiagnostic(log, "review_prompt", {
+      review: reviewLabel,
+      prompt_bytes: byteLength(prompt),
+      prompt_bytes_h: formatBytes(byteLength(prompt)),
+      model: opts.model,
+    });
+
     log(`Running OpenCode for ${repoFullName}#${pr.number}`);
     const output = await openCodeRunner(prompt, {
       model: opts.model,
@@ -224,6 +245,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       sanitizeEnv: opts.sanitizeOpenCodeEnv,
       timeoutMs: opts.timeoutMs,
       maxOutputBytes: opts.maxOutputBytes,
+      reviewLabel,
+      logger: log,
     });
 
     if (!output.trim()) {

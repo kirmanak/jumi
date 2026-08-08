@@ -77,6 +77,19 @@ Optional environment variables:
 | `MAX_WEBHOOK_BYTES` | `1048576` | Max accepted webhook payload bytes |
 | `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout |
 
+
+## Review diagnostics (Loki)
+
+During each review the service emits single-line structured logs prefixed with `[diag]`:
+
+- `event=review_files` — PR file/patch sizes after limits
+- `event=review_prompt` — final prompt byte size
+- `event=opencode_start` — model, prompt size, parent RSS, cgroup, OpenCode DB size
+- `event=opencode_sample` — every ~5s while OpenCode runs: **child PID RSS**, peaks, cgroup
+- `event=opencode_end` — exit code, duration, child/parent peaks, stdout/stderr byte totals
+
+These are intentionally process-level so a cgroup OOM still leaves a trail of samples before death. Grep Loki with `{namespace="jumi-reviewer"} |= "[diag]"`.
+
 ## OpenCode Auth
 
 Mount a persistent volume at `/data` and seed OpenCode auth at:
