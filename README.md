@@ -84,15 +84,19 @@ During each review the service emits single-line structured logs prefixed with `
 
 - `event=review_files` — PR file/patch sizes after limits
 - `event=review_prompt` — final prompt byte size
-- `event=opencode_start` — model, prompt size, parent RSS, cgroup, OpenCode DB size
+- `event=opencode_start` — model, prompt size, parent RSS, cgroup, **per-review** OpenCode DB path/size
 - `event=opencode_sample` — every ~5s while OpenCode runs: **child PID RSS**, peaks, cgroup
 - `event=opencode_end` — exit code, duration, child/parent peaks, stdout/stderr byte totals
+- `event=post_opencode` / `post_fetch_pr` / `post_find_sticky` / `post_sticky_result` / `post_comment_*` / `post_review_done` — **parent** RSS after OpenCode (sticky comment path)
+- `event=workspace_remove_start` / `workspace_remove_end` — parent RSS around workspace cleanup
+
+OpenCode session SQLite is forced to a temp path under the review workspace (`OPENCODE_DB=…/opencode-session.db`) so it does not accumulate on `HOME` across runs.
 
 These are intentionally process-level so a cgroup OOM still leaves a trail of samples before death. Grep Loki with `{namespace="jumi-reviewer"} |= "[diag]"`.
 
 ## OpenCode Auth
 
-Mount a persistent volume at `/data` and seed OpenCode auth at:
+Mount a volume at `/data` and seed OpenCode auth at:
 
 ```text
 /data/.local/share/opencode/auth.json

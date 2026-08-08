@@ -62,6 +62,33 @@ describe("GiteaAPI", () => {
     });
   });
 
+  test("findStickyIssueComment returns only the matching id", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json([
+        { id: 1, body: "noise", user: { login: "tapio" } },
+        { id: 2, body: "<!-- jumi-review:owner/repo#7 -->\nold", user: { login: "jumi" } },
+        { id: 3, body: "more", user: { login: "someone" } },
+      ]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(
+      api.findStickyIssueComment("owner", "repo", 7, "jumi", "<!-- jumi-review:owner/repo#7 -->")
+    ).resolves.toEqual({ id: 2 });
+    expect(urls[0]).toContain("/issues/7/comments?limit=50&page=1");
+  });
+
+  test("findStickyIssueComment returns undefined when sticky is missing", async () => {
+    globalThis.fetch = (async () =>
+      Response.json([{ id: 1, body: "noise", user: { login: "tapio" } }])) as unknown as typeof fetch;
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(
+      api.findStickyIssueComment("owner", "repo", 7, "jumi", "<!-- jumi-review:owner/repo#7 -->")
+    ).resolves.toBeUndefined();
+  });
+
   test("throws useful errors for non-2xx responses", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 

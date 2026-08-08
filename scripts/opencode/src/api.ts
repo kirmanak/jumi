@@ -90,8 +90,34 @@ export class GiteaAPI {
     return this.post<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`, { body });
   }
 
-  async getIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]> {
-    return this.getAll<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`);
+  /**
+   * Find the sticky review comment without retaining the full issue timeline.
+   * Gitea may ignore page size and return the whole thread in one response; we
+   * still scan once, keep only a minimal match (id), and drop the rest so
+   * multi‑MB Tapio/PR-summary histories are not held for the rest of the job.
+   */
+  async findStickyIssueComment(
+    owner: string,
+    repo: string,
+    index: number,
+    botUsername: string,
+    marker: string
+  ): Promise<{ id: number } | undefined> {
+    const path = `/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`;
+    let page = 1;
+    while (page <= 40) {
+      const batch = await this.get<GiteaComment[]>(`${path}?limit=50&page=${page}`);
+      for (const comment of batch) {
+        if (comment.user?.login === botUsername && typeof comment.body === "string" && comment.body.includes(marker)) {
+          return { id: comment.id };
+        }
+      }
+      // Gitea may ignore limit and return the full thread (length !== 50).
+      // Only advance pages when we got a full page of exactly 50.
+      if (batch.length !== 50) break;
+      page += 1;
+    }
+    return undefined;
   }
 
   async updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment> {

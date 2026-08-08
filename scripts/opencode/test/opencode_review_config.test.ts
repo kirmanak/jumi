@@ -75,6 +75,14 @@ describe("opencode review config", () => {
     expect(bashPermission(bash, "git show HEAD:path/to/file")).toBe("allow");
     expect(bashPermission(bash, "git blame -L 10,40 path/to/file")).toBe("allow");
     expect(bashPermission(bash, "git grep -n TODO -- path/to/dir")).toBe("allow");
+    // Final *|* seal blocks \|    // Shell metachar seals block \| patterns (cannot distinguish from pipe).
+    expect(bashPermission(bash, 'git grep -n "RefuseManualStart\|pve-guests" jumi/target -- "*.yml"')).toBe("deny");
+    expect(bashPermission(bash, "git grep -n foo\|bar path")).toBe("deny");
+    expect(bashPermission(bash, "git grep foo; true")).toBe("deny");
+    expect(bashPermission(bash, "rg x | true")).toBe("deny");
+    expect(bashPermission(bash, "sort -u path/to/file")).toBe("deny");
+    expect(bashPermission(bash, "yq .x values.yaml")).toBe("deny");
+    expect(bashPermission(bash, "systemctl restart foo")).toBe("deny");
     expect(bashPermission(bash, "git cat-file -p HEAD:path/to/file")).toBe("allow");
     expect(bashPermission(bash, "git ls-files")).toBe("allow");
     expect(bashPermission(bash, "git ls-tree -r --name-only HEAD")).toBe("allow");
@@ -258,6 +266,9 @@ describe("opencode review config", () => {
     expect(bashPermission(bash, "head ../../../data/.local/share/opencode/auth.json")).toBe("deny");
     expect(bashPermission(bash, "cat path/../.local/share/opencode/auth.json")).toBe("deny");
     expect(bashPermission(bash, "cat {/data/.local/share/opencode/auth.json}")).toBe("deny");
+    expect(bashPermission(bash, "rg\t/data/.local/share/opencode/auth.json")).toBe("deny");
+    expect(bashPermission(bash, "git grep secret {/data/.local/share/opencode/auth.json}")).toBe("deny");
+    expect(bashPermission(bash, "yq . {/data/.local/share/opencode/auth.json}")).toBe("deny");
     expect(bashPermission(bash, "head {~/.local/share/opencode/auth.json}")).toBe("deny");
     expect(bashPermission(bash, "cat {../secret}")).toBe("deny");
     expect(bashPermission(bash, "grep -R secret .")).toBe("deny");

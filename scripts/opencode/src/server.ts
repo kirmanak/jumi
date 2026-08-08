@@ -1,6 +1,7 @@
 import { GiteaAPI } from "./api.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
+import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { ReviewQueue } from "./queue.ts";
@@ -65,7 +66,25 @@ export function createReviewQueue(
         });
         logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
       } finally {
+        const before = await sampleMemory(process.pid);
+        logDiagnostic(logger, "workspace_remove_start", {
+          review: `${job.owner}/${job.repo}#${job.prNumber}`,
+          workspace,
+          parent_rss_bytes: before.rssBytes,
+          parent_rss_h: formatBytes(before.rssBytes),
+          cgroup_bytes: before.cgroupBytes,
+          cgroup_h: formatBytes(before.cgroupBytes),
+        });
         await removeReviewWorkspace(workspace);
+        const after = await sampleMemory(process.pid);
+        logDiagnostic(logger, "workspace_remove_end", {
+          review: `${job.owner}/${job.repo}#${job.prNumber}`,
+          workspace,
+          parent_rss_bytes: after.rssBytes,
+          parent_rss_h: formatBytes(after.rssBytes),
+          cgroup_bytes: after.cgroupBytes,
+          cgroup_h: formatBytes(after.cgroupBytes),
+        });
       }
     },
     config.queueConcurrency,

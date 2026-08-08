@@ -2,7 +2,6 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   byteLength,
-  defaultOpenCodeDbPath,
   finalizeMemoryTracker,
   formatBytes,
   logDiagnostic,
@@ -45,9 +44,15 @@ export interface OpenCodeRunOptions {
   logger?: (message: string) => void;
 }
 
-function buildEnv(opts: OpenCodeRunOptions, tempRoot: string): Record<string, string> | undefined {
+function buildEnv(
+  opts: OpenCodeRunOptions,
+  tempRoot: string,
+  openCodeDbPath: string
+): Record<string, string> | undefined {
+  // Per-review SQLite path under the workspace temp dir so session DB does not
+  // accumulate on HOME across runs (OOM trail: 1.5GiB shared opencode.db).
   if (!opts.sanitizeEnv) {
-    const env = { ...process.env, TMPDIR: tempRoot } as Record<string, string>;
+    const env = { ...process.env, TMPDIR: tempRoot, OPENCODE_DB: openCodeDbPath } as Record<string, string>;
     if (opts.configPath) env.OPENCODE_CONFIG = opts.configPath;
     return env;
   }
@@ -58,11 +63,14 @@ function buildEnv(opts: OpenCodeRunOptions, tempRoot: string): Record<string, st
     TMPDIR: tempRoot,
     OPENCODE_MODEL: opts.model,
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    OPENCODE_DB: openCodeDbPath,
   };
 
   if (opts.configPath) env.OPENCODE_CONFIG = opts.configPath;
   return env;
 }
+
+const OPENCODE_STDERR_LOG_MAX_BYTES = 2_000;
 
 function truncateNote(label: string, maxBytes: number): string {
   return `\n\n[${label} truncated at ${maxBytes} bytes]`;
@@ -131,7 +139,8 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
   await writeFile(tmpPath, prompt);
 
   const home = opts.home ?? process.env.HOME ?? opts.workdir;
-  const dbPath = process.env.OPENCODE_DB?.startsWith("/") ? process.env.OPENCODE_DB : defaultOpenCodeDbPath(home);
+  // Always isolate session DB under the review temp dir (deleted with workspace).
+  const dbPath = join(tempRoot, "opencode-session.db");
   const promptBytes = byteLength(prompt);
   const dbBefore = await pathSizeBytes(dbPath);
   const parentBefore = await sampleMemory(process.pid);
@@ -144,6 +153,7 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
     opencode_db: dbPath,
     opencode_db_bytes: dbBefore,
     opencode_db_h: formatBytes(dbBefore),
+    home,
     parent_rss_bytes: parentBefore.rssBytes,
     parent_rss_h: formatBytes(parentBefore.rssBytes),
     cgroup_bytes: parentBefore.cgroupBytes,
@@ -159,7 +169,7 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
       stdin: Bun.file(tmpPath),
       stdout: "pipe",
       stderr: "pipe",
-      env: buildEnv(opts, tempRoot),
+      env: buildEnv(opts, tempRoot, dbPath),
     });
 
     const childPid = proc.pid;
@@ -247,8 +257,16 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
       throw new Error(`opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`);
     }
 
+    // Do not dump full OpenCode tool transcripts into the parent log stream —
+    // permission-denial payloads alone can be multi‑KB of repeated JSON and the
+    // post-OOM trail showed parent RSS climbing after opencode_end.
     if (stderr) {
-      console.log(stderr);
+      const logBytes = byteLength(stderr);
+      const preview =
+        logBytes <= OPENCODE_STDERR_LOG_MAX_BYTES
+          ? stderr
+          : `${stderr.slice(0, OPENCODE_STDERR_LOG_MAX_BYTES)}\n…[stderr log capped at ${OPENCODE_STDERR_LOG_MAX_BYTES} bytes; total ${logBytes}]`;
+      log(`[opencode stderr] ${preview}`);
     }
 
     return stdout;

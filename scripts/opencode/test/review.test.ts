@@ -8,7 +8,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     getRepo: async () => makeRepo(),
     getPR: async () => makePR(),
     getPRFiles: async () => [makeFile()],
-    getIssueComments: async () => [],
+    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
     updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
@@ -111,7 +111,7 @@ describe("reviewPullRequest", () => {
     const result = await reviewPullRequest({
       ...baseOptions,
       api: makeApi({
-        getIssueComments: async () => [makeComment({ id: 99, body: "<!-- jumi-review:kirmanak/demo#7 -->\nold" })],
+        findStickyIssueComment: async () => ({ id: 99 }),
         updateIssueComment: async (_owner, _repo, commentId, body) => {
           updatedBody = body;
           return makeComment({ id: commentId, body });
@@ -191,7 +191,7 @@ describe("reviewPullRequest", () => {
 
   test("skips posting when the PR head changes during review", async () => {
     let getPRCalls = 0;
-    let commentRead = false;
+    let stickyLookup = false;
     let created = false;
     const result = await reviewPullRequest({
       ...baseOptions,
@@ -200,9 +200,9 @@ describe("reviewPullRequest", () => {
           getPRCalls++;
           return makePR({ head: makeBranch({ sha: getPRCalls === 1 ? "oldsha" : "newsha" }) });
         },
-        getIssueComments: async () => {
-          commentRead = true;
-          return [];
+        findStickyIssueComment: async () => {
+          stickyLookup = true;
+          return undefined;
         },
         createIssueComment: async (_owner, _repo, _index, body) => {
           created = true;
@@ -215,7 +215,7 @@ describe("reviewPullRequest", () => {
 
     expect(result).toEqual({ status: "skipped", reason: "PR head changed from oldsha to newsha" });
     expect(getPRCalls).toBe(2);
-    expect(commentRead).toBe(false);
+    expect(stickyLookup).toBe(false);
     expect(created).toBe(false);
   });
 

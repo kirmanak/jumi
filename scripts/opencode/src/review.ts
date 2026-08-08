@@ -1,15 +1,36 @@
-import { byteLength, formatBytes, logDiagnostic } from "./diagnostics.ts";
+import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
 import type { GiteaComment, GiteaCommitStatusPayload, GiteaPR, GiteaPRFile, GiteaRepo, ReviewJob } from "./types.ts";
 import { checkoutPullRequestWorkspace } from "./workspace.ts";
 
+async function logParentDiag(
+  log: (message: string) => void,
+  event: string,
+  fields: Record<string, string | number | boolean | null | undefined>
+): Promise<void> {
+  const mem = await sampleMemory(process.pid);
+  logDiagnostic(log, event, {
+    ...fields,
+    parent_rss_bytes: mem.rssBytes,
+    parent_rss_h: formatBytes(mem.rssBytes),
+    cgroup_bytes: mem.cgroupBytes,
+    cgroup_h: formatBytes(mem.cgroupBytes),
+  });
+}
+
 export interface ReviewApi {
   getRepo(owner: string, repo: string): Promise<GiteaRepo>;
   getPR(owner: string, repo: string, index: number): Promise<GiteaPR>;
   getPRFiles(owner: string, repo: string, index: number): Promise<GiteaPRFile[]>;
-  getIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]>;
+  findStickyIssueComment(
+    owner: string,
+    repo: string,
+    index: number,
+    botUsername: string,
+    marker: string
+  ): Promise<{ id: number } | undefined>;
   createIssueComment(owner: string, repo: string, index: number, body: string): Promise<GiteaComment>;
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment>;
   createCommitStatus(
@@ -249,6 +270,12 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       logger: log,
     });
 
+    await logParentDiag(log, "post_opencode", {
+      review: reviewLabel,
+      output_bytes: byteLength(output),
+      output_bytes_h: formatBytes(byteLength(output)),
+    });
+
     if (!output.trim()) {
       const result: ReviewResult = { status: "skipped", reason: "OpenCode produced no output" };
       await postReviewStatus(
@@ -261,6 +288,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       return result;
     }
 
+    await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
     const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
     const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
     if (currentSkipReason) {
@@ -277,12 +305,26 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
     const marker = markerFor(opts.owner, opts.repo, currentPR.number);
     const body = buildCommentBody(marker, reviewedHeadSha, output);
-    const comments = await opts.api.getIssueComments(opts.owner, opts.repo, currentPR.number);
-    const existing = comments.find(
-      (comment) => comment.user.login === opts.botUsername && comment.body.includes(marker)
+    await logParentDiag(log, "post_find_sticky", {
+      review: reviewLabel,
+      body_bytes: byteLength(body),
+      body_bytes_h: formatBytes(byteLength(body)),
+    });
+    const existing = await opts.api.findStickyIssueComment(
+      opts.owner,
+      opts.repo,
+      currentPR.number,
+      opts.botUsername,
+      marker
     );
+    await logParentDiag(log, "post_sticky_result", {
+      review: reviewLabel,
+      sticky_id: existing?.id ?? null,
+      sticky_found: Boolean(existing),
+    });
 
     if (existing) {
+      await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
       const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
       const result: ReviewResult = { status: "updated", commentId: updated.id };
       await postReviewStatus(
@@ -292,9 +334,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         statusDescriptionForResult(result),
         currentPR.html_url
       );
+      await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
       return result;
     }
 
+    await logParentDiag(log, "post_comment_create", { review: reviewLabel });
     const created = await opts.api.createIssueComment(opts.owner, opts.repo, currentPR.number, body);
     const result: ReviewResult = { status: "posted", commentId: created.id };
     await postReviewStatus(
@@ -304,6 +348,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       statusDescriptionForResult(result),
       currentPR.html_url
     );
+    await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
     return result;
   } catch (err) {
     await postReviewStatus(
