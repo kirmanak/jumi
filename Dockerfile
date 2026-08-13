@@ -42,11 +42,13 @@ RUN git --version \
 WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./
 COPY --from=build /app/.gitea /app/.gitea
+COPY scripts/opencode/entrypoint.sh /app/scripts/opencode/entrypoint.sh
+RUN chmod 755 /app/scripts/opencode/entrypoint.sh
 
 RUN groupadd --gid 10001 jumi \
   && useradd --uid 10001 --gid 10001 --home-dir /data --create-home --shell /usr/sbin/nologin jumi \
   && mkdir -p /data /work \
-  && chown -R jumi:jumi /app /data /work
+  && chown -R jumi:jumi /data /work
 
 USER 10001:10001
 
@@ -58,4 +60,5 @@ ENV HOME=/data \
     OPENCODE_MODEL=openai/gpt-5.5
 
 EXPOSE 3000
+ENTRYPOINT ["/app/scripts/opencode/entrypoint.sh"]
 CMD ["bun", "run", "src/server.ts"]

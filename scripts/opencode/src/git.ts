@@ -61,6 +61,7 @@ function buildEnv(
     HOME: opts.home ?? process.env.HOME ?? opts.workdir,
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     TMPDIR: tempRoot,
+    XDG_CONFIG_HOME: join(tempRoot, "xdg-config"),
     OPENCODE_MODEL: opts.model,
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DB: openCodeDbPath,

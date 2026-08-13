@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { loadConfig } from "../src/config.ts";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadConfig, SECRET_ENV_KEYS, SECRETS_FILE_ENV, scrubSecretEnv } from "../src/config.ts";
 
 describe("loadConfig", () => {
   const required = {
@@ -43,5 +46,61 @@ describe("loadConfig", () => {
     );
     expect(() => loadConfig({ ...required, MAX_FILES: "0" })).toThrow("Invalid positive integer");
     expect(() => loadConfig({ ...required, PORT: "abc" })).toThrow("Invalid positive integer");
+  });
+
+  test("scrubSecretEnv unsets Gitea secrets after they have been copied into config", () => {
+    const previous: Record<string, string | undefined> = {};
+    for (const key of SECRET_ENV_KEYS) {
+      previous[key] = process.env[key];
+    }
+    process.env.GITEA_BOT_TOKEN = "live-bot-token";
+    process.env.GITEA_WEBHOOK_SECRET = "live-webhook-secret";
+    process.env.GITEA_WEBHOOK_AUTH_TOKEN = "live-auth-token";
+    try {
+      const config = loadConfig({
+        ...required,
+        GITEA_BOT_TOKEN: process.env.GITEA_BOT_TOKEN,
+        GITEA_WEBHOOK_SECRET: process.env.GITEA_WEBHOOK_SECRET,
+        GITEA_WEBHOOK_AUTH_TOKEN: process.env.GITEA_WEBHOOK_AUTH_TOKEN,
+      });
+      expect(config.giteaToken).toBe("live-bot-token");
+      expect(config.webhookSecret).toBe("live-webhook-secret");
+      expect(config.webhookAuthToken).toBe("live-auth-token");
+
+      scrubSecretEnv();
+      expect(process.env.GITEA_BOT_TOKEN).toBeUndefined();
+      expect(process.env.GITEA_WEBHOOK_SECRET).toBeUndefined();
+      expect(process.env.GITEA_WEBHOOK_AUTH_TOKEN).toBeUndefined();
+      expect(config.giteaToken).toBe("live-bot-token");
+    } finally {
+      for (const key of SECRET_ENV_KEYS) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key];
+      }
+    }
+  });
+
+  test("loadConfig reads Gitea secrets from JUMI_SECRETS_FILE and unlinks it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jumi-secrets-"));
+    const file = join(dir, "secrets.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        GITEA_BOT_TOKEN: "file-bot-token",
+        GITEA_WEBHOOK_SECRET: "file-webhook-secret",
+        GITEA_WEBHOOK_AUTH_TOKEN: "file-auth-token",
+      }),
+      { mode: 0o600 }
+    );
+
+    const config = loadConfig({
+      GITEA_URL: "https://gitea.kirmanak.stream",
+      [SECRETS_FILE_ENV]: file,
+    });
+
+    expect(config.giteaToken).toBe("file-bot-token");
+    expect(config.webhookSecret).toBe("file-webhook-secret");
+    expect(config.webhookAuthToken).toBe("file-auth-token");
+    expect(() => readFileSync(file)).toThrow();
   });
 });

@@ -37,11 +37,8 @@ const PREAMBLE = `You are OpenCode, an AI code review assistant integrated into 
 
 <rules>
   <rule>The current working directory is a full checkout of the pull request head.</rule>
-  <rule>Prefer built-in read/list/glob/grep tools for file contents and search; they enforce external_directory. Use shell only for read-only git inspection and simple in-repo readers when needed.</rule>
-  <rule>If shell access is available, use the configured read-only command allowlist: git inspection, ripgrep/grep/find/listing, and simple file readers (head/tail/cat/jq/etc.) on workspace-relative paths only.</rule>
-  <rule>Run exactly one shell command per tool call.</rule>
-  <rule>Never combine commands with &amp;&amp;, ;, pipes, redirection, or command substitution.</rule>
-  <rule>If a shell command is denied, do not retry or vary it; switch exclusively to read/list/glob/grep.</rule>
+  <rule>Prefer built-in read/list/glob/grep tools for file contents and search; they enforce external_directory.</rule>
+  <rule>Shell is open for inspection. Pipes, quotes, and git grep regex are allowed.</rule>
   <rule>Keep tool output small: never dump directory-wide or high-context git patches into the session; prefer --stat, single-file --unified=3, and built-in read.</rule>
   <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
   <rule>Do NOT edit files.</rule>
@@ -104,15 +101,11 @@ ${formatPRFiles(prFiles)}
 
 Review the pull request above using the checked-out repository and the caveman-review skill below. The PR head is checked out on jumi/pr-${pr.number}; the stable target ref is jumi/target. Prefer stable refs like jumi/target and HEAD in shell commands instead of untrusted branch names.
 
-The shell allowlist is broad for read-only inspection: flexible git diff/log/show/blame/grep/cat-file/ls-tree/rev-parse/merge-base (and similar), plus rg/grep/find/ls/head/tail/cat/jq and related readers. Run exactly one shell command per tool call. Never combine commands with &&, ;, pipes, redirection, or command substitution.
-
-Memory budget (hard): tool results stay in the session. Do not dump large patches into context.
+Shell is open for inspection. Pipes, quotes, and git grep regex are allowed. Prefer built-in read/list/glob/grep for file contents. Do not dump large patches into context.
 - Start from the patches already in <pull_request_changed_files>; only re-fetch a file when that patch is missing, truncated, or you need surrounding code.
-- Prefer built-in read/list/glob/grep over shell for file contents.
-- For git diff: run \`git diff --stat jumi/target...HEAD\` first. Then diff at most one file path per call with low context, e.g. \`git diff --unified=3 jumi/target...HEAD -- path/to/file\`. Never use high --unified values. Never pass a directory, glob, or omit the path (no repo-wide or folder-wide patch dumps).
-- Avoid history+patch dumps (log -p / log --patch); use \`git log --oneline jumi/target..HEAD\` when you need commit list, then inspect specific files.
-- Prefer \`git show HEAD:path/to/file\` or built-in read for a single file over re-diffing it. Do not \`git show\` multi-megabyte or generated blobs.
-Safe examples: \`git diff --stat jumi/target...HEAD\`, \`git diff --unified=3 jumi/target...HEAD -- path/to/file\`, \`git log --oneline jumi/target..HEAD\`, \`git blame path/to/file\`, \`git show HEAD:path/to/file\`, \`rg -n TODO path/\`. Prefer stable refs like jumi/target and HEAD instead of untrusted branch names. If a shell command is denied, do not retry or vary it; switch exclusively to read/list/glob/grep. Use web search/fetch to check upstream docs when correctness depends on external behavior. Do not run commands that mutate the checkout, fetch new refs, build the project, install packages, or make network calls from the shell.
+- For git diff: run \`git diff --stat jumi/target...HEAD\` first, then inspect specific paths.
+- Prefer \`git show HEAD:path/to/file\` or built-in read for a single file. Do not \`git show\` multi-megabyte or generated blobs.
+Safe examples: \`git diff --stat jumi/target...HEAD\`, \`git grep -n 'foo\\|bar' -- path\`, \`git log --oneline jumi/target..HEAD\`, \`rg -n TODO path/\`. Prefer stable refs like jumi/target and HEAD instead of untrusted branch names. Use web search/fetch to check upstream docs when correctness depends on external behavior. Do not run commands that mutate the checkout, fetch new refs, build the project, install packages, or make network calls from the shell.
 
 <caveman-review-skill>
 ${CAVEMAN_REVIEW_SKILL}

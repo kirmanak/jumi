@@ -33,7 +33,7 @@ describe("runOpenCode", () => {
     process.env.GITEA_BOT_TOKEN = "secret-token";
     await withFakeOpenCode(
       `#!/bin/sh
-printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s SECRET=%s ARGS=%s\\033[0m\n' "$HOME" "$OPENCODE_MODEL" "$OPENCODE_CONFIG" "$OPENCODE_DISABLE_PROJECT_CONFIG" "$GITEA_BOT_TOKEN" "$*"
+printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s ARGS=%s\\033[0m\n' "$HOME" "$OPENCODE_MODEL" "$OPENCODE_CONFIG" "$OPENCODE_DISABLE_PROJECT_CONFIG" "$XDG_CONFIG_HOME" "$GITEA_BOT_TOKEN" "$*"
 `,
       async (_binDir, workdir) => {
         const output = await runOpenCode("prompt", {
@@ -48,6 +48,7 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s SECRET=%s ARGS=%s\\033[0m
         expect(output).toContain("MODEL=openai/gpt-5.5");
         expect(output).toContain("CONFIG=/config.json");
         expect(output).toContain("DISABLE=1");
+        expect(output).toContain(`XDG_CONFIG=${workdir}/.jumi-tmp/xdg-config`);
         expect(output).toContain("SECRET=");
         expect(output).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
         expect(output).not.toContain("--print-logs");
