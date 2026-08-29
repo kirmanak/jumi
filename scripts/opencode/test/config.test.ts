@@ -40,6 +40,15 @@ describe("loadConfig", () => {
     expect(config.maxFiles).toBe(3);
   });
 
+  test("parses wildcard owner allowlist", () => {
+    const config = loadConfig({
+      ...required,
+      GITEA_ALLOWED_ORGS: "*",
+    });
+
+    expect(config.allowedOrgs).toEqual(["*"]);
+  });
+
   test("requires secrets and rejects invalid positive integers", () => {
     expect(() => loadConfig({ GITEA_URL: "https://gitea.kirmanak.stream", GITEA_BOT_TOKEN: "token" })).toThrow(
       "GITEA_WEBHOOK_SECRET"

@@ -81,6 +81,10 @@ function originMatches(value: string | undefined, giteaUrl: string): boolean {
   }
 }
 
+function ownerIsAllowed(owner: string, allowedOrgs: readonly string[]): boolean {
+  return allowedOrgs.includes("*") || allowedOrgs.includes(owner);
+}
+
 export function validateWebhookPayload(payload: GiteaPRPayload, policy: WebhookPolicy): ReviewJob | { skip: string } {
   if (!REVIEW_ACTIONS.has(payload.action)) {
     return { skip: `unsupported action ${payload.action}` };
@@ -88,7 +92,7 @@ export function validateWebhookPayload(payload: GiteaPRPayload, policy: WebhookP
 
   const [owner, repo] = payload.repository.full_name.split("/");
   if (!owner || !repo) throw new Error(`Invalid repository full_name: ${payload.repository.full_name}`);
-  if (!policy.allowedOrgs.includes(owner)) throw new Error(`Repository owner ${owner} is not allowed`);
+  if (!ownerIsAllowed(owner, policy.allowedOrgs)) throw new Error(`Repository owner ${owner} is not allowed`);
   if (policy.allowedRepos.length > 0 && !policy.allowedRepos.includes(payload.repository.full_name)) {
     throw new Error(`Repository ${payload.repository.full_name} is not allowed`);
   }

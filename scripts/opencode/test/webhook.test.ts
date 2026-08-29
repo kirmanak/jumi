@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parsePullRequestPayload, validateWebhookPayload, verifyGiteaSignature } from "../src/webhook.ts";
-import { encodeJson, makePayload, makeRepo, signBody } from "./fixtures.ts";
+import { encodeJson, makePayload, makeRepo, makeUser, signBody } from "./fixtures.ts";
 
 describe("verifyGiteaSignature", () => {
   test("accepts valid signatures with or without sha256 prefix", async () => {
@@ -82,5 +82,57 @@ describe("validateWebhookPayload", () => {
         policy
       )
     ).toThrow("does not match configured Gitea origin");
+  });
+
+  test("allows any owner when allowedOrgs includes *", () => {
+    const result = validateWebhookPayload(
+      makePayload({
+        repository: makeRepo({
+          owner: makeUser({ login: "pulpy" }),
+          name: "app",
+          full_name: "pulpy/app",
+        }),
+      }),
+      { ...policy, allowedOrgs: ["*"] }
+    );
+
+    expect("skip" in result).toBe(false);
+    if (!("skip" in result)) {
+      expect(result.owner).toBe("pulpy");
+      expect(result.repo).toBe("app");
+    }
+  });
+
+  test("wildcard mixed with named orgs still allows unlisted owners", () => {
+    const result = validateWebhookPayload(
+      makePayload({
+        repository: makeRepo({
+          owner: makeUser({ login: "AnnEternity" }),
+          name: "notes",
+          full_name: "AnnEternity/notes",
+        }),
+      }),
+      { ...policy, allowedOrgs: ["*", "kirmanak", "personal"] }
+    );
+
+    expect("skip" in result).toBe(false);
+    if (!("skip" in result)) {
+      expect(result.owner).toBe("AnnEternity");
+    }
+  });
+
+  test("wildcard still enforces repo allowlist when set", () => {
+    expect(() =>
+      validateWebhookPayload(
+        makePayload({
+          repository: makeRepo({
+            owner: makeUser({ login: "pulpy" }),
+            name: "app",
+            full_name: "pulpy/app",
+          }),
+        }),
+        { ...policy, allowedOrgs: ["*"], allowedRepos: ["kirmanak/demo"] }
+      )
+    ).toThrow("Repository pulpy/app is not allowed");
   });
 });

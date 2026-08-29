@@ -1,6 +1,6 @@
 # jumi
 
-Self-hosted Gitea PR review automation for the [`kirmanak`](https://gitea.kirmanak.stream/kirmanak) organization.
+Self-hosted Gitea PR review automation. Owner scope is `GITEA_ALLOWED_ORGS` (`*` = every owner on the instance).
 
 ## Reviewer Service
 
@@ -9,7 +9,7 @@ Self-hosted Gitea PR review automation for the [`kirmanak`](https://gitea.kirman
 Flow:
 
 ```text
-Gitea org webhook
+Gitea org/user/system webhook
   -> Traefik HTTPS ingress
   -> jumi-reviewer /webhooks/gitea
   -> signature/org validation
@@ -60,7 +60,7 @@ Optional environment variables:
 | `HOST` | `0.0.0.0` | HTTP bind host |
 | `PORT` | `3000` | HTTP bind port |
 | `GITEA_WEBHOOK_AUTH_TOKEN` | unset | Optional exact or bearer `Authorization` header value |
-| `GITEA_ALLOWED_ORGS` | `kirmanak` | Comma-separated allowed orgs |
+| `GITEA_ALLOWED_ORGS` | `kirmanak` | Comma-separated allowed owners. Include `*` to accept every repository owner |
 | `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
 | `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment |
 | `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
@@ -123,7 +123,7 @@ The container runtime process runs as non-root UID/GID `10001:10001`.
 
 ## Webhook Setup
 
-Create one Gitea organization webhook for `kirmanak`:
+Create a Gitea webhook that can reach the repos you want reviewed. For one org, use an organization webhook. For the whole instance, use a **system webhook** (Site Administration → Webhooks):
 
 | Setting | Value |
 |---------|-------|
@@ -153,7 +153,7 @@ The service rejects requests that fail any of these checks:
 | Signature | `X-Gitea-Signature` must match the raw body HMAC-SHA256 |
 | Event | Only `X-Gitea-Event: pull_request` is processed |
 | Origin | Repository URLs must match `GITEA_URL` origin |
-| Scope | Repository owner must be in `GITEA_ALLOWED_ORGS` |
+| Scope | Repository owner must be in `GITEA_ALLOWED_ORGS`, or that list must include `*` |
 | Repo allowlist | `GITEA_ALLOWED_REPOS` is enforced when set |
 
 OpenCode permissions live in `.gitea/opencode-review.json`. File edits, external directory access, tasks, questions, skills, and LSP stay denied. Documentation lookup is allowed through OpenCode web fetch/search. Bash is **allow-by-default** (no command allowlist / no dump denylist). The image `entrypoint.sh` copies `GITEA_BOT_TOKEN` / webhook secrets to a 0600 tmpfs file, unsets them, and `exec`s bun so `/proc/<pid>/environ` is the cleaned execve image (`unsetenv` does **not** rewrite that file). `loadConfig` then reads the file and unlinks it; secrets stay in process memory only. The OpenCode child gets `XDG_CONFIG_HOME` under the ephemeral workspace so a review cannot persist a loosened `opencode.json` on the `/data` PVC. `/app` stays root-owned; only `/data` and `/work` are writable by uid 10001. xAI credentials stay in OpenCode `auth.json` on `/data` because the child needs them. Reviewer `reasoningEffort` is pinned `high` for grok-4.5, grok-4.6, and gpt-5.5. The image still ships `git`, `ripgrep`, `jq`, and `file`.
