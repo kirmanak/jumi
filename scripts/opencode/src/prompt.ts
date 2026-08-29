@@ -43,7 +43,7 @@ const PREAMBLE = `You are OpenCode, an AI code review assistant integrated into 
   <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
   <rule>Do NOT edit files.</rule>
   <rule>Do NOT run mutating git commands, builds, package installs, or arbitrary network shell commands.</rule>
-  <rule>Respond with a plain markdown PR review comment only.</rule>
+  <rule>Respond with a plain markdown PR review comment, then one jumi-check HTML comment.</rule>
 </rules>`;
 
 // ── Caveman-review skill ────────────────────────────────────────────────────
@@ -114,5 +114,13 @@ ${CAVEMAN_REVIEW_SKILL}
 Follow the format strictly: one line per finding as \`L<line>: <severity prefix:> <problem>. <fix>.\`
 Start with a one-line overall assessment, then list findings.
 Only comment on bugs, risks, and questions — skip all style, naming, and minor suggestions.
-Do NOT make any file changes. Respond with a plain markdown comment only.`;
+Do NOT make any file changes.
+
+After the markdown review, output exactly one HTML comment as the last line:
+\`<!-- jumi-check: success -->\` or \`<!-- jumi-check: failure -->\`
+Optional short reason: \`<!-- jumi-check: failure; 1 blocking, 1 risk -->\`
+Use failure if you reported any 🔴 bug or 🟡 risk, or if you could not finish the review.
+Use success if there are no 🔴/🟡 findings. ❓ questions are allowed with success.
+The check comment must be the last non-empty line, not quoted inside prose. The service uses it as the Gitea commit status.
+Respond with the markdown comment plus that one check comment.`;
 }

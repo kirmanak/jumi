@@ -50,6 +50,8 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("Do NOT edit files");
     expect(prompt).toContain("Do NOT run mutating git commands");
     expect(prompt).not.toContain("LSP is also allowed");
+    expect(prompt).toContain("<!-- jumi-check: success -->");
+    expect(prompt).toContain("<!-- jumi-check: failure -->");
   });
 
   test("includes review notes", () => {

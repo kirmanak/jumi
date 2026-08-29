@@ -81,13 +81,14 @@ describe("reviewPullRequest", () => {
           return status;
         },
       }),
-      openCodeRunner: async () => "Looks good",
+      openCodeRunner: async () => "Looks good\n<!-- jumi-check: success -->",
     });
 
     expect(result).toEqual({ status: "posted", commentId: 123 });
     expect(createdBody).toContain("<!-- jumi-review:kirmanak/demo#7 -->");
     expect(createdBody).toContain("Reviewed commit: `headsha`");
     expect(createdBody).toContain("Looks good");
+    expect(createdBody).not.toContain("jumi-check");
     expect(statuses).toEqual([
       {
         sha: "headsha",
@@ -100,7 +101,7 @@ describe("reviewPullRequest", () => {
         sha: "headsha",
         state: "success",
         context: "jumi/opencode-review",
-        description: "Jumi review posted",
+        description: "No blocking issues",
         target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
       },
     ]);
@@ -117,17 +118,88 @@ describe("reviewPullRequest", () => {
           return makeComment({ id: commentId, body });
         },
       }),
-      openCodeRunner: async () => "Updated review",
+      openCodeRunner: async () => "Updated review\n<!-- jumi-check: success -->",
     });
 
     expect(result).toEqual({ status: "updated", commentId: 99 });
     expect(updatedBody).toContain("Updated review");
   });
 
-  test("skips empty OpenCode output", async () => {
+  test("skips empty OpenCode output and fails the commit status", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
     await expect(
-      reviewPullRequest({ ...baseOptions, api: makeApi(), openCodeRunner: async () => "   " })
+      reviewPullRequest({
+        ...baseOptions,
+        api: makeApi({
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => "   ",
+      })
     ).resolves.toEqual({ status: "skipped", reason: "OpenCode produced no output" });
+    expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+    expect(statuses[1].description).toBe("Incomplete review: no output");
+  });
+
+  test("fails the commit status when OpenCode reports failure", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await reviewPullRequest({
+      ...baseOptions,
+      api: makeApi({
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+      openCodeRunner: async () =>
+        "L12: 🔴 bug: null deref. Guard it.\nL40: 🟡 risk: swallowed error. Fail closed.\n<!-- jumi-check: failure; 1 blocking, 1 risk -->",
+    });
+
+    expect(result.status).toBe("posted");
+    expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+    expect(statuses[1].description).toBe("1 blocking, 1 risk");
+  });
+
+  test("fails closed when the review omits the check trailer", async () => {
+    let createdBody = "";
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await reviewPullRequest({
+      ...baseOptions,
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          createdBody = body;
+          return makeComment({ id: 44, body });
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+      openCodeRunner: async () => "I'll inspect the PR and check for correctness issues.",
+    });
+
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(createdBody).toContain("I'll inspect the PR");
+    expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+    expect(statuses[1].description).toBe("Incomplete review: no check verdict");
+  });
+
+  test("keeps a questions-only review green when OpenCode reports success", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await reviewPullRequest({
+      ...baseOptions,
+      api: makeApi({
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+      openCodeRunner: async () =>
+        "No correctness bugs.\n❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
   });
 
   test("marks the commit status failed when the review crashes", async () => {

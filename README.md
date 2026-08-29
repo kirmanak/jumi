@@ -18,6 +18,15 @@ Gitea org/user/system webhook
   -> commit status + sticky Gitea PR comment
 ```
 
+The service posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in the OpenCode output (`<!-- jumi-check: success -->` or `<!-- jumi-check: failure -->`), not by grepping 🔴/🟡 in the prose:
+
+- `pending` while the review is running
+- `success` / `failure` from that trailer (❓ may still be `success`)
+- `failure` if OpenCode crashes, returns empty output, or omits the trailer
+- `warning` when a queued job is skipped after it already went pending (for example the PR head changed)
+
+The trailer is stripped from the sticky comment. Title-gated skips (`WIP:`, `[skip review]`) still post no status.
+
 The service intentionally does not checkout or execute PR-head code. It reviews Gitea's PR metadata and file patches from the trusted Gitea API.
 
 ## Image
