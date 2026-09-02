@@ -85,6 +85,7 @@ Optional environment variables:
 | `MAX_OUTPUT_BYTES` | `80000` | Max OpenCode output bytes posted back |
 | `MAX_WEBHOOK_BYTES` | `1048576` | Max accepted webhook payload bytes |
 | `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout |
+| `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics` |
 
 
 ## Review diagnostics (Loki)
@@ -149,7 +150,10 @@ The service also exposes:
 
 ```text
 GET /healthz
+GET /metrics
 ```
+
+`GET /metrics` is Prometheus text (`ai_tokens_total`, `ai_tokens`, `ai_sessions`) from **in-process** counters. After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums, then deletes the workspace as today. Totals reset on process restart; Grafana `increase()` handles that. Optional `AGENT_INSTANCE` (default `jumi`) is the series label. This is not a durable OpenCode DB on `HOME`.
 
 ## Security Model
 

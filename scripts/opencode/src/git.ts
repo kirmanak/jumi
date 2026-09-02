@@ -11,6 +11,7 @@ import {
   sampleMemory,
   trackMemoryPeak,
 } from "./diagnostics.ts";
+import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
 
@@ -251,6 +252,7 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
       opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
     });
+    recordOpenCodeDb(dbPath);
 
     if (runError) throw runError;
 

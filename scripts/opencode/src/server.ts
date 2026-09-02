@@ -6,6 +6,7 @@ import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { ReviewQueue } from "./queue.ts";
 import { reviewPullRequest } from "./review.ts";
+import { renderTokenMetrics } from "./token_metrics.ts";
 import type { ReviewJob } from "./types.ts";
 import { parsePullRequestPayload, validateWebhookPayload, verifyGiteaSignature } from "./webhook.ts";
 import { createReviewWorkspace, removeReviewWorkspace } from "./workspace.ts";
@@ -97,6 +98,13 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
+    if (url.pathname === "/metrics") {
+      if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
+      return new Response(renderTokenMetrics(), {
+        status: 200,
+        headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
+      });
+    }
     if (url.pathname !== "/webhooks/gitea") return json(404, { error: "not found" });
     if (request.method !== "POST") return json(405, { error: "method not allowed" });
     if (!request.headers.get("content-type")?.includes("application/json")) {

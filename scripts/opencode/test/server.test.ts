@@ -44,6 +44,16 @@ describe("createFetchHandler", () => {
     expect((await handler(new Request("https://reviewer.test/webhooks/gitea", { method: "POST" }))).status).toBe(415);
   });
 
+  test("serves Prometheus token metrics without auth", async () => {
+    const handler = createFetchHandler(makeConfig(), { queue: makeQueue() });
+    const response = await handler(new Request("https://reviewer.test/metrics"));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/plain");
+    const body = await response.text();
+    expect(body).toContain('ai_token_exporter_up{agent_instance="jumi"} 1');
+    expect((await handler(new Request("https://reviewer.test/metrics", { method: "POST" }))).status).toBe(405);
+  });
+
   test("rejects invalid auth, oversized payloads, and bad signatures", async () => {
     const config = makeConfig({ webhookAuthToken: "auth-token", maxWebhookBytes: 5 });
     const handler = createFetchHandler(config, { queue: makeQueue() });

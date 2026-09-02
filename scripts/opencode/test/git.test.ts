@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOpenCode } from "../src/git.ts";
+import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -11,6 +12,7 @@ afterEach(() => {
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
+  resetTokenMetricsForTests();
 });
 
 async function withFakeOpenCode(script: string, run: (binDir: string, workdir: string) => Promise<void>) {
@@ -84,6 +86,46 @@ exit 7
       async (_binDir, workdir) => {
         await expect(runOpenCode("prompt", { model: "model", workdir, sanitizeEnv: true })).rejects.toThrow(
           "opencode exited with code 7:\nbad things"
+        );
+      }
+    );
+  });
+
+  test("records token totals from OPENCODE_DB even when OpenCode exits non-zero", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+python3 - <<'PY'
+import os, sqlite3
+path = os.environ["OPENCODE_DB"]
+con = sqlite3.connect(path)
+con.execute("""
+  CREATE TABLE session (
+    model TEXT,
+    tokens_input INTEGER,
+    tokens_cache_read INTEGER,
+    tokens_output INTEGER,
+    tokens_cache_write INTEGER,
+    tokens_reasoning INTEGER
+  )
+""")
+con.execute(
+  "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)",
+  ("xai/grok-4.6", 42, 7, 9, 0, 1),
+)
+con.commit()
+PY
+exit 7
+`,
+      async (_binDir, workdir) => {
+        await expect(runOpenCode("prompt", { model: "model", workdir, sanitizeEnv: true })).rejects.toThrow(
+          "opencode exited with code 7"
+        );
+        const text = renderTokenMetrics();
+        expect(text).toContain(
+          'ai_tokens_total{agent_instance="jumi",source="opencode",profile="default",model="xai/grok-4.6",token_type="input"} 42'
+        );
+        expect(text).toContain(
+          'ai_tokens_total{agent_instance="jumi",source="opencode",profile="default",model="xai/grok-4.6",token_type="output"} 9'
         );
       }
     );
