@@ -9,6 +9,10 @@ import type {
   GiteaRepo,
 } from "./types.ts";
 
+function isNotFoundError(err: unknown): boolean {
+  return err instanceof Error && /→ 404\b/.test(err.message);
+}
+
 /**
  * Minimal Gitea REST API client.
  * All methods throw on non-2xx responses.
@@ -170,8 +174,30 @@ export class GiteaAPI {
     return this.getPages<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`);
   }
 
+  async listPullReviewCommentsByReview(
+    owner: string,
+    repo: string,
+    index: number,
+    reviewId: number
+  ): Promise<GiteaPullReviewComment[]> {
+    return this.getPages<GiteaPullReviewComment>(
+      `/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews/${reviewId}/comments`
+    );
+  }
+
   async listPullReviewComments(owner: string, repo: string, index: number): Promise<GiteaPullReviewComment[]> {
-    return this.getPages<GiteaPullReviewComment>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/comments`);
+    const reviews = await this.listPullReviews(owner, repo, index);
+    const comments: GiteaPullReviewComment[] = [];
+    for (const review of reviews) {
+      if (typeof review.id !== "number" || !Number.isFinite(review.id)) continue;
+      try {
+        comments.push(...(await this.listPullReviewCommentsByReview(owner, repo, index, review.id)));
+      } catch (err) {
+        if (isNotFoundError(err)) continue;
+        throw err;
+      }
+    }
+    return comments;
   }
 
   async listPullReviews(owner: string, repo: string, index: number): Promise<GiteaPullReview[]> {

@@ -804,6 +804,56 @@ describe("buildFeedbackMarkdown", () => {
 });
 
 describe("collectFollowUpItems", () => {
+  test("keeps human issue comments when inline listing 404s", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+      ],
+      listPullReviewComments: async () => {
+        throw new Error("404: not found");
+      },
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi");
+    expect(items.comments.map((comment) => comment.id)).toEqual([55]);
+    expect(items.inlines).toEqual([]);
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: jumiPr(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
+  });
+
+  test("needsFollowUp is false when inlines 404 and there is no human feedback", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviewComments: async () => {
+        throw new Error("404: not found");
+      },
+      listPullReviews: async () => [],
+    });
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: jumiPr(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(false);
+    });
+  });
+
   test("includes request-changes and human COMMENT reviews with a body", async () => {
     const api = makeApi({
       listIssueComments: async () => [],

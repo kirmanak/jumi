@@ -89,11 +89,11 @@ describe("GiteaAPI", () => {
     ).resolves.toBeUndefined();
   });
 
-  test("lists issue comments, review comments, and reviews with exact-50 paging", async () => {
+  test("lists issue comments with exact-50 paging", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
       urls.push(String(url));
-      if (String(url).includes("page=1") && String(url).includes("/issues/7/comments")) {
+      if (String(url).includes("page=1")) {
         return Response.json(Array.from({ length: 50 }, (_, i) => ({ id: i, body: "c" })));
       }
       return Response.json([]);
@@ -101,13 +101,96 @@ describe("GiteaAPI", () => {
 
     const api = new GiteaAPI("https://gitea.example.test", "token-1");
     await api.listIssueComments("owner", "repo", 7);
-    await api.listPullReviewComments("owner", "repo", 7);
-    await api.listPullReviews("owner", "repo", 7);
 
     expect(urls[0]).toContain("/issues/7/comments?limit=50&page=1");
     expect(urls[1]).toContain("/issues/7/comments?limit=50&page=2");
-    expect(urls[2]).toContain("/pulls/7/comments?limit=50&page=1");
-    expect(urls[3]).toContain("/pulls/7/reviews?limit=50&page=1");
+  });
+
+  test("lists pull reviews with exact-50 paging", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("page=1")) {
+        return Response.json(Array.from({ length: 50 }, (_, i) => ({ id: i })));
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.listPullReviews("owner", "repo", 7);
+
+    expect(urls[0]).toContain("/pulls/7/reviews?limit=50&page=1");
+    expect(urls[1]).toContain("/pulls/7/reviews?limit=50&page=2");
+  });
+
+  test("listPullReviewComments does not request /pulls/{index}/comments", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listPullReviewComments("owner", "repo", 7)).resolves.toEqual([]);
+    expect(urls.some((url) => /\/pulls\/7\/comments(?:\?|$)/.test(url))).toBe(false);
+  });
+
+  test("listPullReviewComments fetches comments per review id", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.includes("/pulls/7/reviews?") && href.includes("page=1")) {
+        return Response.json([{ id: 9 }, { id: 10 }]);
+      }
+      if (href.includes("/pulls/7/reviews/9/comments")) {
+        return Response.json([{ id: 101, body: "a" }]);
+      }
+      if (href.includes("/pulls/7/reviews/10/comments")) {
+        return Response.json([{ id: 102, body: "b" }]);
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const comments = await api.listPullReviewComments("owner", "repo", 7);
+    expect(comments.map((comment) => comment.id)).toEqual([101, 102]);
+    expect(urls.some((url) => url.includes("/pulls/7/reviews/9/comments?limit=50&page=1"))).toBe(true);
+    expect(urls.some((url) => url.includes("/pulls/7/reviews/10/comments?limit=50&page=1"))).toBe(true);
+    expect(urls.some((url) => /\/pulls\/7\/comments(?:\?|$)/.test(url))).toBe(false);
+  });
+
+  test("listPullReviewComments makes no nested GETs when reviews are empty", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listPullReviewComments("owner", "repo", 7)).resolves.toEqual([]);
+    expect(urls).toEqual(["https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/reviews?limit=50&page=1"]);
+  });
+
+  test("listPullReviewComments skips a review whose nested comments 404", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/pulls/7/reviews?") && href.includes("page=1")) {
+        return Response.json([{ id: 9 }, { id: 10 }]);
+      }
+      if (href.includes("/pulls/7/reviews/9/comments")) {
+        return new Response("not found", { status: 404 });
+      }
+      if (href.includes("/pulls/7/reviews/10/comments")) {
+        return Response.json([{ id: 102, body: "kept" }]);
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const comments = await api.listPullReviewComments("owner", "repo", 7);
+    expect(comments.map((comment) => comment.id)).toEqual([102]);
+    expect(comments.map((comment) => comment.body)).toEqual(["kept"]);
   });
 
   test("throws useful errors for non-2xx responses", async () => {

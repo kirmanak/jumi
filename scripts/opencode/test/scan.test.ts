@@ -360,6 +360,87 @@ describe("scanAssignedIssues", () => {
     }
   });
 
+  test("closing jumi PR + human issue comment + inline list 404 still enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+          listIssueComments: async () => [
+            makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          ],
+          listPullReviewComments: async () => {
+            throw new Error("404: not found");
+          },
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + only bot sticky + inlines 404 still skips", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+          listIssueComments: async () => [
+            makeComment({
+              id: 1,
+              body: "<!-- jumi-worker:kirmanak/demo#12 -->\nworking",
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+          listPullReviewComments: async () => {
+            throw new Error("404: not found");
+          },
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("skips pull request issues", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
     try {

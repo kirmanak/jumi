@@ -157,10 +157,17 @@ export async function collectFollowUpItems(
   prNumber: number,
   botUsername: string
 ): Promise<{ comments: GiteaComment[]; inlines: GiteaPullReviewComment[]; reviews: GiteaPullReview[] }> {
-  const [rawComments, rawInlines, rawReviews] = await Promise.all([
+  const [rawComments, rawReviews, rawInlines] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
-    api.listPullReviewComments(owner, repo, prNumber),
     api.listPullReviews(owner, repo, prNumber),
+    api.listPullReviewComments(owner, repo, prNumber).catch((err: unknown): GiteaPullReviewComment[] => {
+      logDefault(
+        `inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+      return [];
+    }),
   ]);
   return {
     comments: rawComments.filter((comment) => isInScopeHumanComment(comment, botUsername)),

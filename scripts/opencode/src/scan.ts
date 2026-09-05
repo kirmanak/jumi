@@ -40,6 +40,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
   const jobs: IssueJob[] = [];
 
   for (const issue of issues) {
+    let skipLabel = `#${issue.number}`;
     try {
       if (isPullRequestIssue(issue)) continue;
       if (!isAssignedToBot(issue, opts.botUsername)) continue;
@@ -59,6 +60,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
         log(`skipping ${repository.full_name}#${issue.number}: ${err instanceof Error ? err.message : String(err)}`);
         continue;
       }
+      skipLabel = `${owner}/${repo}#${issue.number}`;
 
       const claim = await readClaim(claimFilePath(opts.home, owner, repo, issue.number));
       if (claim && isClaimLive(claim, nowMs, pidAlive)) {
@@ -109,7 +111,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
         receivedAt: new Date(nowMs).toISOString(),
       });
     } catch (err) {
-      log(`skipping #${issue.number}: ${err instanceof Error ? err.message : String(err)}`);
+      log(`skipping ${skipLabel}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
