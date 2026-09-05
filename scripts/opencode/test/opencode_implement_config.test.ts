@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { IMPLEMENT_PROMPT } from "../src/implement.ts";
 
 interface OpenCodeImplementConfig {
+  skills?: unknown;
   permission: {
     bash: Record<string, "allow" | "ask" | "deny">;
     edit: "allow" | "ask" | "deny";
@@ -39,6 +40,7 @@ describe("opencode implement config", () => {
   ) as OpenCodeImplementConfig;
 
   test("allows skills, tasks, and edits for the implement worker", () => {
+    expect(config.skills).toBeUndefined();
     expect(config.permission.skill).toBe("allow");
     expect(config.permission.task).toBe("allow");
     expect(config.permission.todowrite).toBe("allow");

@@ -12,6 +12,7 @@ fi
 
 : "${BUN_VERSION:?BUN_VERSION is required}"
 : "${OPENCODE_VERSION:?OPENCODE_VERSION is required}"
+: "${HELM_VERSION:?HELM_VERSION is required}"
 
 primary_tag="$1"
 shift
@@ -41,6 +42,7 @@ buildah bud \
   "${tag_args[@]}" \
   --build-arg "BUN_VERSION=${BUN_VERSION}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
+  --build-arg "HELM_VERSION=${HELM_VERSION}" \
   -f Dockerfile \
   .
 
@@ -65,6 +67,47 @@ verify_rootless_user() {
 }
 
 verify_rootless_user
+
+verify_reviewer_runtime() {
+  local ctr config_json
+  ctr="$(buildah from "${primary_tag}")"
+  if ! buildah run "${ctr}" -- python3 --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "python3 missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- helm version --short; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "helm missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- test -f /app/review-skills/gitops-apply-review/SKILL.md; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "gitops-apply-review skill missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! config_json="$(
+    buildah run \
+      --env OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+      --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
+      "${ctr}" -- \
+      timeout 120 sh -c 'cd /work && git init -q && opencode debug config'
+  )"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "opencode debug config failed" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null; then
+    printf '%s\n' "${config_json}" >&2
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "opencode debug config did not load skills.paths /app/review-skills" >&2
+    exit 1
+  fi
+  echo "Verified python3, helm, gitops-apply-review skill, and opencode debug config"
+  buildah rm "${ctr}" >/dev/null
+}
+
+verify_reviewer_runtime
 
 if [ "${PUSH_IMAGE:-false}" = "true" ]; then
   : "${REGISTRY:?REGISTRY is required when PUSH_IMAGE=true}"

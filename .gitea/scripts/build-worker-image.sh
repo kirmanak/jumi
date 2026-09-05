@@ -12,6 +12,7 @@ fi
 
 : "${BUN_VERSION:?BUN_VERSION is required}"
 : "${OPENCODE_VERSION:?OPENCODE_VERSION is required}"
+: "${HELM_VERSION:?HELM_VERSION is required}"
 
 primary_tag="$1"
 shift
@@ -41,6 +42,7 @@ buildah bud \
   "${tag_args[@]}" \
   --build-arg "BUN_VERSION=${BUN_VERSION}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
+  --build-arg "HELM_VERSION=${HELM_VERSION}" \
   -f Dockerfile \
   .
 

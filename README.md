@@ -112,7 +112,7 @@ Optional environment variables:
 | `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
 | `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment |
 | `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
-| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/external_directory/task/skill/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
+| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; only `gitops-apply-review` is allowed; other skills denied (`skills.paths`); edit/external_directory/task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
 | `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. The service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy. |
 | `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
 | `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
@@ -208,7 +208,7 @@ The service rejects requests that fail any of these checks:
 | Scope | Repository owner must be in `GITEA_ALLOWED_ORGS`, or that list must include `*` |
 | Repo allowlist | `GITEA_ALLOWED_REPOS` is enforced when set |
 
-OpenCode permissions live in `.gitea/opencode-review.json`. File edits, external directory access, tasks, questions, skills, and LSP stay denied. Documentation lookup is allowed through OpenCode web fetch/search. Bash is **allow-by-default** (no command allowlist / no dump denylist). The image `entrypoint.sh` copies `GITEA_BOT_TOKEN` / webhook secrets to a 0600 tmpfs file, unsets them, and `exec`s bun so `/proc/<pid>/environ` is the cleaned execve image (`unsetenv` does **not** rewrite that file). `loadConfig` then reads the file and unlinks it; secrets stay in process memory only. The OpenCode child gets `XDG_CONFIG_HOME` under the ephemeral workspace so a review cannot persist a loosened `opencode.json` on the `/data` PVC. `/app` stays root-owned; only `/data` and `/work` are writable by uid 10001. xAI credentials stay in OpenCode `auth.json` on `/data` because the child needs them. Reviewer `reasoningEffort` is pinned `high` for grok-4.5, grok-4.6, and gpt-5.5. The image still ships `git`, `ripgrep`, `jq`, and `file`.
+OpenCode permissions live in `.gitea/opencode-review.json`. File edits, external directory access, tasks, questions, and LSP stay denied. Only `gitops-apply-review` is allowed; other skills denied so the reviewer can load that baked skill (Helm/K8s/`k3s/` first-apply pitfalls) from `/app/review-skills` via `skills.paths` in that JSON — not `OPENCODE_CONFIG_DIR`, which would npm-install into a config directory. Documentation lookup is allowed through OpenCode web fetch/search. Bash is **allow-by-default** (no command allowlist / no dump denylist). The image `entrypoint.sh` copies `GITEA_BOT_TOKEN` / webhook secrets to a 0600 tmpfs file, unsets them, and `exec`s bun so `/proc/<pid>/environ` is the cleaned execve image (`unsetenv` does **not** rewrite that file). `loadConfig` then reads the file and unlinks it; secrets stay in process memory only. The OpenCode child gets `XDG_CONFIG_HOME` under the ephemeral workspace so a review cannot persist a loosened `opencode.json` on the `/data` PVC. `/app` stays root-owned; only `/data` and `/work` are writable by uid 10001. xAI credentials stay in OpenCode `auth.json` on `/data` because the child needs them. Reviewer `reasoningEffort` is pinned `high` for grok-4.5, grok-4.6, and gpt-5.5. The image ships `git`, `ripgrep`, `jq`, `file`, `python3`, and pinned `helm` (no `kubectl`).
 
 ## Local Development
 
@@ -238,11 +238,13 @@ bun run server
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
   opencode-implement.json    # Implement config (edit/write allow; no git commit/push)
-  tool-versions.env          # Pinned OpenCode/Bun versions
+  tool-versions.env          # Pinned OpenCode/Bun/Helm versions
   workflows/
     opencode-checks.yml      # PR lint/typecheck/test and image build checks
     jumi-reviewer-image.yml  # Reviewer image build/push workflow
     jumi-worker-image.yml    # Worker image build/push workflow
+review-skills/
+  gitops-apply-review/       # Baked reviewer skill (copied to /app/review-skills)
 scripts/
   opencode/
     src/                     # Bun/TypeScript reviewer and issue worker

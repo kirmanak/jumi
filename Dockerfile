@@ -1,8 +1,10 @@
 ARG BUN_VERSION=1.2.5
+ARG HELM_VERSION=3.18.6
 
 FROM oven/bun:${BUN_VERSION}-slim AS build
 
 ARG OPENCODE_VERSION=1.15.5
+ARG HELM_VERSION=3.18.6
 ARG TARGETARCH
 
 RUN apt-get update \
@@ -19,6 +21,17 @@ RUN set -eu; \
     tar -xzf "${tmp_dir}/opencode.tar.gz" -C "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/opencode" /usr/local/bin/opencode; \
     rm -rf "${tmp_dir}"
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) helm_arch="amd64" ;; \
+      arm64) helm_arch="arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${helm_arch}.tar.gz" -o "${tmp_dir}/helm.tar.gz"; \
+    tar -xzf "${tmp_dir}/helm.tar.gz" -C "${tmp_dir}"; \
+    install -m 755 "${tmp_dir}/linux-${helm_arch}/helm" /usr/local/bin/helm; \
+    rm -rf "${tmp_dir}"
 
 WORKDIR /app/scripts/opencode
 COPY scripts/opencode/package.json scripts/opencode/bun.lock ./
@@ -34,20 +47,24 @@ COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils libstdc++6 \
+  && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils libstdc++6 python3 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
+COPY --from=build /usr/local/bin/helm /usr/local/bin/helm
 RUN git --version \
   && rg --version \
   && jq --version \
   && file --version \
+  && python3 --version \
+  && helm version --short \
   && bun --version \
   && /usr/local/bin/opencode version
 
 WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./
 COPY --from=build /app/.gitea /app/.gitea
+COPY review-skills /app/review-skills
 COPY scripts/opencode/entrypoint.sh /app/scripts/opencode/entrypoint.sh
 RUN chmod 755 /app/scripts/opencode/entrypoint.sh
 

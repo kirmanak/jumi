@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 interface OpenCodeReviewConfig {
   model?: unknown;
   small_model?: unknown;
   enabled_providers?: unknown;
+  skills?: { paths?: string[] };
   provider?: {
     xai?: {
       models?: Record<string, { options?: { reasoningEffort?: unknown } }>;
@@ -22,7 +23,9 @@ interface OpenCodeReviewConfig {
     task: "allow" | "ask" | "deny";
     external_directory: "allow" | "ask" | "deny";
     lsp: "allow" | "ask" | "deny";
-    skill: "allow" | "ask" | "deny";
+    skill: "allow" | "ask" | "deny" | { [pattern: string]: "allow" | "ask" | "deny" };
+    question: "allow" | "ask" | "deny";
+    doom_loop: "allow" | "ask" | "deny";
   };
 }
 
@@ -58,14 +61,18 @@ describe("opencode review config", () => {
     expect(config.provider?.openai?.models?.["gpt-5.5"]?.options?.reasoningEffort).toBe("high");
   });
 
-  test("allows docs lookup while keeping mutation-oriented tools denied", () => {
+  test("allows docs lookup and skills while keeping mutation-oriented tools denied", () => {
     expect(config.permission.webfetch).toBe("allow");
     expect(config.permission.websearch).toBe("allow");
+    expect(config.permission.skill).not.toBe("allow");
+    expect(config.permission.skill).toEqual({ "*": "deny", "gitops-apply-review": "allow" });
     expect(config.permission.lsp).toBe("deny");
     expect(config.permission.edit).toBe("deny");
     expect(config.permission.task).toBe("deny");
+    expect(config.permission.question).toBe("deny");
+    expect(config.permission.doom_loop).toBe("deny");
     expect(config.permission.external_directory).toBe("deny");
-    expect(config.permission.skill).toBe("deny");
+    expect(config.skills?.paths).toEqual(["/app/review-skills"]);
   });
 
   test("defaults bash to allow, including pipes, quotes, and previously sealed searches", () => {
@@ -80,14 +87,32 @@ describe("opencode review config", () => {
     expect(bashPermission(bash, "rg -n checksum values.yaml | head")).toBe("allow");
     expect(bashPermission(bash, "cat src/data/config.json")).toBe("allow");
     expect(bashPermission(bash, "git status --short && git diff --stat jumi/target...HEAD")).toBe("allow");
+    expect(bashPermission(bash, "git commit -m wip")).toBe("allow");
+    expect(Object.keys(bash).some((pattern) => pattern.includes("git commit"))).toBe(false);
   });
 });
 
 describe("reviewer image permissions", () => {
-  const dockerfile = readFileSync(join(process.cwd(), "../../Dockerfile"), "utf8");
+  const repoRoot = join(process.cwd(), "../..");
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+  const skillPath = join(repoRoot, "review-skills/gitops-apply-review/SKILL.md");
 
   test("does not chown /app to the reviewer uid", () => {
     expect(dockerfile).not.toMatch(/chown\s+-R\s+jumi:jumi\s+\/app/);
     expect(dockerfile).toMatch(/chown\s+-R\s+jumi:jumi\s+\/data\s+\/work/);
+  });
+
+  test("copies gitops-apply-review into the image layout the config points at", () => {
+    expect(existsSync(skillPath)).toBe(true);
+    expect(readFileSync(skillPath, "utf8")).toContain("name: gitops-apply-review");
+    expect(dockerfile).toContain("COPY review-skills /app/review-skills");
+  });
+
+  test("installs python3 and helm in the runtime image", () => {
+    expect(dockerfile).toMatch(/python3/);
+    expect(dockerfile).toMatch(/python3 --version/);
+    expect(dockerfile).toMatch(/helm version --short/);
+    expect(dockerfile).toMatch(/get\.helm\.sh\/helm-v\$\{HELM_VERSION\}/);
+    expect(dockerfile).not.toMatch(/kubectl/);
   });
 });

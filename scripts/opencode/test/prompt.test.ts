@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPROpenedPrompt } from "../src/prompt.ts";
+import { buildPROpenedPrompt, touchesGitOpsApplyReview } from "../src/prompt.ts";
 import { makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("buildPROpenedPrompt", () => {
@@ -52,6 +52,23 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("LSP is also allowed");
     expect(prompt).toContain("<!-- jumi-check: success -->");
     expect(prompt).toContain("<!-- jumi-check: failure -->");
+    expect(prompt).toContain("gitops-apply-review");
+    expect(prompt).toContain("Do not read charts/*.tgz");
+    expect(prompt).toContain("Never run helm upgrade, helm install, or kubectl apply");
+  });
+
+  test("tells the reviewer to load gitops-apply-review when Helm/K8s paths change", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
+    });
+
+    expect(touchesGitOpsApplyReview([makeFile({ filename: "k3s/apps/gitea/values.yaml" })])).toBe(true);
+    expect(touchesGitOpsApplyReview([makeFile({ filename: "charts/foo/Chart.yaml" })])).toBe(true);
+    expect(touchesGitOpsApplyReview([makeFile({ filename: "src/demo.ts" })])).toBe(false);
+    expect(prompt).toContain("Load the `gitops-apply-review` skill now");
+    expect(prompt).toContain("Do not read or `git show` `charts/*.tgz`");
   });
 
   test("includes review notes", () => {

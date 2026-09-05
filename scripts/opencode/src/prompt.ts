@@ -1,6 +1,21 @@
 import { formatLinkedIssuesXml, formatPrCommentsXml, type ReviewThread } from "./review_context.ts";
 import type { GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
+export function touchesGitOpsApplyReview(files: GiteaPRFile[]): boolean {
+  return files.some((file) => {
+    const name = file.filename.replaceAll("\\", "/");
+    return (
+      name === "k3s" ||
+      name.startsWith("k3s/") ||
+      name.includes("/k3s/") ||
+      name === "Chart.yaml" ||
+      name.endsWith("/Chart.yaml") ||
+      name === "values.yaml" ||
+      name.endsWith("/values.yaml")
+    );
+  });
+}
+
 /** Escape XML special characters in text content */
 function escapeXml(str: string): string {
   return str
@@ -44,6 +59,7 @@ const PREAMBLE = `You are OpenCode, an AI code review assistant integrated into 
   <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
   <rule>Do NOT edit files.</rule>
   <rule>Do NOT run mutating git commands, builds, package installs, or arbitrary network shell commands.</rule>
+  <rule>If the diff touches k3s/, Chart.yaml, or values.yaml, load the gitops-apply-review skill. Do not read charts/*.tgz. Never run helm upgrade, helm install, or kubectl apply.</rule>
   <rule>Respond with a plain markdown PR review comment, then one jumi-check HTML comment.</rule>
 </rules>`;
 
@@ -87,6 +103,11 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
     : "";
   const commentsXml = formatPrCommentsXml(thread?.comments ?? []);
   const linkedXml = formatLinkedIssuesXml(thread?.linkedIssues ?? []);
+  const gitOpsSkill = touchesGitOpsApplyReview(prFiles)
+    ? `
+
+This pull request touches Helm/Kubernetes paths (\`k3s/\`, Chart.yaml, or values.yaml). Load the \`gitops-apply-review\` skill now. Do not wait to discover it. Do not read or \`git show\` \`charts/*.tgz\`. Never run \`helm upgrade\`, \`helm install\`, or \`kubectl apply\`.`
+    : "";
 
   return `${PREAMBLE}
 
@@ -102,6 +123,7 @@ ${formatPRFiles(prFiles)}
     </pull_request_changed_files>
   </pull_request>${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}
 </gitea_action_context>
+${gitOpsSkill}
 
 Review the pull request above using the checked-out repository and the caveman-review skill below. The PR head is checked out on jumi/pr-${pr.number}; the stable target ref is jumi/target. Prefer stable refs like jumi/target and HEAD in shell commands instead of untrusted branch names.
 <linked_issues> and <comments> are product intent and prior discussion. Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug.

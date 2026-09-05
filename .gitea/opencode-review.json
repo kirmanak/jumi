@@ -28,6 +28,9 @@
       }
     }
   },
+  "skills": {
+    "paths": ["/app/review-skills"]
+  },
   "permission": {
     "read": "allow",
     "glob": "allow",
@@ -44,7 +47,7 @@
     "webfetch": "allow",
     "websearch": "allow",
     "lsp": "deny",
-    "skill": "deny",
+    "skill": { "*": "deny", "gitops-apply-review": "allow" },
     "doom_loop": "deny"
   }
 }
