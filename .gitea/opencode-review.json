@@ -36,7 +36,8 @@
     "glob": "allow",
     "grep": "allow",
     "list": "allow",
-    "edit": "deny",
+    "edit": "allow",
+    "write": "allow",
     "bash": {
       "*": "allow"
     },

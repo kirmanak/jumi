@@ -18,7 +18,7 @@ Gitea org/user/system webhook
   -> commit status + sticky Gitea PR comment
 ```
 
-The service posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in the OpenCode output (`<!-- jumi-check: success -->` or `<!-- jumi-check: failure -->`), not by grepping 🔴/🟡 in the prose:
+The service posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `JUMI_REVIEW.md` (`<!-- jumi-check: success -->` or `<!-- jumi-check: failure -->`), not from OpenCode stdout and not by grepping 🔴/🟡 in the prose:
 
 - `pending` while the review is running
 - `success` / `failure` from that trailer (❓ may still be `success`)
@@ -112,7 +112,7 @@ Optional environment variables:
 | `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
 | `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment |
 | `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
-| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; only `gitops-apply-review` is allowed; other skills denied (`skills.paths`); edit/external_directory/task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
+| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`; only `gitops-apply-review` is allowed (`skills.paths`); other skills denied; external_directory/task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
 | `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. The service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy. |
 | `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
 | `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
@@ -121,7 +121,7 @@ Optional environment variables:
 | `QUEUE_CONCURRENCY` | `1` | Review worker concurrency |
 | `MAX_FILES` | `100` | Max changed files sent to OpenCode |
 | `MAX_PATCH_BYTES` | `500000` | Max patch bytes sent to OpenCode |
-| `MAX_OUTPUT_BYTES` | `80000` | Max OpenCode output bytes posted back |
+| `MAX_OUTPUT_BYTES` | `80000` | Max OpenCode stdout bytes and max `JUMI_REVIEW.md` bytes; oversized artifacts fail closed without a sticky |
 | `MAX_WEBHOOK_BYTES` | `1048576` | Max accepted webhook payload bytes |
 | `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics` |
@@ -208,7 +208,7 @@ The service rejects requests that fail any of these checks:
 | Scope | Repository owner must be in `GITEA_ALLOWED_ORGS`, or that list must include `*` |
 | Repo allowlist | `GITEA_ALLOWED_REPOS` is enforced when set |
 
-OpenCode permissions live in `.gitea/opencode-review.json`. File edits, external directory access, tasks, questions, and LSP stay denied. Only `gitops-apply-review` is allowed; other skills denied so the reviewer can load that baked skill (Helm/K8s/`k3s/` first-apply pitfalls) from `/app/review-skills` via `skills.paths` in that JSON — not `OPENCODE_CONFIG_DIR`, which would npm-install into a config directory. Documentation lookup is allowed through OpenCode web fetch/search. Bash is **allow-by-default** (no command allowlist / no dump denylist). The image `entrypoint.sh` copies `GITEA_BOT_TOKEN` / webhook secrets to a 0600 tmpfs file, unsets them, and `exec`s bun so `/proc/<pid>/environ` is the cleaned execve image (`unsetenv` does **not** rewrite that file). `loadConfig` then reads the file and unlinks it; secrets stay in process memory only. The OpenCode child gets `XDG_CONFIG_HOME` under the ephemeral workspace so a review cannot persist a loosened `opencode.json` on the `/data` PVC. `/app` stays root-owned; only `/data` and `/work` are writable by uid 10001. xAI credentials stay in OpenCode `auth.json` on `/data` because the child needs them. Reviewer `reasoningEffort` is pinned `high` for grok-4.5, grok-4.6, and gpt-5.5. The image ships `git`, `ripgrep`, `jq`, `file`, `python3`, and pinned `helm` (no `kubectl`).
+OpenCode permissions live in `.gitea/opencode-review.json`. Edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`. External directory access, tasks, questions, and LSP stay denied. Only `gitops-apply-review` is allowed; other skills denied so the reviewer can load that baked skill (Helm/K8s/`k3s/` first-apply pitfalls) from `/app/review-skills` via `skills.paths` in that JSON — not `OPENCODE_CONFIG_DIR`, which would npm-install into a config directory. Documentation lookup is allowed through OpenCode web fetch/search. Bash is **allow-by-default** (no command allowlist / no dump denylist). The image `entrypoint.sh` copies `GITEA_BOT_TOKEN` / webhook secrets to a 0600 tmpfs file, unsets them, and `exec`s bun so `/proc/<pid>/environ` is the cleaned execve image (`unsetenv` does **not** rewrite that file). `loadConfig` then reads the file and unlinks it; secrets stay in process memory only. The OpenCode child gets `XDG_CONFIG_HOME` under the ephemeral workspace so a review cannot persist a loosened `opencode.json` on the `/data` PVC. `/app` stays root-owned; only `/data` and `/work` are writable by uid 10001. xAI credentials stay in OpenCode `auth.json` on `/data` because the child needs them. Reviewer `reasoningEffort` is pinned `high` for grok-4.5, grok-4.6, and gpt-5.5. The image ships `git`, `ripgrep`, `jq`, `file`, `python3`, and pinned `helm` (no `kubectl`).
 
 ## Local Development
 

@@ -32,7 +32,7 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("web search/fetch");
   });
 
-  test("tells the reviewer the shell is open and not to mutate the checkout", () => {
+  test("asks for JUMI_REVIEW.md with the review rubric and no commit or push", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
       pr: makePR(),
@@ -47,8 +47,19 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("git diff --stat jumi/target...HEAD");
     expect(prompt).toContain("Prefer built-in read/list/glob/grep");
     expect(prompt).toContain("Do not dump large patches into context");
-    expect(prompt).toContain("Do NOT edit files");
-    expect(prompt).toContain("Do NOT run mutating git commands");
+    expect(prompt).toContain("JUMI_REVIEW.md");
+    expect(prompt).toContain("Do not git add source, git commit, git push, or force-push");
+    expect(prompt).toContain("REVIEW.md");
+    expect(prompt).not.toContain("ci/assert.sh");
+    expect(prompt).not.toContain("python3 -m unittest");
+    expect(prompt).toContain("charts/*.tgz");
+    expect(prompt).toContain("runtime-apply");
+    expect(prompt).toContain("💡");
+    expect(prompt).toContain("great work");
+    expect(prompt).not.toContain("Do NOT edit files");
+    expect(prompt).not.toContain("CAVEMAN_REVIEW_SKILL");
+    expect(prompt).not.toContain("caveman-review");
+    expect(prompt).not.toContain("one line per finding");
     expect(prompt).not.toContain("LSP is also allowed");
     expect(prompt).toContain("<!-- jumi-check: success -->");
     expect(prompt).toContain("<!-- jumi-check: failure -->");

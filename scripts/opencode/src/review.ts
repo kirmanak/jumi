@@ -1,3 +1,5 @@
+import { lstat, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
@@ -14,7 +16,7 @@ import type {
   ReviewJob,
 } from "./types.ts";
 import { parseReviewOutput } from "./verdict.ts";
-import { checkoutPullRequestWorkspace } from "./workspace.ts";
+import { checkoutPullRequestWorkspace, type GitRunner, runGit } from "./workspace.ts";
 
 async function logParentDiag(
   log: (message: string) => void,
@@ -86,6 +88,7 @@ export interface ReviewOptions {
   maxOutputBytes?: number;
   openCodeRunner?: OpenCodeRunner;
   workspacePreparer?: WorkspacePreparer;
+  gitRunner?: GitRunner;
   logger?: (message: string) => void;
 }
 
@@ -115,6 +118,56 @@ function buildCommentBody(marker: string, headSha: string, output: string): stri
 
 const CHECK_CONTEXT = "jumi/opencode-review";
 const MAX_STATUS_DESCRIPTION_BYTES = 255;
+const REVIEW_ARTIFACT = "JUMI_REVIEW.md";
+const DEFAULT_MAX_OUTPUT_BYTES = 80_000;
+
+function unquotePorcelainPath(path: string): string {
+  let value = path;
+  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+    value = value.slice(1, -1).replace(/\\([n"\\])/g, (_, ch: string) => (ch === "n" ? "\n" : ch));
+  }
+  if (value.endsWith("/")) value = value.slice(0, -1);
+  return value;
+}
+
+function porcelainPaths(line: string): string[] {
+  if (line.length < 4) return [unquotePorcelainPath(line)];
+  const rest = line.slice(3);
+  const arrow = " -> ";
+  const idx = rest.indexOf(arrow);
+  const parts = idx === -1 ? [rest] : [rest.slice(0, idx), rest.slice(idx + arrow.length)];
+  return parts.map(unquotePorcelainPath);
+}
+
+function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
+  for (const line of porcelain.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT)) return false;
+  }
+  return true;
+}
+
+function porcelainIncludesReviewArtifact(porcelain: string): boolean {
+  for (const line of porcelain.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    if (porcelainPaths(line).some((path) => path === REVIEW_ARTIFACT)) return true;
+  }
+  return false;
+}
+
+type ReviewArtifactRead = { status: "ok"; content: string } | { status: "missing" } | { status: "too_large" };
+
+async function readReviewArtifact(worktree: string, maxOutputBytes: number): Promise<ReviewArtifactRead> {
+  const path = join(worktree, REVIEW_ARTIFACT);
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) return { status: "missing" };
+    if (info.size > maxOutputBytes) return { status: "too_large" };
+    return { status: "ok", content: await readFile(path, "utf8") };
+  } catch {
+    return { status: "missing" };
+  }
+}
 
 function truncateStatusDescription(description: string): string {
   const bytes = encoder.encode(description);
@@ -158,8 +211,8 @@ function statusForResult(
   verdict?: { state: GiteaCommitStatusPayload["state"]; description: string }
 ): { state: GiteaCommitStatusPayload["state"]; description: string } {
   if (result.status === "skipped") {
-    if (result.reason === "OpenCode produced no output") {
-      return { state: "failure", description: "Incomplete review: no output" };
+    if (result.reason?.startsWith("Incomplete review:")) {
+      return { state: "failure", description: result.reason };
     }
     return { state: "warning", description: statusDescriptionForSkip(result) };
   }
@@ -366,61 +419,104 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       output_bytes_h: formatBytes(byteLength(output)),
     });
 
-    if (!output.trim()) {
-      const result: ReviewResult = { status: "skipped", reason: "OpenCode produced no output" };
-      const { state, description } = statusForResult(result);
-      await postReviewStatus(opts, reviewedHeadSha, state, description, pr.html_url);
-      return result;
-    }
+    await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
+    const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
+    try {
+      await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
+      const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+      const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
+      if (currentSkipReason) {
+        const result: ReviewResult = { status: "skipped", reason: currentSkipReason };
+        const { state, description } = statusForResult(result);
+        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
+        return result;
+      }
 
-    await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
-    const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
-    const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
-    if (currentSkipReason) {
-      const result: ReviewResult = { status: "skipped", reason: currentSkipReason };
-      const { state, description } = statusForResult(result);
-      await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-      return result;
-    }
+      const git = opts.gitRunner ?? runGit;
+      const gitCmdEnv: Record<string, string | undefined> = {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        LANG: process.env.LANG,
+        LC_ALL: process.env.LC_ALL,
+        GIT_TERMINAL_PROMPT: "0",
+      };
+      const headAfter = (await git(["rev-parse", "HEAD"], { cwd: opts.workspace, env: gitCmdEnv })).trim();
+      if (headAfter !== reviewedHeadSha) {
+        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: HEAD moved" };
+        const { state, description } = statusForResult(result);
+        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
+        return result;
+      }
 
-    const marker = markerFor(opts.owner, opts.repo, currentPR.number);
-    const parsed = parseReviewOutput(output);
-    const body = buildCommentBody(marker, reviewedHeadSha, parsed.comment);
-    await logParentDiag(log, "post_find_sticky", {
-      review: reviewLabel,
-      body_bytes: byteLength(body),
-      body_bytes_h: formatBytes(byteLength(body)),
-    });
-    const existing = await opts.api.findStickyIssueComment(
-      opts.owner,
-      opts.repo,
-      currentPR.number,
-      opts.botUsername,
-      marker
-    );
-    await logParentDiag(log, "post_sticky_result", {
-      review: reviewLabel,
-      sticky_id: existing?.id ?? null,
-      sticky_found: Boolean(existing),
-    });
+      const porcelain = await git(["status", "--porcelain"], { cwd: opts.workspace, env: gitCmdEnv });
+      if (!porcelainAllowsOnlyReviewArtifact(porcelain)) {
+        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: dirty tree" };
+        const { state, description } = statusForResult(result);
+        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
+        return result;
+      }
+      if (!porcelainIncludesReviewArtifact(porcelain)) {
+        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: no output" };
+        const { state, description } = statusForResult(result);
+        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
+        return result;
+      }
 
-    if (existing) {
-      await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
-      const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
-      const result: ReviewResult = { status: "updated", commentId: updated.id };
+      const artifact = await readReviewArtifact(opts.workspace, opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+      if (artifact.status === "too_large") {
+        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: output too large" };
+        const { state, description } = statusForResult(result);
+        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
+        return result;
+      }
+      if (artifact.status === "missing" || !artifact.content.trim()) {
+        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: no output" };
+        const { state, description } = statusForResult(result);
+        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
+        return result;
+      }
+
+      const marker = markerFor(opts.owner, opts.repo, currentPR.number);
+      const parsed = parseReviewOutput(artifact.content);
+      const body = buildCommentBody(marker, reviewedHeadSha, parsed.comment);
+      await logParentDiag(log, "post_find_sticky", {
+        review: reviewLabel,
+        body_bytes: byteLength(body),
+        body_bytes_h: formatBytes(byteLength(body)),
+      });
+      const existing = await opts.api.findStickyIssueComment(
+        opts.owner,
+        opts.repo,
+        currentPR.number,
+        opts.botUsername,
+        marker
+      );
+      await logParentDiag(log, "post_sticky_result", {
+        review: reviewLabel,
+        sticky_id: existing?.id ?? null,
+        sticky_found: Boolean(existing),
+      });
+
+      if (existing) {
+        await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
+        const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
+        const result: ReviewResult = { status: "updated", commentId: updated.id };
+        const { state, description } = statusForResult(result, parsed.verdict);
+        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
+        await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
+        return result;
+      }
+
+      await logParentDiag(log, "post_comment_create", { review: reviewLabel });
+      const created = await opts.api.createIssueComment(opts.owner, opts.repo, currentPR.number, body);
+      const result: ReviewResult = { status: "posted", commentId: created.id };
       const { state, description } = statusForResult(result, parsed.verdict);
       await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
       await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
       return result;
+    } finally {
+      await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
     }
-
-    await logParentDiag(log, "post_comment_create", { review: reviewLabel });
-    const created = await opts.api.createIssueComment(opts.owner, opts.repo, currentPR.number, body);
-    const result: ReviewResult = { status: "posted", commentId: created.id };
-    const { state, description } = statusForResult(result, parsed.verdict);
-    await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-    await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
-    return result;
   } catch (err) {
     await postReviewStatus(
       opts,
