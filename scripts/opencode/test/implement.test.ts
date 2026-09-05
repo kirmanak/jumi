@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, readClaim } from "../src/claim.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
-import { cancelIssueWork, implementIssue } from "../src/implement.ts";
+import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo } from "./fixtures.ts";
 
@@ -65,6 +65,40 @@ async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
     await rm(workdir, { recursive: true, force: true });
   }
 }
+
+describe("buildPullRequestBody", () => {
+  test("falls back for null, empty, and whitespace-only contents", () => {
+    expect(buildPullRequestBody(12, null)).toBe("Fixes #12");
+    expect(buildPullRequestBody(12, undefined)).toBe("Fixes #12");
+    expect(buildPullRequestBody(12, "")).toBe("Fixes #12");
+    expect(buildPullRequestBody(12, "  \n")).toBe("Fixes #12");
+  });
+
+  test("appends Fixes #n when the text has no close keyword", () => {
+    expect(buildPullRequestBody(12, "Caches categories.")).toBe("Caches categories.\n\nFixes #12");
+  });
+
+  test("does not duplicate an existing close keyword for this issue", () => {
+    expect(buildPullRequestBody(12, "Caches categories.\n\nFixes #12")).toBe("Caches categories.\n\nFixes #12");
+    expect(buildPullRequestBody(12, "Closes #12")).toBe("Closes #12");
+    expect(buildPullRequestBody(12, "Fixed #12")).toBe("Fixed #12");
+  });
+
+  test("still appends Fixes #n when a different issue is mentioned", () => {
+    expect(buildPullRequestBody(12, "Fixes #13")).toBe("Fixes #13\n\nFixes #12");
+  });
+
+  test("truncates to 8000 characters and still includes the close keyword", () => {
+    const body = buildPullRequestBody(12, "x".repeat(9000));
+    expect(body.length).toBeLessThanOrEqual(8000 + "\n\nFixes #12".length);
+    expect(body.endsWith("\n\nFixes #12")).toBe(true);
+    expect(body.startsWith("x".repeat(8000))).toBe(true);
+  });
+
+  test("strips NUL bytes", () => {
+    expect(buildPullRequestBody(12, "Caches\0 categories.")).toBe("Caches categories.\n\nFixes #12");
+  });
+});
 
 describe("implementIssue", () => {
   test("skips when an open PR already closes the issue", async () => {
@@ -500,6 +534,269 @@ describe("implementIssue", () => {
         },
       });
       expect(killed).toEqual([]);
+    });
+  });
+
+  test("uses JUMI_PR.md as the PR body and removes it before porcelain", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      let statusSawPrFile = false;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") {
+          try {
+            await access(join(worktree, "JUMI_PR.md"));
+            statusSawPrFile = true;
+            return "?? JUMI_PR.md";
+          } catch {
+            return " M src/demo.ts";
+          }
+        }
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(worktree, { recursive: true });
+          await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      expect(api.pulls[0]).toMatchObject({ body: "Caches categories.\n\nFixes #12" });
+      expect(statusSawPrFile).toBe(false);
+      await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
+    });
+  });
+
+  test("does not duplicate Fixes #n when JUMI_PR.md already closes the issue", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(worktree, { recursive: true });
+          await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.\n\nFixes #12");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(api.pulls[0]).toMatchObject({ body: "Caches categories.\n\nFixes #12" });
+    });
+  });
+
+  test("falls back to Fixes #n when JUMI_PR.md is empty", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(worktree, { recursive: true });
+          await writeFile(join(worktree, "JUMI_PR.md"), "");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12" });
+    });
+  });
+
+  test("does not open a PR when only JUMI_PR.md was written", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") {
+          try {
+            await access(join(worktree, "JUMI_PR.md"));
+            return "?? JUMI_PR.md";
+          } catch {
+            return "";
+          }
+        }
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(worktree, { recursive: true });
+          await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(api.pulls).toHaveLength(0);
+    });
+  });
+
+  test("opens a PR from JUMI_PR.md when HEAD is already ahead with a clean tree", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "1";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(worktree, { recursive: true });
+          await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      expect(api.pulls[0]).toMatchObject({ body: "Caches categories.\n\nFixes #12" });
+      expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
+    });
+  });
+
+  test("treats a JUMI_PR.md symlink as missing and does not follow it", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(worktree, { recursive: true });
+          await writeFile(join(worktree, "secret.md"), "Should not appear.");
+          await symlink(join(worktree, "secret.md"), join(worktree, "JUMI_PR.md"));
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12" });
+    });
+  });
+
+  test("treats a JUMI_PR.md directory as missing without throwing", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      let statusSawPrDir = false;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") {
+          try {
+            await access(join(worktree, "JUMI_PR.md"));
+            statusSawPrDir = true;
+            return "?? JUMI_PR.md/";
+          } catch {
+            return " M src/demo.ts";
+          }
+        }
+        return "";
+      };
+      await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(join(worktree, "JUMI_PR.md"), { recursive: true });
+          await writeFile(join(worktree, "JUMI_PR.md", "nested.md"), "Should not appear.");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12" });
+      expect(statusSawPrDir).toBe(false);
+      await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
     });
   });
 

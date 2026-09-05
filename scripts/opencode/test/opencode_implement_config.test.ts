@@ -68,5 +68,7 @@ describe("implement prompt", () => {
     expect(IMPLEMENT_PROMPT).toContain("Do not force-push");
     expect(IMPLEMENT_PROMPT).toContain("Do not ask questions");
     expect(IMPLEMENT_PROMPT).not.toContain("Do not run git");
+    expect(IMPLEMENT_PROMPT).toContain("JUMI_PR.md");
+    expect(IMPLEMENT_PROMPT).toContain("Do not open the pull request");
   });
 });

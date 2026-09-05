@@ -1,17 +1,19 @@
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isAssignedToBot } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
 import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim, writeClaim } from "./claim.ts";
 import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
-import { findOpenClosingPullRequest, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
+import { closesIssuePattern, findOpenClosingPullRequest, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import type { IssueJob } from "./types.ts";
 import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 const COMMIT_NAME = "jumi";
 const COMMIT_EMAIL = "jumi@noreply.kirmanak.stream";
+const PR_BODY_MAX_CHARS = 8000;
+const PR_DESCRIPTION_FILE = "JUMI_PR.md";
 
 export type OpenCodeRunner = (prompt: string, opts: OpenCodeRunOptions) => Promise<string>;
 
@@ -96,7 +98,29 @@ function buildTaskMarkdown(job: IssueJob): string {
 export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
 Edit, write, commit, and push as needed. Incremental commits are fine.
 Do not force-push. Do not ask questions.
-When the task is complete, stop.`;
+When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
+Then stop.`;
+
+export function buildPullRequestBody(issueNumber: number, fileContents: string | null | undefined): string {
+  const fallback = `Fixes #${issueNumber}`;
+  if (fileContents == null) return fallback;
+  let text = fileContents.replaceAll("\0", "").trim();
+  if (!text) return fallback;
+  if (text.length > PR_BODY_MAX_CHARS) text = text.slice(0, PR_BODY_MAX_CHARS);
+  if (closesIssuePattern(issueNumber).test(text)) return text;
+  return `${text}\n\n${fallback}`;
+}
+
+async function readPullRequestDescription(worktree: string): Promise<string | null> {
+  const path = join(worktree, PR_DESCRIPTION_FILE);
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) return null;
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
 
 export async function implementIssue(opts: ImplementOptions): Promise<ImplementResult> {
   const log = opts.logger ?? logDefault;
@@ -299,6 +323,8 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
     });
 
     throwIfAborted(opts.abortSignal);
+    const prFileContents = await readPullRequestDescription(worktree);
+    await rm(join(worktree, PR_DESCRIPTION_FILE), { recursive: true, force: true }).catch(() => undefined);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
     const porcelain = (await runConfiguredGit(["status", "--porcelain"], { cwd: worktree, env })).trim();
@@ -343,7 +369,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
 
     const pr = await opts.api.createPullRequest(owner, repo, {
       title: opts.job.title,
-      body: `Fixes #${issueNumber}`,
+      body: buildPullRequestBody(issueNumber, prFileContents),
       head: branch,
       base: opts.job.defaultBranch,
     });
