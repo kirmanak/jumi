@@ -5,6 +5,7 @@ import type { ClaimRecord } from "./claim.ts";
 import {
   acquireClaim,
   claimFilePath,
+  conflictStatePath,
   deleteClaim,
   followUpStatePath,
   isPidAlive,
@@ -24,6 +25,8 @@ const PR_BODY_MAX_CHARS = 8000;
 const PR_DESCRIPTION_FILE = "JUMI_PR.md";
 
 export type OpenCodeRunner = (prompt: string, opts: OpenCodeRunOptions) => Promise<string>;
+
+export type HelmRunner = (args: string[], opts: { cwd: string }) => Promise<string>;
 
 export type ImplementResult =
   | { status: "pr"; htmlUrl: string; prNumber: number }
@@ -48,6 +51,7 @@ export interface ImplementOptions {
   abortSignal?: AbortSignal;
   gitRunner?: GitRunner;
   openCodeRunner?: OpenCodeRunner;
+  helmRunner?: HelmRunner;
   now?: () => Date;
   pid?: number;
   pidAlive?: (pid: number) => boolean;
@@ -435,4 +439,5 @@ export async function cancelIssueWork(opts: {
   await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");
   await deleteClaim(claimPath);
   await deleteClaim(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
+  await deleteClaim(conflictStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
 }

@@ -56,6 +56,7 @@ export interface GiteaPR {
   updated_at: string;
   html_url: string;
   draft?: boolean;
+  mergeable?: boolean | null;
 }
 
 export interface GiteaPRFile {
@@ -185,9 +186,19 @@ export interface IssueJob {
   defaultBranch: string;
   cloneUrl: string;
   receivedAt: string;
-  mode?: "implement" | "follow-up";
+  mode?: "implement" | "follow-up" | "conflict";
   prNumber?: number;
   trigger?: IssueJobTrigger;
+}
+
+export interface GiteaPushPayload {
+  ref: string;
+  before?: string;
+  after?: string;
+  repository: GiteaRepo;
+  pusher?: GiteaUser;
+  sender?: GiteaUser;
+  commits?: unknown[];
 }
 
 export type GiteaCommitStatusState = "pending" | "success" | "error" | "failure" | "warning";

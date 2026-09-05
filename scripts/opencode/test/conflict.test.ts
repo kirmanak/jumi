@@ -1,0 +1,803 @@
+import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { claimFilePath, conflictStatePath, readClaim, writeClaim } from "../src/claim.ts";
+import { CONFLICT_PROMPT, CONFLICT_TIMEOUT_MS, implementConflict, writeConflictState } from "../src/conflict.ts";
+import type { IssueApi } from "../src/gitea_issues.ts";
+import type { GitRunner } from "../src/workspace.ts";
+import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+
+function stripGitConfigArgs(args: string[]): string[] {
+  const result = [...args];
+  while (result[0] === "-c") result.splice(0, 2);
+  return result;
+}
+
+function jumiPr() {
+  const repo = makeRepo();
+  return makePR({
+    number: 127,
+    title: "Fix the thing",
+    body: "Fixes #12",
+    user: makeUser({ login: "jumi" }),
+    html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+    head: {
+      label: "kirmanak:jumi/issue-12-fix-the-thing",
+      ref: "jumi/issue-12-fix-the-thing",
+      sha: "headsha",
+      repo,
+      repo_id: repo.id,
+    },
+    base: {
+      label: "kirmanak:main",
+      ref: "main",
+      sha: "basesha",
+      repo,
+      repo_id: repo.id,
+    },
+  });
+}
+
+function makeApi(
+  overrides: Partial<IssueApi> = {}
+): IssueApi & { comments: string[]; pulls: unknown[]; commentIndexes: number[] } {
+  const comments: string[] = [];
+  const pulls: unknown[] = [];
+  const commentIndexes: number[] = [];
+  const defaults: IssueApi = {
+    getRepo: async () => makeRepo(),
+    getIssue: async () => makeIssue(),
+    listOpenPulls: async () => [jumiPr()],
+    createPullRequest: async (_owner, _repo, pull) => {
+      pulls.push(pull);
+      return makePR({ number: 3, title: pull.title, body: pull.body });
+    },
+    searchAssignedIssues: async () => [],
+    findStickyIssueComment: async () => undefined,
+    createIssueComment: async (_owner, _repo, index, body) => {
+      commentIndexes.push(index);
+      comments.push(body);
+      return makeComment({ body });
+    },
+    updateIssueComment: async (_owner, _repo, _id, body) => {
+      comments.push(body);
+      return makeComment({ body });
+    },
+    listIssueComments: async () => [],
+    listPullReviewComments: async () => [],
+    listPullReviews: async () => [],
+  };
+  return { ...defaults, ...overrides, comments, pulls, commentIndexes };
+}
+
+async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
+  const home = await mkdtemp(join(tmpdir(), "jumi-cf-home-"));
+  const workdir = await mkdtemp(join(tmpdir(), "jumi-cf-work-"));
+  try {
+    await run(home, workdir);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(workdir, { recursive: true, force: true });
+  }
+}
+
+function conflictJob(overrides: Parameters<typeof makeIssueJob>[0] = {}) {
+  return makeIssueJob({
+    mode: "conflict",
+    prNumber: 127,
+    action: "push",
+    trigger: { event: "push", sender: "alice" },
+    ...overrides,
+  });
+}
+
+function notAncestorGit(extra: GitRunner = async () => ""): GitRunner {
+  return async (args, opts) => {
+    const gitArgs = stripGitConfigArgs(args);
+    if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+      throw new Error("git merge-base --is-ancestor failed with exit code 1");
+    }
+    if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+    if (gitArgs[0] === "rev-parse") return "headsha";
+    return extra(args, opts);
+  };
+}
+
+describe("implementConflict", () => {
+  test("skips when no open jumi closing PR", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) })],
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "no open jumi closing PR" });
+      expect(api.pulls).toHaveLength(0);
+    });
+  });
+
+  test("checks out pr.head.ref, not a freshly slugged branch", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        return "";
+      });
+      await implementConflict({
+        api,
+        job: conflictJob({ title: "Completely Retitled Issue" }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      const slugged = "jumi/issue-12-completely-retitled-issue";
+      expect(gitCalls.some((args) => args.includes(slugged))).toBe(false);
+      expect(gitCalls.some((args) => args.includes("jumi/issue-12-fix-the-thing"))).toBe(true);
+      expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "add" && args.includes("origin/main"))).toBe(
+        false
+      );
+      expect(
+        gitCalls.some(
+          (args) =>
+            args[0] === "worktree" &&
+            args[1] === "add" &&
+            args.includes("-B") &&
+            args.includes("jumi/issue-12-fix-the-thing") &&
+            args.includes("origin/jumi/issue-12-fix-the-thing")
+        )
+      ).toBe(true);
+    });
+  });
+
+  test("already up to date → no sticky, round unchanged", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        return "";
+      };
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "up-to-date" });
+      expect(api.comments).toEqual([]);
+      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+    });
+  });
+
+  test("clean merge → commit + push -u origin <ref>, no OpenCode, no createPullRequest", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      let openCode = 0;
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "pushed",
+        prNumber: 127,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      });
+      expect(openCode).toBe(0);
+      expect(api.pulls).toHaveLength(0);
+      expect(gitCalls.find((args) => args[0] === "push")).toEqual([
+        "push",
+        "-u",
+        "origin",
+        "jumi/issue-12-fix-the-thing",
+      ]);
+      expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
+      expect(
+        gitCalls.some((args) => args[0] === "merge" && args.includes("--no-ff") && args.includes("origin/main"))
+      ).toBe(true);
+      expect(
+        gitCalls.some((args) => args[0] === "commit" && args.includes("Merge main into jumi/issue-12-fix-the-thing"))
+      ).toBe(true);
+      expect(api.comments.at(-1)).toContain("Pushed merge of main.");
+      expect(api.commentIndexes.at(-1)).toBe(127);
+    });
+  });
+
+  test("Chart.lock conflict → regenerates via helm, does not leave <<<<<<<", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const helmCalls: string[][] = [];
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") {
+          await mkdir(join(workdir, "kirmanak", "demo", "12", "charts", "app"), { recursive: true });
+          await writeFile(join(workdir, "kirmanak", "demo", "12", "charts", "app", "Chart.yaml"), "name: app\n");
+          throw new Error("git merge failed with exit code 1:\nCONFLICT Chart.lock");
+        }
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) {
+          const lock = join(workdir, "kirmanak", "demo", "12", "charts", "app", "Chart.lock");
+          try {
+            await readFile(lock);
+            return "";
+          } catch {
+            return "charts/app/Chart.lock";
+          }
+        }
+        if (gitArgs[0] === "grep") return "";
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        helmRunner: async (args, opts) => {
+          helmCalls.push(args);
+          expect(opts.cwd).toContain("charts/app");
+          await writeFile(join(opts.cwd, "Chart.lock"), "generated: true\n");
+          return "";
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(helmCalls).toEqual([["dependency", "update"]]);
+      expect(api.comments.at(-1)).toContain("Pushed merge of main.");
+    });
+  });
+
+  test("stages before unmerged check so resolved markers are not stuck", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      let openCodeRan = false;
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return openCodeRan ? "" : "src/demo.ts";
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCodeRan = true;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(openCodeRan).toBe(true);
+      const addIndex = gitCalls.findIndex((args) => args[0] === "add" && args.includes("-A"));
+      const postOpenCodeGrep = gitCalls.findIndex(
+        (args, index) => index > addIndex && args[0] === "grep" && args.includes("^<<<<<<<")
+      );
+      expect(addIndex).toBeGreaterThanOrEqual(0);
+      expect(postOpenCodeGrep).toBeGreaterThan(addIndex);
+      expect(api.comments.at(-1)).toContain("Pushed merge of main.");
+    });
+  });
+
+  test("remaining markers → writes JUMI_CONFLICT.md, uses CONFLICT_PROMPT, timeout 3600000", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      let prompt = "";
+      let timeoutMs: number | undefined;
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") {
+          throw new Error("git merge failed with exit code 1");
+        }
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return "src/demo.ts";
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (usedPrompt, opts) => {
+          prompt = usedPrompt;
+          timeoutMs = opts.timeoutMs;
+          const conflict = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CONFLICT.md"), "utf8");
+          expect(conflict).toContain("pulls/127");
+          expect(conflict).toContain("jumi/issue-12-fix-the-thing");
+          expect(conflict).toContain("src/demo.ts");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(prompt).toBe(CONFLICT_PROMPT);
+      expect(timeoutMs).toBe(CONFLICT_TIMEOUT_MS);
+      expect(timeoutMs).toBe(3_600_000);
+      expect(result).toEqual({ status: "stuck" });
+      expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts");
+    });
+  });
+
+  test("child already committed merge → parent does not fail / does not poison SHA skip", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      let openCodeRan = false;
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          if (openCodeRan) return "";
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return openCodeRan ? "" : "src/demo.ts";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("MERGE_HEAD")) {
+          if (openCodeRan) throw new Error("fatal: Needed a single revision");
+          return "mergehead";
+        }
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "commit") throw new Error("nothing to commit, working tree clean");
+        return "";
+      };
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCodeRan = true;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "pushed",
+        prNumber: 127,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      });
+      expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
+      expect(api.comments.at(-1)).toContain("Pushed merge of main.");
+      expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
+      const state = JSON.parse(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      expect(state.lastHeadSha).toBe("headsha");
+      expect(state.lastBaseSha).toBe("basesha");
+      expect(state.round).toBe(1);
+    });
+  });
+
+  test("child extraEnv has GIT_AUTH_TOKEN and not GITEA_BOT_TOKEN", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      let extraEnv: Record<string, string> | undefined;
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return extraEnv ? "" : "src/demo.ts";
+        return "";
+      });
+      await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (_prompt, opts) => {
+          extraEnv = opts.extraEnv;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
+      expect(extraEnv?.GITEA_BOT_TOKEN).toBeUndefined();
+    });
+  });
+
+  test("max 3 OpenCode/conflict rounds → stuck sticky, no OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "stuck" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts");
+    });
+  });
+
+  test("same {headSha, baseSha} after stuck → skip", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: "headsha",
+        lastBaseSha: "basesha",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      let openCode = 0;
+      const result = await implementConflict({
+        api: makeApi(),
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+          if (gitArgs[0] === "rev-parse") return "headsha";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "same head and base already attempted" });
+      expect(openCode).toBe(0);
+    });
+  });
+
+  test("push rejected + remote already contains default → reset to origin, no force-push", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        if (gitArgs[0] === "push") throw new Error("non-fast-forward");
+        return "";
+      };
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "remote already contains default" });
+      expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
+      expect(
+        gitCalls.some(
+          (args) =>
+            args[0] === "reset" && args.includes("--hard") && args.includes("origin/jumi/issue-12-fix-the-thing")
+        )
+      ).toBe(true);
+      expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
+    });
+  });
+
+  test("abort after push does not open a PR", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const abort = new AbortController();
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "push") abort.abort();
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        abortSignal: abort.signal,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "cancelled" });
+      expect(api.pulls).toHaveLength(0);
+    });
+  });
+
+  test("clone/fetch/push failure does not write lastHeadSha/lastBaseSha skip", async () => {
+    const cases: Array<{ kind: "clone" | "fetch" | "push"; prepare?: (workdir: string) => Promise<void> }> = [
+      { kind: "clone" },
+      {
+        kind: "fetch",
+        prepare: async (workdir) => {
+          await mkdir(join(workdir, "_cache", "kirmanak", "demo.git"), { recursive: true });
+        },
+      },
+      { kind: "push" },
+    ];
+    for (const { kind, prepare } of cases) {
+      await withDirs(async (home, workdir) => {
+        await prepare?.(workdir);
+        const api = makeApi();
+        const gitRunner: GitRunner =
+          kind === "push"
+            ? notAncestorGit(async (args) => {
+                const gitArgs = stripGitConfigArgs(args);
+                if (gitArgs[0] === "push") throw new Error("non-fast-forward");
+                if (gitArgs[0] === "merge-base") throw new Error("not ancestor");
+                return "";
+              })
+            : async (args) => {
+                const gitArgs = stripGitConfigArgs(args);
+                if (kind === "clone" && gitArgs[0] === "clone") throw new Error("clone failed");
+                if (kind === "fetch" && gitArgs[0] === "fetch") throw new Error("fetch failed");
+                throw new Error(`unexpected git ${gitArgs.join(" ")}`);
+              };
+        await expect(
+          implementConflict({
+            api,
+            job: conflictJob(),
+            giteaUrl: "https://gitea.kirmanak.stream",
+            giteaToken: "bot-token",
+            botUsername: "jumi",
+            model: "openai/gpt-5.5",
+            home,
+            workdir,
+            heartbeatIntervalMs: 0,
+            gitRunner,
+            openCodeRunner: async () => {
+              throw new Error("opencode should not run");
+            },
+            logger: () => undefined,
+          })
+        ).rejects.toThrow();
+        expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+        expect(api.comments.at(-1)).toContain("Jumi failed:");
+        expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
+      });
+    }
+  });
+
+  test("mergeDefaultIntoWorktree throw records SHA/round", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return "src/demo.ts";
+        return "";
+      });
+      await expect(
+        implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async () => {
+            throw new Error("opencode crashed");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("opencode crashed");
+      const state = JSON.parse(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      expect(state.lastHeadSha).toBe("headsha");
+      expect(state.lastBaseSha).toBe("basesha");
+      expect(state.round).toBe(1);
+      expect(api.comments.at(-1)).toContain("Jumi failed:");
+      expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
+    });
+  });
+
+  test("helm regen failure does not send Chart.lock to OpenCode; stuck/fail instead", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      let openCode = 0;
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") {
+          await mkdir(join(workdir, "kirmanak", "demo", "12", "charts", "app"), { recursive: true });
+          await writeFile(join(workdir, "kirmanak", "demo", "12", "charts", "app", "Chart.yaml"), "name: app\n");
+          throw new Error("git merge failed with exit code 1:\nCONFLICT Chart.lock");
+        }
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "charts/app/Chart.lock";
+        if (gitArgs[0] === "grep") return "charts/app/Chart.lock";
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        helmRunner: async () => {
+          throw new Error("helm dependency update failed");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "stuck" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts");
+      expect(api.comments.some((body) => body.includes("JUMI_CONFLICT") || body.includes("<<<<<<<"))).toBe(false);
+    });
+  });
+
+  test("terminal first-run claim does not block conflict", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeClaim(claimFilePath(home, "kirmanak", "demo", 12), {
+        pid: 0,
+        startedAt: "2026-05-23T00:00:00Z",
+        heartbeatAt: "2026-05-23T00:00:00Z",
+        worktree: "/work/12",
+        branch: "jumi/issue-12-fix-the-thing",
+        issueUpdatedAt: "2026-05-23T00:00:00Z",
+        headShaAtStart: "abc",
+        terminal: true,
+      });
+      const api = makeApi();
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: notAncestorGit(),
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
+    });
+  });
+});

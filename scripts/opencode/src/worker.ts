@@ -1,5 +1,6 @@
 import { GiteaAPI } from "./api.ts";
-import { claimFilePath, deleteClaim, followUpStatePath, readClaim } from "./claim.ts";
+import { claimFilePath, conflictStatePath, deleteClaim, followUpStatePath, readClaim } from "./claim.ts";
+import { CONFLICT_TIMEOUT_MS, implementConflict } from "./conflict.ts";
 import { FOLLOWUP_TIMEOUT_MS, implementFollowUp } from "./followup.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
@@ -47,9 +48,11 @@ export function createIssueQueue(
           logger: (message: string) => logger(message),
         };
         const result =
-          job.mode === "follow-up"
-            ? await implementFollowUp({ ...shared, timeoutMs: FOLLOWUP_TIMEOUT_MS })
-            : await implementIssue({ ...shared, timeoutMs: config.opencodeTimeoutMs });
+          job.mode === "conflict"
+            ? await implementConflict({ ...shared, timeoutMs: CONFLICT_TIMEOUT_MS })
+            : job.mode === "follow-up"
+              ? await implementFollowUp({ ...shared, timeoutMs: FOLLOWUP_TIMEOUT_MS })
+              : await implementIssue({ ...shared, timeoutMs: config.opencodeTimeoutMs });
         logger(`${key} ${result.status}${result.status === "skipped" ? `: ${result.reason}` : ""}`);
       } finally {
         aborts.delete(key);
@@ -85,6 +88,7 @@ export async function handleIssueCancel(
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
   const claim = await readClaim(claimPath);
   await deleteClaim(followUpStatePath(config.home, owner, repo, issueNumber));
+  await deleteClaim(conflictStatePath(config.home, owner, repo, issueNumber));
   if (claim?.terminal) {
     await deleteClaim(claimPath);
     return { key, cancelled: true };

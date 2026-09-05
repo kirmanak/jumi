@@ -5,12 +5,20 @@ import type { ClaimRecord } from "./claim.ts";
 import {
   acquireClaim,
   claimFilePath,
+  conflictStatePath,
   deleteClaim,
   followUpStatePath,
   isPidAlive,
   readClaim,
   writeClaim,
 } from "./claim.ts";
+import {
+  MAX_CONFLICT_ROUNDS,
+  mergeDefaultIntoWorktree,
+  readConflictState,
+  shouldIncrementRound,
+  writeConflictState,
+} from "./conflict.ts";
 import { isJumiInternalBody, isJumiWorkerBody } from "./followup_webhook.ts";
 import { runOpenCode } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -529,6 +537,13 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     await deleteClaim(claimPath);
     return { status: "skipped", reason: "no unhandled feedback" };
   }
+  const conflictPath = conflictStatePath(opts.home, owner, repo, issueNumber);
+  const previousConflict = await readConflictState(conflictPath);
+  if (previousConflict.round >= MAX_CONFLICT_ROUNDS) {
+    await sticky("stuck: cannot resolve conflicts", pr.number);
+    await deleteClaim(claimPath);
+    return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
+  }
 
   const configArgs = gitConfigArgs();
   const env = gitEnv({ giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken });
@@ -596,6 +611,10 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     });
   };
 
+  let attemptedHeadSha = "";
+  let attemptedBaseSha = "";
+  let prefixMergeThrew = false;
+
   try {
     throwIfAborted(opts.abortSignal);
     const cloneUrl = validateCloneUrl(opts.job.cloneUrl, opts.giteaUrl);
@@ -638,12 +657,29 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     throwIfAborted(opts.abortSignal);
 
     const headSha = (await runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env })).trim();
+    const baseSha = (
+      await runConfiguredGit(["rev-parse", `origin/${opts.job.defaultBranch}`], { cwd: worktree, env })
+    ).trim();
+    attemptedHeadSha = headSha;
+    attemptedBaseSha = baseSha;
     await serializeClaim(async () => {
       if (heartbeatStopped) return;
       claim.headShaAtStart = headSha;
       claim.heartbeatAt = now().toISOString();
       await writeClaim(claimPath, claim);
     });
+
+    if (
+      previousConflict.lastHeadSha &&
+      previousConflict.lastBaseSha &&
+      previousConflict.lastHeadSha === headSha &&
+      previousConflict.lastBaseSha === baseSha
+    ) {
+      await stopHeartbeat();
+      await deleteClaim(claimPath);
+      await detachWorktree();
+      return { status: "skipped", reason: "same head and base already attempted" };
+    }
 
     const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
     const taskJob: IssueJob = {
@@ -652,6 +688,63 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       body: currentIssue.body ?? "",
       htmlUrl: currentIssue.html_url,
     };
+    const mergeResult = await mergeDefaultIntoWorktree({
+      git: runConfiguredGit,
+      env,
+      worktree,
+      defaultBranch: opts.job.defaultBranch,
+      headRef: branch,
+      job: taskJob,
+      pr,
+      model: opts.model,
+      home: opts.home,
+      opencodeConfig: opts.opencodeConfig,
+      sanitizeOpenCodeEnv: sanitizeEnv,
+      extraEnv: gitOpenCodeChildEnv({
+        giteaUrl: opts.giteaUrl,
+        username: opts.botUsername,
+        token: opts.giteaToken,
+      }),
+      maxOutputBytes: opts.maxOutputBytes,
+      openCodeRunner,
+      helmRunner: opts.helmRunner,
+      logger: log,
+      abortSignal: opts.abortSignal,
+      onPid: async (pid) => {
+        await serializeClaim(async () => {
+          if (heartbeatStopped) return;
+          const current = await readClaim(claimPath);
+          if (heartbeatStopped || !current || current.terminal) return;
+          current.pid = pid;
+          current.heartbeatAt = now().toISOString();
+          await writeClaim(claimPath, current);
+        });
+      },
+    }).catch((err: unknown) => {
+      prefixMergeThrew = true;
+      throw err;
+    });
+    const persistConflictAttempt = async (result: typeof mergeResult) => {
+      if (!shouldIncrementRound(result)) return;
+      await writeConflictState(conflictPath, {
+        prNumber: pr.number,
+        round: previousConflict.round + 1,
+        lastHeadSha: result.headSha,
+        lastBaseSha: result.baseSha,
+        updatedAt: now().toISOString(),
+      });
+    };
+    if (mergeResult.status === "stuck") {
+      await persistConflictAttempt(mergeResult);
+      await sticky("stuck: cannot resolve conflicts", pr.number);
+      await stopHeartbeat();
+      await serializeClaim(async () => {
+        await deleteClaim(claimPath);
+      });
+      await detachWorktree();
+      return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
+    }
+
     const items = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
     const feedback = buildFeedbackMarkdown({
       pr,
@@ -751,6 +844,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     }
     await runConfiguredGit(["push", "-u", "origin", branch], { cwd: worktree, env });
     throwIfAborted(opts.abortSignal);
+    await persistConflictAttempt(mergeResult);
 
     const sha = (await runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env })).trim();
     await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);
@@ -768,6 +862,15 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       return { status: "cancelled" };
     }
     await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(() => undefined);
+    if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
+      await writeConflictState(conflictPath, {
+        prNumber: pr.number,
+        round: previousConflict.round + 1,
+        lastHeadSha: attemptedHeadSha,
+        lastBaseSha: attemptedBaseSha,
+        updatedAt: now().toISOString(),
+      }).catch(() => undefined);
+    }
     await writeFollowUpState(statePath, {
       prNumber: pr.number,
       round: state.round + 1,

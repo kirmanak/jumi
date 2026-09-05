@@ -8,6 +8,7 @@ import type {
   GiteaPRBranch,
   GiteaPRFile,
   GiteaPRPayload,
+  GiteaPushPayload,
   GiteaRepo,
   GiteaUser,
   IssueJob,
@@ -161,6 +162,20 @@ export function makeIssuePayload(overrides: Partial<GiteaIssuePayload> = {}): Gi
     issue,
     repository,
     sender: makeUser({ login: "alice" }),
+    ...overrides,
+  };
+}
+
+export function makePushPayload(overrides: Partial<GiteaPushPayload> = {}): GiteaPushPayload {
+  const repository = overrides.repository ?? makeRepo();
+  return {
+    ref: `refs/heads/${repository.default_branch}`,
+    before: "1111111111111111111111111111111111111111",
+    after: "2222222222222222222222222222222222222222",
+    repository,
+    pusher: makeUser({ login: "alice" }),
+    sender: makeUser({ login: "alice" }),
+    commits: [],
     ...overrides,
   };
 }

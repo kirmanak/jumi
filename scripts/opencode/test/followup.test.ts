@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, followUpStatePath, readClaim } from "../src/claim.ts";
+import { claimFilePath, conflictStatePath, followUpStatePath, readClaim } from "../src/claim.ts";
+import { CONFLICT_PROMPT, readConflictState, writeConflictState } from "../src/conflict.ts";
 import {
   buildFeedbackMarkdown,
   collectFollowUpItems,
@@ -726,6 +727,312 @@ describe("implementFollowUp", () => {
       const state = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
       expect(state.round).toBe(1);
       expect(state.handledCommentIds).not.toContain(55);
+    });
+  });
+
+  test("calls merge-default before feedback OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const events: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base") events.push("merge-base");
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (prompt) => {
+          events.push(prompt === FOLLOWUP_PROMPT ? "feedback" : "other");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(events.indexOf("merge-base")).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf("feedback")).toBeGreaterThan(events.indexOf("merge-base"));
+    });
+  });
+
+  test("merge stuck → no feedback OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const prompts: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return "src/demo.ts";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (prompt) => {
+          prompts.push(prompt);
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(prompts).toEqual([CONFLICT_PROMPT]);
+      expect(result).toEqual({ status: "skipped", reason: "stuck: cannot resolve conflicts" });
+      const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(conflict.round).toBe(1);
+      expect(conflict.lastHeadSha).toBe("abc123");
+      expect(conflict.lastBaseSha).toBe("abc123");
+    });
+  });
+
+  test("follow-up same-SHA after stuck skips merge/OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: "headsha",
+        lastBaseSha: "basesha",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      let openCode = 0;
+      let mergeCalled = false;
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "merge") mergeCalled = true;
+          if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+          if (gitArgs[0] === "rev-parse") return "headsha";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "same head and base already attempted" });
+      expect(openCode).toBe(0);
+      expect(mergeCalled).toBe(false);
+    });
+  });
+
+  test("follow-up prefix OpenCode throw persists conflict state", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return "src/demo.ts";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        return "";
+      };
+      await expect(
+        implementFollowUp({
+          api: makeApi(),
+          job: followUpJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async (prompt) => {
+            if (prompt === CONFLICT_PROMPT) throw new Error("opencode crashed");
+            throw new Error("feedback should not run");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("opencode crashed");
+      const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(conflict.round).toBe(1);
+      expect(conflict.lastHeadSha).toBe("headsha");
+      expect(conflict.lastBaseSha).toBe("basesha");
+      const followup = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      expect(followup.round).toBe(1);
+    });
+  });
+
+  test("follow-up honors MAX_CONFLICT_ROUNDS / shared conflict state", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "stuck: cannot resolve conflicts" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts");
+    });
+  });
+
+  test("follow-up records conflict SHAs after push on merged, immediately on stuck", async () => {
+    await withDirs(async (home, workdir) => {
+      let conflictDone = false;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return conflictDone ? "" : "src/demo.ts";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("MERGE_HEAD")) return "mergehead";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "M src/demo.ts";
+        if (gitArgs[0] === "rev-list") return "1";
+        return "";
+      };
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (prompt) => {
+          if (prompt === CONFLICT_PROMPT) conflictDone = true;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(conflict.round).toBe(1);
+      expect(conflict.lastHeadSha).toBe("abc123");
+      expect(conflict.lastBaseSha).toBe("abc123");
+    });
+  });
+
+  test("follow-up does not record merged conflict SHAs if later step throws", async () => {
+    await withDirs(async (home, workdir) => {
+      let conflictDone = false;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return conflictDone ? "" : "src/demo.ts";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("MERGE_HEAD")) return "mergehead";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "M src/demo.ts";
+        return "";
+      };
+      await expect(
+        implementFollowUp({
+          api: makeApi(),
+          job: followUpJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async (prompt) => {
+            if (prompt === CONFLICT_PROMPT) {
+              conflictDone = true;
+              return "done";
+            }
+            throw new Error("feedback exploded");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("feedback exploded");
+      const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(conflict.round).toBe(0);
+      expect(conflict.lastHeadSha).toBe("");
+      expect(conflict.lastBaseSha).toBe("");
+    });
+  });
+
+  test("follow-up up-to-date merge does not increment conflict round", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => "done",
+        logger: () => undefined,
+      });
+      const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(conflict.round).toBe(0);
     });
   });
 

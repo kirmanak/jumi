@@ -6,8 +6,10 @@ import {
   shouldEnqueueIssueCommentFollowUp,
   shouldEnqueuePullRejectedFollowUp,
 } from "./followup_webhook.ts";
+import type { IssueApi } from "./gitea_issues.ts";
 import { parseIssuesPayload, shouldEnqueueIssue } from "./issue_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
+import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult, ReviewQueue } from "./queue.ts";
 import { renderTokenMetrics } from "./token_metrics.ts";
 import type { IssueJob } from "./types.ts";
@@ -56,8 +58,16 @@ export function isFollowUpWebhookEvent(event: string | null, eventType: string |
   return FOLLOWUP_EVENTS.has(event ?? "") || FOLLOWUP_EVENTS.has(eventType ?? "");
 }
 
+export function isPushWebhookEvent(event: string | null, eventType: string | null): boolean {
+  return event === "push" || eventType === "push";
+}
+
 export function isWorkerWebhookEvent(event: string | null, eventType: string | null): boolean {
-  return isIssuesWebhookEvent(event, eventType) || isFollowUpWebhookEvent(event, eventType);
+  return (
+    isIssuesWebhookEvent(event, eventType) ||
+    isFollowUpWebhookEvent(event, eventType) ||
+    isPushWebhookEvent(event, eventType)
+  );
 }
 
 function isPullRejectedEvent(event: string | null, eventType: string | null): boolean {
@@ -79,6 +89,7 @@ function isPullRequestPayloadFollowUp(event: string | null, eventType: string | 
 
 export interface WorkerFetchHandlerDeps {
   queue: WorkerQueueLike;
+  api?: Pick<IssueApi, "listOpenPulls" | "getIssue">;
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
 }
@@ -133,6 +144,32 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       allowedRepos: config.allowedRepos,
       botUsername: config.botUsername,
     };
+
+    if (isPushWebhookEvent(event, eventType)) {
+      if (!deps.api) return json(202, { skipped: "no managed jumi PRs" });
+      let payload: ReturnType<typeof parsePushPayload>;
+      try {
+        payload = parsePushPayload(rawBody);
+      } catch {
+        return json(202, { skipped: "malformed push payload" });
+      }
+      try {
+        const decision = await shouldEnqueuePushConflicts(payload, policy, deps.api);
+        if (decision.type === "skip") return json(202, { skipped: decision.reason });
+        const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+        const receivedAt = new Date().toISOString();
+        const keys: string[] = [];
+        for (const partial of decision.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const result: EnqueueResult = deps.queue.enqueue(job);
+          keys.push(result.key);
+          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        }
+        return json(202, { queued: true, keys });
+      } catch (err) {
+        return json(500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
 
     try {
       if (isFollowUpWebhookEvent(event, eventType)) {
@@ -196,6 +233,7 @@ async function main() {
     port: config.port,
     fetch: createWorkerFetchHandler(config, {
       queue,
+      api,
       cancel: (owner, repo, issueNumber) => handleIssueCancel(config, api, owner, repo, issueNumber, queue),
     }),
   });

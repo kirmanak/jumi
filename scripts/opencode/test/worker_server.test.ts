@@ -78,9 +78,16 @@ describe("createWorkerFetchHandler", () => {
 
   test("skips unsupported events", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest(makeIssuePayload(), { event: "push" }));
+    const response = await handler(await signedRequest(makeIssuePayload(), { event: "status" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "unsupported event push" });
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
+  });
+
+  test("skips X-Gitea-Event: pull_request", async () => {
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
+    const response = await handler(await signedRequest(makeIssuePayload(), { event: "pull_request" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported event pull_request" });
   });
 
   test("enqueues Gitea issue_assign deliveries (Event=issues, Event-Type=issue_assign)", async () => {

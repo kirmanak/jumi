@@ -1,5 +1,6 @@
 import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
 import { claimFilePath, isClaimLive, isPidAlive, readClaim } from "./claim.ts";
+import { needsConflict } from "./conflict.ts";
 import { needsFollowUp } from "./followup.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { findOpenClosingPullRequest, findOpenJumiClosingPullRequest } from "./gitea_issues.ts";
@@ -70,17 +71,40 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
 
       const jumiPr = await findOpenJumiClosingPullRequest(opts.api, owner, repo, issue.number, opts.botUsername);
       if (jumiPr) {
-        if (
-          await needsFollowUp({
-            api: opts.api,
-            owner,
-            repo,
-            pr: jumiPr,
-            issueNumber: issue.number,
-            botUsername: opts.botUsername,
-            home: opts.home,
-          })
-        ) {
+        const followUp = await needsFollowUp({
+          api: opts.api,
+          owner,
+          repo,
+          pr: jumiPr,
+          issueNumber: issue.number,
+          botUsername: opts.botUsername,
+          home: opts.home,
+        });
+        const conflict = await needsConflict({
+          pr: jumiPr,
+          owner,
+          repo,
+          issueNumber: issue.number,
+          botUsername: opts.botUsername,
+          home: opts.home,
+        });
+        if (conflict && followUp) {
+          jobs.push({
+            ...issueJobFrom(owner, repo, issue, repository, "scan"),
+            mode: "follow-up",
+            prNumber: jumiPr.number,
+            delivery: `scan-${owner}-${repo}-${issue.number}`,
+            receivedAt: new Date(nowMs).toISOString(),
+          });
+        } else if (conflict) {
+          jobs.push({
+            ...issueJobFrom(owner, repo, issue, repository, "scan"),
+            mode: "conflict",
+            prNumber: jumiPr.number,
+            delivery: `scan-${owner}-${repo}-${issue.number}`,
+            receivedAt: new Date(nowMs).toISOString(),
+          });
+        } else if (followUp) {
           jobs.push({
             ...issueJobFrom(owner, repo, issue, repository, "scan"),
             mode: "follow-up",
