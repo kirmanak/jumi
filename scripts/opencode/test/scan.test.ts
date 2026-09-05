@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, writeClaim } from "../src/claim.ts";
+import { claimFilePath, followUpStatePath, writeClaim } from "../src/claim.ts";
+import { writeFollowUpState } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { scanAssignedIssues } from "../src/scan.ts";
 import { makeComment, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
@@ -429,6 +430,227 @@ describe("scanAssignedIssues", () => {
           listPullReviewComments: async () => {
             throw new Error("404: not found");
           },
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  const HEAD_SHA = "a62c750c0ffee000000000000000000000000000";
+  const STALE_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  function jumiClosingPr(sha = HEAD_SHA) {
+    return makePR({
+      number: 127,
+      user: makeUser({ login: "jumi" }),
+      body: "Fixes #12",
+      head: {
+        label: "kirmanak:jumi/issue-12-fix-the-thing",
+        ref: "jumi/issue-12-fix-the-thing",
+        sha,
+        repo,
+        repo_id: repo.id,
+      },
+    });
+  }
+
+  function failureSticky(sha = HEAD_SHA) {
+    return [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi OpenCode review",
+      "",
+      `Reviewed commit: \`${sha}\``,
+      "",
+      "1 blocking",
+      "<!-- jumi-check: failure -->",
+    ].join("\n");
+  }
+
+  test("closing jumi PR + current-head failure sticky enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr()],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky(),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+      expect(jobs[0]?.prNumber).toBe(127);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + only stale-SHA failure sticky skips", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr()],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky(STALE_SHA),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + handled failure sticky id+sha skips", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [{ id: 38022, sha: HEAD_SHA }],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr()],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky(),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + same sticky id with new current-head SHA enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    const nextSha = "cccccccccccccccccccccccccccccccccccccccc";
+    try {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [38022],
+        handledReviewIds: [],
+        handledReviewFindings: [{ id: 38022, sha: HEAD_SHA }],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr(nextSha)],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky(nextSha),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + current-head failure sticky with reason suffix enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr()],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky().replace(
+                "<!-- jumi-check: failure -->",
+                "<!-- jumi-check: failure; 1 blocking, 1 risk -->"
+              ),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + current-head failure sticky at round 3 skips", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr()],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky(),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
         }),
         home,
         botUsername: "jumi",

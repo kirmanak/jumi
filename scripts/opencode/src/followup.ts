@@ -11,12 +11,13 @@ import {
   readClaim,
   writeClaim,
 } from "./claim.ts";
-import { isJumiInternalBody } from "./followup_webhook.ts";
+import { isJumiInternalBody, isJumiWorkerBody } from "./followup_webhook.ts";
 import { runOpenCode } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { findOpenJumiClosingPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
 import type { GiteaComment, GiteaPR, GiteaPullReview, GiteaPullReviewComment, IssueJob } from "./types.ts";
+import { parseCheckLine } from "./verdict.ts";
 import { gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
@@ -37,12 +38,18 @@ export type FollowUpResult =
   | { status: "skipped"; reason: string }
   | { status: "cancelled" };
 
+export interface HandledReviewFinding {
+  id: number;
+  sha: string;
+}
+
 export interface FollowUpState {
   prNumber: number;
   round: number;
   lastHeadSha: string;
   handledCommentIds: number[];
   handledReviewIds: number[];
+  handledReviewFindings: HandledReviewFinding[];
   updatedAt: string;
 }
 
@@ -98,6 +105,7 @@ export async function readFollowUpState(path: string): Promise<FollowUpState> {
       handledReviewIds: Array.isArray(state.handledReviewIds)
         ? state.handledReviewIds.filter((id): id is number => typeof id === "number")
         : [],
+      handledReviewFindings: parseHandledReviewFindings(state.handledReviewFindings),
       updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
     };
   } catch (err) {
@@ -107,7 +115,44 @@ export async function readFollowUpState(path: string): Promise<FollowUpState> {
 }
 
 function emptyFollowUpState(): FollowUpState {
-  return { prNumber: 0, round: 0, lastHeadSha: "", handledCommentIds: [], handledReviewIds: [], updatedAt: "" };
+  return {
+    prNumber: 0,
+    round: 0,
+    lastHeadSha: "",
+    handledCommentIds: [],
+    handledReviewIds: [],
+    handledReviewFindings: [],
+    updatedAt: "",
+  };
+}
+
+function parseHandledReviewFindings(value: unknown): HandledReviewFinding[] {
+  if (!Array.isArray(value)) return [];
+  const findings: HandledReviewFinding[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const rec = entry as { id?: unknown; sha?: unknown };
+    if (typeof rec.id === "number" && typeof rec.sha === "string" && rec.sha) {
+      findings.push({ id: rec.id, sha: rec.sha });
+    }
+  }
+  return findings;
+}
+
+function reviewFindingKey(id: number, sha: string): string {
+  return `${id}:${sha.toLowerCase()}`;
+}
+
+function uniqueReviewFindings(findings: HandledReviewFinding[]): HandledReviewFinding[] {
+  const seen = new Set<string>();
+  const out: HandledReviewFinding[] = [];
+  for (const finding of findings) {
+    const key = reviewFindingKey(finding.id, finding.sha);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ id: finding.id, sha: finding.sha.toLowerCase() });
+  }
+  return out;
 }
 
 export async function writeFollowUpState(path: string, state: FollowUpState): Promise<void> {
@@ -135,6 +180,54 @@ export function isInScopeHumanComment(
   return true;
 }
 
+const REVIEW_MARKER = "<!-- jumi-review:";
+const REVIEWED_COMMIT_RE = /^Reviewed commit:\s*`([0-9a-fA-F]+)`\s*$/i;
+
+function hasFailureCheckTrailer(body: string): boolean {
+  const lines = body.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    return parseCheckLine(line)?.state === "failure";
+  }
+  return false;
+}
+
+export function parseReviewedCommitSha(body: string): string | undefined {
+  for (const line of body.split(/\r?\n/)) {
+    const match = REVIEWED_COMMIT_RE.exec(line.trim());
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
+function commitMatchesHead(stickySha: string, headSha: string): boolean {
+  const sticky = stickySha.toLowerCase();
+  const head = headSha.toLowerCase();
+  if (!sticky || !head) return false;
+  if (sticky === head) return true;
+  return sticky.length < head.length && head.startsWith(sticky);
+}
+
+export function isJumiReviewFinding(comment: { body?: string | null }, headSha: string): boolean {
+  const body = comment.body ?? "";
+  if (!body.trim()) return false;
+  if (!body.includes(REVIEW_MARKER)) return false;
+  if (!hasFailureCheckTrailer(body)) return false;
+  if (isJumiWorkerBody(body)) return false;
+  const stickySha = parseReviewedCommitSha(body);
+  if (!stickySha || !commitMatchesHead(stickySha, headSha)) return false;
+  return true;
+}
+
+export function isInScopeFollowUpComment(
+  comment: { body?: string | null; user?: { login?: string } },
+  botUsername: string,
+  headSha: string
+): boolean {
+  return isJumiReviewFinding(comment, headSha) || isInScopeHumanComment(comment, botUsername);
+}
+
 export function isRequestChangesReview(review: GiteaPullReview): boolean {
   const blob = `${review.state ?? ""} ${review.type ?? ""}`.toLowerCase();
   return (
@@ -155,7 +248,8 @@ export async function collectFollowUpItems(
   owner: string,
   repo: string,
   prNumber: number,
-  botUsername: string
+  botUsername: string,
+  headSha: string
 ): Promise<{ comments: GiteaComment[]; inlines: GiteaPullReviewComment[]; reviews: GiteaPullReview[] }> {
   const [rawComments, rawReviews, rawInlines] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
@@ -170,7 +264,7 @@ export async function collectFollowUpItems(
     }),
   ]);
   return {
-    comments: rawComments.filter((comment) => isInScopeHumanComment(comment, botUsername)),
+    comments: rawComments.filter((comment) => isInScopeFollowUpComment(comment, botUsername, headSha)),
     inlines: rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername)),
     reviews: rawReviews.filter(
       (review) =>
@@ -180,15 +274,31 @@ export async function collectFollowUpItems(
   };
 }
 
+function reviewFindingFromComment(comment: { id: number; body?: string | null }): HandledReviewFinding | undefined {
+  const body = comment.body ?? "";
+  if (!body.includes(REVIEW_MARKER)) return undefined;
+  const sha = parseReviewedCommitSha(body);
+  if (!sha) return undefined;
+  return { id: comment.id, sha };
+}
+
 function hasUnhandledFollowUpItems(
   items: { comments: GiteaComment[]; inlines: GiteaPullReviewComment[]; reviews: GiteaPullReview[] },
-  state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds">
+  state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds" | "handledReviewFindings">
 ): boolean {
   const handledComments = new Set(state.handledCommentIds);
   const handledReviews = new Set(state.handledReviewIds);
-  const unhandledComments = [...items.comments, ...items.inlines].some((comment) => !handledComments.has(comment.id));
+  const handledFindings = new Set(
+    state.handledReviewFindings.map((finding) => reviewFindingKey(finding.id, finding.sha))
+  );
+  const unhandledComments = items.comments.some((comment) => {
+    const finding = reviewFindingFromComment(comment);
+    if (finding) return !handledFindings.has(reviewFindingKey(finding.id, finding.sha));
+    return !handledComments.has(comment.id);
+  });
+  const unhandledInlines = items.inlines.some((comment) => !handledComments.has(comment.id));
   const unhandledReviews = items.reviews.some((review) => !handledReviews.has(review.id));
-  return unhandledComments || unhandledReviews;
+  return unhandledComments || unhandledInlines || unhandledReviews;
 }
 
 export async function needsFollowUp(opts: {
@@ -202,7 +312,14 @@ export async function needsFollowUp(opts: {
 }): Promise<boolean> {
   const state = await readFollowUpState(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
   if (state.round >= MAX_FOLLOWUP_ROUNDS) return false;
-  const items = await collectFollowUpItems(opts.api, opts.owner, opts.repo, opts.pr.number, opts.botUsername);
+  const items = await collectFollowUpItems(
+    opts.api,
+    opts.owner,
+    opts.repo,
+    opts.pr.number,
+    opts.botUsername,
+    opts.pr.head.sha
+  );
   if (!hasUnhandledFollowUpItems(items, state)) return false;
   if (state.lastHeadSha && state.lastHeadSha === opts.pr.head.sha && !hasUnhandledFollowUpItems(items, state)) {
     return false;
@@ -407,7 +524,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     await deleteClaim(claimPath);
     return { status: "skipped", reason: "comment already handled" };
   }
-  const pendingItems = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername);
+  const pendingItems = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
   if (!hasUnhandledFollowUpItems(pendingItems, state)) {
     await deleteClaim(claimPath);
     return { status: "skipped", reason: "no unhandled feedback" };
@@ -461,6 +578,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
 
   let handledCommentIds = [...state.handledCommentIds];
   let handledReviewIds = [...state.handledReviewIds];
+  const handledReviewFindings = [...state.handledReviewFindings];
   if (opts.job.trigger?.commentId !== undefined) handledCommentIds.push(opts.job.trigger.commentId);
   if (opts.job.trigger?.reviewId !== undefined) handledReviewIds.push(opts.job.trigger.reviewId);
 
@@ -473,6 +591,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       lastHeadSha: headSha,
       handledCommentIds: uniqueComments,
       handledReviewIds: uniqueReviews,
+      handledReviewFindings: uniqueReviewFindings(handledReviewFindings),
       updatedAt: now().toISOString(),
     });
   };
@@ -533,7 +652,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       body: currentIssue.body ?? "",
       htmlUrl: currentIssue.html_url,
     };
-    const items = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername);
+    const items = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
     const feedback = buildFeedbackMarkdown({
       pr,
       trigger: opts.job.trigger,
@@ -544,6 +663,17 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     });
     handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
     handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
+    const findingById = new Map<number, HandledReviewFinding>();
+    for (const comment of items.comments) {
+      const finding = reviewFindingFromComment(comment);
+      if (finding) findingById.set(finding.id, finding);
+    }
+    handledCommentIds = handledCommentIds.filter((id) => {
+      const finding = findingById.get(id);
+      if (!finding) return true;
+      handledReviewFindings.push(finding);
+      return false;
+    });
 
     throwIfAborted(opts.abortSignal);
     await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
@@ -644,6 +774,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       lastHeadSha: pr.head.sha,
       handledCommentIds: state.handledCommentIds,
       handledReviewIds: state.handledReviewIds,
+      handledReviewFindings: state.handledReviewFindings,
       updatedAt: now().toISOString(),
     }).catch(() => undefined);
     await stopHeartbeat();

@@ -22,7 +22,7 @@ function lastNonEmptyLine(text: string): string {
   return "";
 }
 
-function parseCheckLine(line: string): { state: "success" | "failure"; reason: string } | undefined {
+export function parseCheckLine(line: string): { state: "success" | "failure"; reason: string } | undefined {
   const match = CHECK_LINE_RE.exec(line);
   if (!match) return undefined;
   return {

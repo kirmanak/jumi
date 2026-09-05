@@ -110,6 +110,31 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
     expect(decision).toEqual({ type: "skip", reason: "sender is bot" });
   });
 
+  test("skips sender jumi even when body is a current-head failure sticky", () => {
+    const decision = shouldEnqueueIssueCommentFollowUp(
+      makeIssueCommentPayload({
+        sender: makeUser({ login: "jumi" }),
+        comment: {
+          id: 38022,
+          body: [
+            "<!-- jumi-review:kirmanak/demo#127 -->",
+            "### Jumi OpenCode review",
+            "",
+            "Reviewed commit: `a62c750c0ffee000000000000000000000000000`",
+            "",
+            "<!-- jumi-check: failure -->",
+          ].join("\n"),
+          user: makeUser({ login: "jumi" }),
+          created_at: "",
+          updated_at: "",
+        },
+      }),
+      policy,
+      "issue_comment"
+    );
+    expect(decision).toEqual({ type: "skip", reason: "sender is bot" });
+  });
+
   test("skips action edited / deleted", () => {
     expect(
       shouldEnqueueIssueCommentFollowUp(makeIssueCommentPayload({ action: "edited" }), policy, "issue_comment")

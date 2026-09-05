@@ -34,9 +34,13 @@ export function isPullThread(issue: GiteaIssue): boolean {
   return isPullRequestIssue(issue) || issue.is_pull === true;
 }
 
+export function isJumiWorkerBody(body: string | null | undefined): boolean {
+  return (body ?? "").includes("<!-- jumi-worker:");
+}
+
 export function isJumiInternalBody(body: string | null | undefined): boolean {
   const text = body ?? "";
-  return text.includes("<!-- jumi-worker:") || text.includes("<!-- jumi-check:");
+  return isJumiWorkerBody(text) || text.includes("<!-- jumi-check:");
 }
 
 export function parseIssueCommentPayload(rawBody: Uint8Array): GiteaIssueCommentPayload {

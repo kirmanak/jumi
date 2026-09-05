@@ -502,6 +502,7 @@ describe("implementFollowUp", () => {
         lastHeadSha: "abc",
         handledCommentIds: [],
         handledReviewIds: [],
+        handledReviewFindings: [],
         updatedAt: "2026-05-23T00:00:00Z",
       });
       const api = makeApi();
@@ -539,6 +540,7 @@ describe("implementFollowUp", () => {
         lastHeadSha: "abc",
         handledCommentIds: [55],
         handledReviewIds: [],
+        handledReviewFindings: [],
         updatedAt: "2026-05-23T00:00:00Z",
       });
       let openCode = 0;
@@ -770,6 +772,57 @@ describe("implementFollowUp", () => {
       expect(openCode).toBe(1);
     });
   });
+
+  test("no-changes persists jumi-review finding as id+sha, not comment id", async () => {
+    await withDirs(async (home, workdir) => {
+      const sha = "a62c750c0ffee000000000000000000000000000";
+      const pr = jumiPr();
+      pr.head.sha = sha;
+      const api = makeApi({
+        listOpenPulls: async () => [pr],
+        listIssueComments: async () => [
+          makeComment({
+            id: 38022,
+            body: [
+              "<!-- jumi-review:kirmanak/demo#127 -->",
+              "### Jumi OpenCode review",
+              "",
+              `Reviewed commit: \`${sha}\``,
+              "",
+              "1 blocking",
+              "<!-- jumi-check: failure; 1 blocking, 1 risk -->",
+            ].join("\n"),
+            user: makeUser({ login: "jumi" }),
+          }),
+        ],
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return sha;
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: undefined }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => "done",
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      const state = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      expect(state.handledCommentIds).not.toContain(38022);
+      expect(state.handledReviewFindings).toEqual([{ id: 38022, sha }]);
+    });
+  });
 });
 
 describe("buildFeedbackMarkdown", () => {
@@ -813,7 +866,7 @@ describe("collectFollowUpItems", () => {
         throw new Error("404: not found");
       },
     });
-    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi");
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
     expect(items.comments.map((comment) => comment.id)).toEqual([55]);
     expect(items.inlines).toEqual([]);
     await withDirs(async (home) => {
@@ -867,7 +920,7 @@ describe("collectFollowUpItems", () => {
         }),
       ],
     });
-    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi");
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
     expect(items.reviews.map((review) => review.id)).toEqual([1, 2]);
   });
 
@@ -887,8 +940,260 @@ describe("collectFollowUpItems", () => {
         }),
       ],
     });
-    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi");
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
     expect(items.reviews).toEqual([]);
+  });
+
+  const HEAD_SHA = "a62c750c0ffee000000000000000000000000000";
+  const STALE_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  function reviewSticky(opts: { sha?: string; trailer?: string | null; worker?: boolean; review?: boolean } = {}) {
+    const lines: string[] = [];
+    if (opts.worker) lines.push("<!-- jumi-worker:kirmanak/demo#12 -->");
+    if (opts.review !== false) lines.push("<!-- jumi-review:kirmanak/demo#127 -->");
+    lines.push("### Jumi OpenCode review", "", `Reviewed commit: \`${opts.sha ?? HEAD_SHA}\``, "", "1 blocking");
+    if (opts.trailer !== null) lines.push(opts.trailer ?? "<!-- jumi-check: failure -->");
+    return lines.join("\n");
+  }
+
+  function prWithHead(sha = HEAD_SHA) {
+    const pr = jumiPr();
+    return { ...pr, head: { ...pr.head, sha } };
+  }
+
+  test("keeps current-head jumi failure sticky with reason suffix and needsFollowUp", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ trailer: "<!-- jumi-check: failure; 1 blocking, 1 risk -->" }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments.map((comment) => comment.id)).toEqual([38022]);
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
+  });
+
+  test("keeps current-head jumi failure sticky and needsFollowUp", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky(),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments.map((comment) => comment.id)).toEqual([38022]);
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
+  });
+
+  test("excludes jumi review sticky when trailer is missing", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ trailer: null }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments).toEqual([]);
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(false);
+    });
+  });
+
+  test("excludes jumi failure sticky for a SHA that is not pr.head.sha", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ sha: STALE_SHA }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments).toEqual([]);
+  });
+
+  test("excludes jumi review sticky with success trailer", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ trailer: "<!-- jumi-check: success -->" }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments).toEqual([]);
+  });
+
+  test("excludes jumi review sticky with success trailer and reason suffix", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ trailer: "<!-- jumi-check: success; no blocking issues -->" }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments).toEqual([]);
+  });
+
+  test("excludes jumi-worker sticky", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 1,
+          body: reviewSticky({ worker: true }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments).toEqual([]);
+  });
+
+  test("keeps a human alice root comment in scope", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+        makeComment({
+          id: 1,
+          body: "<!-- jumi-worker:kirmanak/demo#12 -->\nworking",
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments.map((comment) => comment.id)).toEqual([55]);
+  });
+
+  test("excludes human jumi-check failure without jumi-review", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 77,
+          body: "please fix\n<!-- jumi-check: failure -->",
+          user: makeUser({ login: "alice" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments).toEqual([]);
+  });
+
+  test("needsFollowUp is false when the same jumi-review id and reviewed SHA are already handled", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky(),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    await withDirs(async (home) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [{ id: 38022, sha: HEAD_SHA }],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(false);
+    });
+  });
+
+  test("needsFollowUp is true when the same jumi-review id has a new current-head SHA", async () => {
+    const nextSha = "cccccccccccccccccccccccccccccccccccccccc";
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ sha: nextSha }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    await withDirs(async (home) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [38022],
+        handledReviewIds: [],
+        handledReviewFindings: [{ id: 38022, sha: HEAD_SHA }],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(nextSha),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
   });
 });
 
