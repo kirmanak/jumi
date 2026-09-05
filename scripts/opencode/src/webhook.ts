@@ -85,23 +85,28 @@ function ownerIsAllowed(owner: string, allowedOrgs: readonly string[]): boolean 
   return allowedOrgs.includes("*") || allowedOrgs.includes(owner);
 }
 
+export function assertRepositoryPolicy(
+  repository: { full_name: string; html_url?: string; clone_url?: string },
+  policy: WebhookPolicy
+): { owner: string; repo: string } {
+  const [owner, repo] = repository.full_name.split("/");
+  if (!owner || !repo) throw new Error(`Invalid repository full_name: ${repository.full_name}`);
+  if (!ownerIsAllowed(owner, policy.allowedOrgs)) throw new Error(`Repository owner ${owner} is not allowed`);
+  if (policy.allowedRepos.length > 0 && !policy.allowedRepos.includes(repository.full_name)) {
+    throw new Error(`Repository ${repository.full_name} is not allowed`);
+  }
+  if (!originMatches(repository.html_url, policy.giteaUrl) && !originMatches(repository.clone_url, policy.giteaUrl)) {
+    throw new Error(`Repository ${repository.full_name} does not match configured Gitea origin`);
+  }
+  return { owner, repo };
+}
+
 export function validateWebhookPayload(payload: GiteaPRPayload, policy: WebhookPolicy): ReviewJob | { skip: string } {
   if (!REVIEW_ACTIONS.has(payload.action)) {
     return { skip: `unsupported action ${payload.action}` };
   }
 
-  const [owner, repo] = payload.repository.full_name.split("/");
-  if (!owner || !repo) throw new Error(`Invalid repository full_name: ${payload.repository.full_name}`);
-  if (!ownerIsAllowed(owner, policy.allowedOrgs)) throw new Error(`Repository owner ${owner} is not allowed`);
-  if (policy.allowedRepos.length > 0 && !policy.allowedRepos.includes(payload.repository.full_name)) {
-    throw new Error(`Repository ${payload.repository.full_name} is not allowed`);
-  }
-  if (
-    !originMatches(payload.repository.html_url, policy.giteaUrl) &&
-    !originMatches(payload.repository.clone_url, policy.giteaUrl)
-  ) {
-    throw new Error(`Repository ${payload.repository.full_name} does not match configured Gitea origin`);
-  }
+  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   if (!payload.pull_request.head?.sha) throw new Error("Invalid webhook payload: missing pull_request.head.sha");
 
   return {

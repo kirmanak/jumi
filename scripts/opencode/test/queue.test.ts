@@ -66,4 +66,20 @@ describe("ReviewQueue", () => {
     firstGate.resolve();
     secondGate.resolve();
   });
+
+  test("drop removes a pending job before it runs", async () => {
+    const gate = deferred();
+    const seen: string[] = [];
+    const queue = new ReviewQueue(async (job) => {
+      seen.push(job.headSha);
+      if (job.headSha === "active") await gate.promise;
+    }, 1);
+
+    queue.enqueue(makeJob({ headSha: "active" }));
+    queue.enqueue(makeJob({ headSha: "pending" }));
+    expect(queue.drop("kirmanak/demo#7:pending")).toBe(true);
+    gate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(["active"]);
+  });
 });

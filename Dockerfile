@@ -26,17 +26,23 @@ RUN bun install --frozen-lockfile --production
 COPY scripts/opencode/tsconfig.json ./
 COPY scripts/opencode/src ./src
 COPY .gitea/opencode-review.json /app/.gitea/opencode-review.json
+COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 
-FROM oven/bun:${BUN_VERSION}-slim AS runtime
+# oven/bun:1.2.5-slim is bullseye; git pulls libperl5.32 from bullseye-security,
+# which 404'd on deb.debian.org (image-build 2026-09-05). Install git on bookworm
+# and copy bun/opencode in.
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils \
+  && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils libstdc++6 \
   && rm -rf /var/lib/apt/lists/*
+COPY --from=build /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
 RUN git --version \
   && rg --version \
   && jq --version \
   && file --version \
+  && bun --version \
   && /usr/local/bin/opencode version
 
 WORKDIR /app/scripts/opencode
@@ -62,3 +68,9 @@ ENV HOME=/data \
 EXPOSE 3000
 ENTRYPOINT ["/app/scripts/opencode/entrypoint.sh"]
 CMD ["bun", "run", "src/server.ts"]
+
+FROM runtime AS worker
+COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
+ENV OPENCODE_CONFIG=/app/.gitea/opencode-implement.json \
+    AGENT_INSTANCE=jumi-worker
+CMD ["bun", "run", "src/worker_server.ts"]

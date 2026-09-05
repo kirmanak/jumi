@@ -6,7 +6,14 @@
     "useIgnoreFile": false
   },
   "files": {
-    "includes": ["src/**/*.ts", "test/**/*.ts", "package.json", "tsconfig.json", "../../.gitea/opencode-review.json"]
+    "includes": [
+      "src/**/*.ts",
+      "test/**/*.ts",
+      "package.json",
+      "tsconfig.json",
+      "../../.gitea/opencode-review.json",
+      "../../.gitea/opencode-implement.json"
+    ]
   },
   "formatter": {
     "enabled": true,

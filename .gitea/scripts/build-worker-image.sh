@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build jumi-reviewer with Buildah on GARM (ubuntu-latest).
+# Build jumi-worker with Buildah on GARM (ubuntu-latest).
 # Env: BUN_VERSION, OPENCODE_VERSION required.
 #      PUSH_IMAGE=true enables registry push (needs REGISTRY + CONTAINER_REGISTRY_*).
 # Isolation defaults: BUILDAH_ISOLATION=chroot, STORAGE_DRIVER=vfs (no --layers).
@@ -37,7 +37,7 @@ done
 
 buildah bud \
   --format docker \
-  --target runtime \
+  --target worker \
   "${tag_args[@]}" \
   --build-arg "BUN_VERSION=${BUN_VERSION}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \

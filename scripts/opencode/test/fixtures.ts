@@ -1,14 +1,18 @@
 import type { ServiceConfig } from "../src/config.ts";
 import type {
   GiteaComment,
+  GiteaIssue,
+  GiteaIssuePayload,
   GiteaPR,
   GiteaPRBranch,
   GiteaPRFile,
   GiteaPRPayload,
   GiteaRepo,
   GiteaUser,
+  IssueJob,
   ReviewJob,
 } from "../src/types.ts";
+import type { WorkerConfig } from "../src/worker_config.ts";
 
 export function makeUser(overrides: Partial<GiteaUser> = {}): GiteaUser {
   return {
@@ -104,6 +108,54 @@ export function makePayload(overrides: Partial<GiteaPRPayload> = {}): GiteaPRPay
   };
 }
 
+export function makeIssue(overrides: Partial<GiteaIssue> = {}): GiteaIssue {
+  return {
+    id: 200,
+    number: 12,
+    title: "Fix the thing",
+    body: "Please implement this.",
+    state: "open",
+    html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/12",
+    user: makeUser(),
+    assignee: makeUser({ login: "jumi" }),
+    assignees: [makeUser({ login: "jumi" })],
+    updated_at: "2026-05-23T00:00:00Z",
+    created_at: "2026-05-23T00:00:00Z",
+    ...overrides,
+  };
+}
+
+export function makeIssuePayload(overrides: Partial<GiteaIssuePayload> = {}): GiteaIssuePayload {
+  const repository = overrides.repository ?? makeRepo();
+  const issue = overrides.issue ?? makeIssue({ number: 12 });
+  return {
+    action: "assigned",
+    number: issue.number,
+    issue,
+    repository,
+    sender: makeUser({ login: "alice" }),
+    ...overrides,
+  };
+}
+
+export function makeIssueJob(overrides: Partial<IssueJob> = {}): IssueJob {
+  return {
+    delivery: "delivery-1",
+    owner: "kirmanak",
+    repo: "demo",
+    issueNumber: 12,
+    action: "assigned",
+    title: "Fix the thing",
+    body: "Please implement this.",
+    htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/12",
+    issueUpdatedAt: "2026-05-23T00:00:00Z",
+    defaultBranch: "main",
+    cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+    receivedAt: "2026-05-23T00:00:00Z",
+    ...overrides,
+  };
+}
+
 export function makeJob(overrides: Partial<ReviewJob> = {}): ReviewJob {
   return {
     delivery: "delivery-1",
@@ -139,6 +191,31 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
     maxOutputBytes: 80_000,
     maxWebhookBytes: 1_048_576,
     opencodeTimeoutMs: 900_000,
+    ...overrides,
+  };
+}
+
+export function makeWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    host: "127.0.0.1",
+    port: 3000,
+    giteaUrl: "https://gitea.kirmanak.stream",
+    giteaToken: "bot-token",
+    webhookSecret: "webhook-secret",
+    allowedOrgs: ["kirmanak"],
+    allowedRepos: [],
+    botUsername: "jumi",
+    model: "openai/gpt-5.5",
+    opencodeWellKnownUrl: "https://kirmanak.stream",
+    opencodeWellKnownKey: "OPENCODE_WELLKNOWN_TOKEN",
+    opencodeWellKnownToken: "unused",
+    home: "/data",
+    workdir: "/work",
+    queueConcurrency: 1,
+    maxOutputBytes: 80_000,
+    maxWebhookBytes: 1_048_576,
+    opencodeTimeoutMs: 14_400_000,
+    scanIntervalMs: 300_000,
     ...overrides,
   };
 }

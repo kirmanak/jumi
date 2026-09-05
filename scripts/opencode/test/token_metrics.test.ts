@@ -140,9 +140,11 @@ describe("recordOpenCodeDb", () => {
     const dbPath = join(dir, "opencode-session.db");
     try {
       const script = join(dir, "writer.ts");
+      const ready = join(dir, "ready");
       await writeFile(
         script,
         `import { Database } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
 const db = new Database(${JSON.stringify(dbPath)});
 db.run("PRAGMA journal_mode = WAL");
 db.run("PRAGMA wal_autocheckpoint = 0");
@@ -155,6 +157,7 @@ db.run(\`CREATE TABLE session (
   tokens_reasoning INTEGER
 )\`);
 db.run("INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)", ["xai/grok-4.6", 42, 0, 9, 0, 1]);
+writeFileSync(${JSON.stringify(ready)}, "ok");
 await Bun.sleep(60_000);
 `
       );
@@ -162,9 +165,10 @@ await Bun.sleep(60_000);
       try {
         const wal = `${dbPath}-wal`;
         const deadline = Date.now() + 5000;
-        while (!existsSync(wal) && Date.now() < deadline) {
+        while ((!existsSync(ready) || !existsSync(wal)) && Date.now() < deadline) {
           await Bun.sleep(20);
         }
+        expect(existsSync(ready)).toBe(true);
         expect(existsSync(wal)).toBe(true);
         child.kill("SIGKILL");
         await child.exited;

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "autoupdate": false,
+  "snapshot": false,
+  "provider": {
+    "xai": {
+      "models": {
+        "grok-4.5": {
+          "options": {
+            "reasoningEffort": "high"
+          }
+        },
+        "grok-4.6": {
+          "options": {
+            "reasoningEffort": "high"
+          }
+        }
+      }
+    },
+    "openai": {
+      "models": {
+        "gpt-5.5": {
+          "options": {
+            "reasoningEffort": "high"
+          }
+        }
+      }
+    }
+  },
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "edit": "allow",
+    "write": "allow",
+    "bash": {
+      "*": "deny",
+      "git status": "allow",
+      "git status *": "allow",
+      "git diff": "allow",
+      "git diff *": "allow",
+      "git log": "allow",
+      "git log *": "allow",
+      "git show": "allow",
+      "git show *": "allow",
+      "git rev-parse": "allow",
+      "git rev-parse *": "allow",
+      "git grep": "allow",
+      "git grep *": "allow",
+      "git ls-files": "allow",
+      "git ls-files *": "allow",
+      "git blame": "allow",
+      "git blame *": "allow"
+    },
+    "external_directory": "deny",
+    "task": "deny",
+    "todowrite": "deny",
+    "question": "deny",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "lsp": "deny",
+    "skill": "deny",
+    "doom_loop": "deny"
+  }
+}

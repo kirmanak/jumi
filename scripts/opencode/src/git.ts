@@ -42,6 +42,7 @@ export interface OpenCodeRunOptions {
   reviewLabel?: string;
   /** RSS sample interval for the OpenCode child (ms). Default 5000. */
   memorySampleIntervalMs?: number;
+  onPid?: (pid: number) => void | Promise<void>;
   logger?: (message: string) => void;
 }
 
@@ -175,6 +176,7 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
     });
 
     const childPid = proc.pid;
+    await opts.onPid?.(childPid);
     let trackerStartedAt = Date.now();
     tracker = trackMemoryPeak(childPid, opts.memorySampleIntervalMs ?? 5_000, (sample, peaks) => {
       logDiagnostic(log, "opencode_sample", {

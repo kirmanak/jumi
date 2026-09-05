@@ -6,20 +6,21 @@ export interface EnqueueResult {
   queued: boolean;
 }
 
-export class ReviewQueue {
-  private readonly pending: ReviewJob[] = [];
+export class ReviewQueue<T = ReviewJob> {
+  private readonly pending: T[] = [];
   private readonly queuedKeys = new Set<string>();
   private readonly activeKeys = new Set<string>();
   private active = 0;
 
   constructor(
-    private readonly handler: (job: ReviewJob) => Promise<void>,
+    private readonly handler: (job: T) => Promise<void>,
     private readonly concurrency = 1,
-    private readonly logger: (message: string) => void = console.log
+    private readonly logger: (message: string) => void = console.log,
+    private readonly keyOf: (job: T) => string = ((job: T) => reviewJobKey(job as ReviewJob)) as (job: T) => string
   ) {}
 
-  enqueue(job: ReviewJob): EnqueueResult {
-    const key = reviewJobKey(job);
+  enqueue(job: T): EnqueueResult {
+    const key = this.keyOf(job);
     if (this.queuedKeys.has(key) || this.activeKeys.has(key)) {
       return { key, queued: false };
     }
@@ -30,6 +31,14 @@ export class ReviewQueue {
     return { key, queued: true };
   }
 
+  drop(key: string): boolean {
+    const index = this.pending.findIndex((job) => this.keyOf(job) === key);
+    if (index < 0) return false;
+    this.pending.splice(index, 1);
+    this.queuedKeys.delete(key);
+    return true;
+  }
+
   private drain() {
     while (this.active < this.concurrency && this.pending.length > 0) {
       const job = this.pending.shift();
@@ -38,8 +47,8 @@ export class ReviewQueue {
     }
   }
 
-  private async run(job: ReviewJob) {
-    const key = reviewJobKey(job);
+  private async run(job: T) {
+    const key = this.keyOf(job);
     this.queuedKeys.delete(key);
     this.activeKeys.add(key);
     this.active++;

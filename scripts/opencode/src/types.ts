@@ -86,6 +86,62 @@ export interface ReviewJob {
   receivedAt: string;
 }
 
+export interface GiteaIssue {
+  id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: "open" | "closed";
+  html_url: string;
+  user: GiteaUser;
+  assignee: GiteaUser | null;
+  assignees: GiteaUser[] | null;
+  pull_request?: {
+    url?: string;
+    merged?: boolean;
+    merged_at?: string | null;
+    draft?: boolean;
+    html_url?: string;
+  } | null;
+  updated_at: string;
+  created_at: string;
+  /** Webhook payloads embed a full repo; REST issue search only sends RepositoryMeta. */
+  repository?: GiteaRepo | GiteaRepositoryMeta;
+}
+
+export interface GiteaRepositoryMeta {
+  id?: number;
+  name?: string;
+  owner?: string | GiteaUser;
+  full_name: string;
+  html_url?: string;
+  clone_url?: string;
+  default_branch?: string;
+}
+
+export interface GiteaIssuePayload {
+  action: string;
+  number: number;
+  issue: GiteaIssue;
+  repository: GiteaRepo;
+  sender: GiteaUser;
+}
+
+export interface IssueJob {
+  delivery: string;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  action: string;
+  title: string;
+  body: string;
+  htmlUrl: string;
+  issueUpdatedAt: string;
+  defaultBranch: string;
+  cloneUrl: string;
+  receivedAt: string;
+}
+
 export type GiteaCommitStatusState = "pending" | "success" | "error" | "failure" | "warning";
 
 export interface GiteaCommitStatusPayload {

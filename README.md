@@ -29,16 +29,48 @@ The trailer is stripped from the sticky comment. Title-gated skips (`WIP:`, `[sk
 
 The service intentionally does not checkout or execute PR-head code. It reviews Gitea's PR metadata and file patches from the trusted Gitea API.
 
+## Worker Service
+
+`jumi-worker` is a sibling HTTP service in the same Bun package. Gitea sends **Issues** webhooks to `POST /webhooks/gitea`. The worker verifies `X-Gitea-Signature` the same way as the reviewer, then enqueues work only when the issue is assigned to bot username `jumi` (`BOT_USERNAME`, default `jumi`). Pull-request issues (`issue.pull_request` present / non-null) are ignored.
+
+Gitea 1.27 delivers assignment as a grouped issue event, not a GitHub-style top-level `assignee` field:
+
+- Headers: `X-Gitea-Event: issues` and `X-Gitea-Event-Type: issue_assign` (also `X-GitHub-Event` / `X-GitHub-Event-Type`).
+- Body: `IssuePayload` with `action`, `number`, `issue`, `repository`, `sender` (`modules/structs/hook.go`). `issue.assignee` / `issue.assignees` are `User` objects with `login` (and compat `username`).
+- Actions: `issues` → `opened`/`closed`/`reopened`/`edited`/`deleted`; `issue_assign` → `assigned`/`unassigned`.
+- The org/system hook must enable **both** `Issues` and `Issue Assign` (separate Gitea checkboxes). `Issues` alone will not fire on assign.
+
+Webhook handling:
+
+- `X-Gitea-Event: issues` or `issue_assign` with action `assigned`, `opened`, or `reopened` (and assigned to the bot) → enqueue
+- `unassigned` when the bot is no longer an assignee → cancel: kill a live child, comment `stopped`, delete the claim file
+- `unassigned` when the bot remains among multiple assignees → no cancel
+- `X-Gitea-Event: ping` → `200 {"ok":true}`
+- other events → `202` skip
+
+On enqueue the parent claims the issue with a PID/heartbeat file under `{HOME}/worker/jobs/{owner}/{repo}/{number}.json`. A claim is live only while that PID is alive **and** the heartbeat is newer than two minutes. The parent clones a bare cache and worktree from the default branch, writes `JUMI_TASK.md`, and runs `opencode run` with `.gitea/opencode-implement.json`. The OpenCode child is started with `sanitizeOpenCodeEnv: true` and does not receive `GITEA_BOT_TOKEN` or webhook secrets. After OpenCode, the **parent** commits, pushes a `jumi/issue-{n}-{slug}` branch (never the default branch, never force-push), and opens a PR whose body contains `Fixes #n`. If the tree is clean it comments `no changes` and clears the live claim without unassigning.
+
+A scan loop (`WORKER_SCAN_INTERVAL_MS`, default 5 minutes) searches open issues assigned to the authenticated bot (`GET /repos/issues/search?type=issues&state=open&assigned=true`). Gitea's search result only embeds RepositoryMeta (`id`, `name`, `owner`, `full_name`), so the worker then `GET /repos/{owner}/{repo}` for `clone_url` / `default_branch` before cloning. If a claim PID is dead or the heartbeat is stale, the worker reclaims the same worktree and reruns. If an open PR by jumi already closes the issue (`Fixes #n` / `Closes #n`), scan skips it.
+
+The worker image is separate from the reviewer: `gitea.kirmanak.stream/personal/jumi-worker` built with `--target worker` and `CMD ["bun", "run", "src/worker_server.ts"]`. `GET /healthz` is `200 {"ok":true}`. `GET /metrics` is the same unauthenticated Prometheus token exporter as the reviewer (`runOpenCode` already calls `recordOpenCodeDb`). The worker image sets `AGENT_INSTANCE=jumi-worker` so series do not collide with the reviewer.
+
 ## Image
 
-The image workflow publishes:
+The reviewer image workflow publishes:
 
 ```text
 gitea.kirmanak.stream/personal/jumi-reviewer:<commit-sha>
 gitea.kirmanak.stream/personal/jumi-reviewer:latest
 ```
 
-Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml`:
+The worker image workflow publishes:
+
+```text
+gitea.kirmanak.stream/personal/jumi-worker:<commit-sha>
+gitea.kirmanak.stream/personal/jumi-worker:latest
+```
+
+Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml` and `.gitea/workflows/jumi-worker-image.yml`:
 
 | Name | Description |
 |------|-------------|
@@ -198,13 +230,15 @@ bun run server
 ```text
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
+  opencode-implement.json    # Implement config (edit/write allow; no git commit/push)
   tool-versions.env          # Pinned OpenCode/Bun versions
   workflows/
     opencode-checks.yml      # PR lint/typecheck/test and image build checks
-    jumi-reviewer-image.yml  # Image build/push workflow
+    jumi-reviewer-image.yml  # Reviewer image build/push workflow
+    jumi-worker-image.yml    # Worker image build/push workflow
 scripts/
   opencode/
-    src/                     # Bun/TypeScript webhook and review service
+    src/                     # Bun/TypeScript reviewer and issue worker
 Dockerfile
 renovate.json
 ```

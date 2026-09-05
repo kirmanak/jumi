@@ -59,7 +59,7 @@ function normalizeGiteaUrl(value: string): string {
   return url.toString();
 }
 
-function validateCloneUrl(value: string, giteaUrl: string): string {
+export function validateCloneUrl(value: string, giteaUrl: string): string {
   const clone = new URL(value);
   const gitea = new URL(normalizeGiteaUrl(giteaUrl));
   if (clone.protocol !== "https:" && clone.protocol !== "http:")
@@ -94,7 +94,7 @@ function gitCredentialHelper(): string {
   ].join(" ");
 }
 
-function gitConfigArgs(): string[] {
+export function gitConfigArgs(): string[] {
   return [
     "-c",
     "credential.helper=",
@@ -115,7 +115,7 @@ function gitConfigArgs(): string[] {
   ];
 }
 
-function gitEnv(auth: GitAuth): Record<string, string | undefined> {
+export function gitEnv(auth: GitAuth): Record<string, string | undefined> {
   const gitea = new URL(normalizeGiteaUrl(auth.giteaUrl));
   return {
     PATH: process.env.PATH,
@@ -134,7 +134,10 @@ function gitEnv(auth: GitAuth): Record<string, string | undefined> {
   };
 }
 
-async function runGit(args: string[], opts: { cwd: string; env: Record<string, string | undefined> }): Promise<string> {
+export async function runGit(
+  args: string[],
+  opts: { cwd: string; env: Record<string, string | undefined> }
+): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd: opts.cwd,
     stdout: "pipe",

@@ -1,4 +1,4 @@
-import type { GiteaComment, GiteaCommitStatusPayload, GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
+import type { GiteaComment, GiteaCommitStatusPayload, GiteaIssue, GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
 /**
  * Minimal Gitea REST API client.
@@ -78,6 +78,26 @@ export class GiteaAPI {
 
   async getPR(owner: string, repo: string, index: number): Promise<GiteaPR> {
     return this.get<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`);
+  }
+
+  async listOpenPulls(owner: string, repo: string): Promise<GiteaPR[]> {
+    return this.getAll<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls?state=open`);
+  }
+
+  async createPullRequest(
+    owner: string,
+    repo: string,
+    pull: { title: string; body: string; head: string; base: string }
+  ): Promise<GiteaPR> {
+    return this.post<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls`, pull);
+  }
+
+  async getIssue(owner: string, repo: string, index: number): Promise<GiteaIssue> {
+    return this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`);
+  }
+
+  async searchAssignedIssues(): Promise<GiteaIssue[]> {
+    return this.getAll<GiteaIssue>("/repos/issues/search?type=issues&state=open&assigned=true");
   }
 
   async getPRFiles(owner: string, repo: string, index: number): Promise<GiteaPRFile[]> {
