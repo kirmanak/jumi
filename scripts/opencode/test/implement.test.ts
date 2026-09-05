@@ -165,6 +165,9 @@ describe("implementIssue", () => {
       expect(api.comments.at(-1)).toContain("no changes");
       expect(api.comments.at(-1)).toContain(workerMarker("kirmanak", "demo", 12));
       expect(openCodeOpts?.sanitizeEnv).toBe(true);
+      expect(openCodeOpts?.extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
+      expect(openCodeOpts?.extraEnv?.GITEA_BOT_TOKEN).toBeUndefined();
+      expect(openCodeOpts?.extraEnv?.GIT_AUTHOR_NAME).toBe("jumi");
       expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "rev-list" && args.includes("origin/main..HEAD"))).toBe(true);

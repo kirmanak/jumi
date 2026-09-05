@@ -42,6 +42,8 @@ export interface OpenCodeRunOptions {
   reviewLabel?: string;
   /** RSS sample interval for the OpenCode child (ms). Default 5000. */
   memorySampleIntervalMs?: number;
+  /** Extra env for sanitized runs. GITEA_* keys are dropped. */
+  extraEnv?: Record<string, string>;
   onPid?: (pid: number) => void | Promise<void>;
   logger?: (message: string) => void;
 }
@@ -70,6 +72,12 @@ function buildEnv(
   };
 
   if (opts.configPath) env.OPENCODE_CONFIG = opts.configPath;
+  if (opts.extraEnv) {
+    for (const [key, value] of Object.entries(opts.extraEnv)) {
+      if (key.startsWith("GITEA_")) continue;
+      env[key] = value;
+    }
+  }
   return env;
 }
 

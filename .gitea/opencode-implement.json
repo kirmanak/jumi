@@ -36,32 +36,16 @@
     "edit": "allow",
     "write": "allow",
     "bash": {
-      "*": "deny",
-      "git status": "allow",
-      "git status *": "allow",
-      "git diff": "allow",
-      "git diff *": "allow",
-      "git log": "allow",
-      "git log *": "allow",
-      "git show": "allow",
-      "git show *": "allow",
-      "git rev-parse": "allow",
-      "git rev-parse *": "allow",
-      "git grep": "allow",
-      "git grep *": "allow",
-      "git ls-files": "allow",
-      "git ls-files *": "allow",
-      "git blame": "allow",
-      "git blame *": "allow"
+      "*": "allow"
     },
     "external_directory": "deny",
-    "task": "deny",
-    "todowrite": "deny",
+    "task": "allow",
+    "todowrite": "allow",
     "question": "deny",
     "webfetch": "allow",
     "websearch": "allow",
-    "lsp": "deny",
-    "skill": "deny",
+    "lsp": "allow",
+    "skill": "allow",
     "doom_loop": "deny"
   }
 }

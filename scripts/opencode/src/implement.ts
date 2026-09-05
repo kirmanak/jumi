@@ -7,7 +7,7 @@ import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
 import { findOpenClosingPullRequest, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitRunner, gitConfigArgs, gitEnv, runGit, validateCloneUrl } from "./workspace.ts";
+import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 const COMMIT_NAME = "jumi";
@@ -93,10 +93,9 @@ function buildTaskMarkdown(job: IssueJob): string {
   return `# ${job.title}\n\n${job.body}\n\n${job.htmlUrl}\n`;
 }
 
-const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
-Edit and write files as needed.
-Do not run git add, git commit, or git push.
-Do not ask questions.
+export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
+Edit, write, commit, and push as needed. Incremental commits are fine.
+Do not force-push. Do not ask questions.
 When the task is complete, stop.`;
 
 export async function implementIssue(opts: ImplementOptions): Promise<ImplementResult> {
@@ -278,6 +277,11 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
       configPath: opts.opencodeConfig,
       home: opts.home,
       sanitizeEnv,
+      extraEnv: gitOpenCodeChildEnv({
+        giteaUrl: opts.giteaUrl,
+        username: opts.botUsername,
+        token: opts.giteaToken,
+      }),
       timeoutMs: opts.timeoutMs,
       maxOutputBytes: opts.maxOutputBytes,
       reviewLabel: `${owner}/${repo}#${issueNumber}`,

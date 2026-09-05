@@ -115,6 +115,27 @@ export function gitConfigArgs(): string[] {
   ];
 }
 
+export function gitOpenCodeChildEnv(auth: GitAuth): Record<string, string> {
+  const env = gitEnv(auth);
+  return {
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_AUTH_HOST: env.GIT_AUTH_HOST ?? "",
+    GIT_AUTH_USERNAME: env.GIT_AUTH_USERNAME ?? "",
+    GIT_AUTH_TOKEN: env.GIT_AUTH_TOKEN ?? "",
+    GIT_AUTHOR_NAME: "jumi",
+    GIT_AUTHOR_EMAIL: "jumi@noreply.kirmanak.stream",
+    GIT_COMMITTER_NAME: "jumi",
+    GIT_COMMITTER_EMAIL: "jumi@noreply.kirmanak.stream",
+    GIT_CONFIG_COUNT: "3",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "credential.helper",
+    GIT_CONFIG_VALUE_1: gitCredentialHelper(),
+    GIT_CONFIG_KEY_2: "core.symlinks",
+    GIT_CONFIG_VALUE_2: "false",
+  };
+}
+
 export function gitEnv(auth: GitAuth): Record<string, string | undefined> {
   const gitea = new URL(normalizeGiteaUrl(auth.giteaUrl));
   return {
