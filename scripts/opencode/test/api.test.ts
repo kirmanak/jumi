@@ -89,6 +89,27 @@ describe("GiteaAPI", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("lists issue comments, review comments, and reviews with exact-50 paging", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("page=1") && String(url).includes("/issues/7/comments")) {
+        return Response.json(Array.from({ length: 50 }, (_, i) => ({ id: i, body: "c" })));
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.listIssueComments("owner", "repo", 7);
+    await api.listPullReviewComments("owner", "repo", 7);
+    await api.listPullReviews("owner", "repo", 7);
+
+    expect(urls[0]).toContain("/issues/7/comments?limit=50&page=1");
+    expect(urls[1]).toContain("/issues/7/comments?limit=50&page=2");
+    expect(urls[2]).toContain("/pulls/7/comments?limit=50&page=1");
+    expect(urls[3]).toContain("/pulls/7/reviews?limit=50&page=1");
+  });
+
   test("throws useful errors for non-2xx responses", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 

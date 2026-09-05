@@ -17,6 +17,9 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
     updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
+    listIssueComments: async () => [],
+    listPullReviewComments: async () => [],
+    listPullReviews: async () => [],
   };
   return { ...defaults, ...overrides };
 }
@@ -216,6 +219,142 @@ describe("scanAssignedIssues", () => {
         logger: () => undefined,
       });
       expect(resumed).toHaveLength(1);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + new human PR comment enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+          listIssueComments: async () => [
+            makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+      expect(jobs[0]?.prNumber).toBe(127);
+      expect(jobs[0]?.action).toBe("scan");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + no new comments still skips", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing non-jumi PR does not follow-up; first-run remains skipped", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [makePR({ title: "Fix", body: "Closes #12", user: makeUser({ login: "alice" }) })],
+          listIssueComments: async () => [
+            makeComment({ id: 55, body: "please fix", user: makeUser({ login: "alice" }) }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("terminal first-run claim + jumi PR + new comment still enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      await writeClaim(claimFilePath(home, "kirmanak", "demo", 12), {
+        pid: 0,
+        startedAt: "2026-05-23T00:00:00Z",
+        heartbeatAt: "2026-05-23T00:00:00Z",
+        worktree: "/work/kirmanak/demo/12",
+        branch: "jumi/issue-12-fix-the-thing",
+        issueUpdatedAt: "2026-05-23T00:00:00Z",
+        headShaAtStart: "abc",
+        terminal: true,
+      });
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+          listIssueComments: async () => [makeComment({ id: 88, body: "nits", user: makeUser({ login: "alice" }) })],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
     } finally {
       await rm(home, { recursive: true, force: true });
     }

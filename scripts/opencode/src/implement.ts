@@ -2,7 +2,15 @@ import { access, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path";
 import { isAssignedToBot } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
-import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim, writeClaim } from "./claim.ts";
+import {
+  acquireClaim,
+  claimFilePath,
+  deleteClaim,
+  followUpStatePath,
+  isPidAlive,
+  readClaim,
+  writeClaim,
+} from "./claim.ts";
 import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
 import { closesIssuePattern, findOpenClosingPullRequest, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
@@ -91,7 +99,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function buildTaskMarkdown(job: IssueJob): string {
+export function buildTaskMarkdown(job: IssueJob): string {
   return `# ${job.title}\n\n${job.body}\n\n${job.htmlUrl}\n`;
 }
 
@@ -426,4 +434,5 @@ export async function cancelIssueWork(opts: {
   }
   await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");
   await deleteClaim(claimPath);
+  await deleteClaim(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
 }

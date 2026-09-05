@@ -55,6 +55,7 @@ export interface GiteaPR {
   created_at: string;
   updated_at: string;
   html_url: string;
+  draft?: boolean;
 }
 
 export interface GiteaPRFile {
@@ -68,10 +69,45 @@ export interface GiteaPRFile {
 
 // ── Webhook payloads ─────────────────────────────────────────────────────────
 
+export interface GiteaPullReview {
+  id: number;
+  body?: string | null;
+  content?: string;
+  user?: GiteaUser;
+  state?: string;
+  type?: string;
+  submitted_at?: string;
+  updated_at?: string;
+  created_at?: string;
+}
+
+export interface GiteaPullReviewComment extends GiteaComment {
+  path?: string;
+  pull_request_review_id?: number;
+  html_url?: string;
+}
+
+export interface GiteaPRReviewRef {
+  id?: number;
+  body?: string | null;
+  content?: string;
+  type?: string;
+}
+
 export interface GiteaPRPayload {
   action: string;
   number: number;
   pull_request: GiteaPR;
+  repository: GiteaRepo;
+  sender: GiteaUser;
+  review?: GiteaPRReviewRef;
+}
+
+export interface GiteaIssueCommentPayload {
+  action: string;
+  comment: GiteaComment;
+  issue: GiteaIssue;
+  pull_request?: GiteaPR;
   repository: GiteaRepo;
   sender: GiteaUser;
 }
@@ -103,6 +139,7 @@ export interface GiteaIssue {
     draft?: boolean;
     html_url?: string;
   } | null;
+  is_pull?: boolean;
   updated_at: string;
   created_at: string;
   /** Webhook payloads embed a full repo; REST issue search only sends RepositoryMeta. */
@@ -127,6 +164,14 @@ export interface GiteaIssuePayload {
   sender: GiteaUser;
 }
 
+export interface IssueJobTrigger {
+  event: string;
+  commentId?: number;
+  reviewId?: number;
+  sender: string;
+  body?: string;
+}
+
 export interface IssueJob {
   delivery: string;
   owner: string;
@@ -140,6 +185,9 @@ export interface IssueJob {
   defaultBranch: string;
   cloneUrl: string;
   receivedAt: string;
+  mode?: "implement" | "follow-up";
+  prNumber?: number;
+  trigger?: IssueJobTrigger;
 }
 
 export type GiteaCommitStatusState = "pending" | "success" | "error" | "failure" | "warning";

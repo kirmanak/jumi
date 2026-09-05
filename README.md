@@ -31,7 +31,7 @@ The service intentionally does not checkout or execute PR-head code. It reviews 
 
 ## Worker Service
 
-`jumi-worker` is a sibling HTTP service in the same Bun package. Gitea sends **Issues** webhooks to `POST /webhooks/gitea`. The worker verifies `X-Gitea-Signature` the same way as the reviewer, then enqueues work only when the issue is assigned to bot username `jumi` (`BOT_USERNAME`, default `jumi`). Pull-request issues (`issue.pull_request` present / non-null) are ignored.
+`jumi-worker` is a sibling HTTP service in the same Bun package. Gitea sends **Issues** webhooks (and follow-up review events) to `POST /webhooks/gitea`. The worker verifies `X-Gitea-Signature` the same way as the reviewer, then enqueues work only when the issue is assigned to bot username `jumi` (`BOT_USERNAME`, default `jumi`). Pull-request issues (`issue.pull_request` present / non-null) are ignored for first-run implement. Org-hook checkboxes and GitOps IngressRoutes are not configured in this repo.
 
 Gitea 1.27 delivers assignment as a grouped issue event, not a GitHub-style top-level `assignee` field:
 
@@ -42,15 +42,22 @@ Gitea 1.27 delivers assignment as a grouped issue event, not a GitHub-style top-
 
 Webhook handling:
 
-- `X-Gitea-Event: issues` or `issue_assign` with action `assigned`, `opened`, or `reopened` (and assigned to the bot) → enqueue
-- `unassigned` when the bot is no longer an assignee → cancel: kill a live child, comment `stopped`, delete the claim file
+- `X-Gitea-Event: issues` or `issue_assign` with action `assigned`, `opened`, or `reopened` (and assigned to the bot) → enqueue first-run implement
+- `unassigned` when the bot is no longer an assignee → cancel: kill a live child, comment `stopped`, delete the claim and follow-up state files
 - `unassigned` when the bot remains among multiple assignees → no cancel
+- `X-Gitea-Event: issue_comment` / `pull_request_comment` with action `created` on an open jumi closing PR (human sender, non-empty body, not a jumi sticky) → enqueue follow-up keyed by the closed issue
+- `X-Gitea-Event: pull_request_rejected` on an open jumi closing PR → enqueue follow-up
+- `X-Gitea-Event: pull_request` → `202` skip (reviewer only)
 - `X-Gitea-Event: ping` → `200 {"ok":true}`
 - other events → `202` skip
 
+Skip follow-up when the sender is `jumi`, the comment was `edited`/`deleted`, the body is empty or contains `<!-- jumi-worker:` / `<!-- jumi-check:`, the PR is a fork/draft/`WIP:`, or the closing issue is not assigned to the bot.
+
 On enqueue the parent claims the issue with a PID/heartbeat file under `{HOME}/worker/jobs/{owner}/{repo}/{number}.json`. A claim is live only while that PID is alive **and** the heartbeat is newer than two minutes. The parent clones a bare cache and worktree from the default branch, writes `JUMI_TASK.md`, and runs `opencode run` with `.gitea/opencode-implement.json`. The OpenCode child is started with `sanitizeOpenCodeEnv: true` and does not receive `GITEA_BOT_TOKEN` or webhook secrets. After OpenCode, the **parent** reads `JUMI_PR.md` when present, commits, pushes a `jumi/issue-{n}-{slug}` branch (never the default branch, never force-push), and opens a PR whose body always includes `Fixes #n`. If the tree is clean it comments `no changes` and clears the live claim without unassigning.
 
-A scan loop (`WORKER_SCAN_INTERVAL_MS`, default 5 minutes) searches open issues assigned to the authenticated bot (`GET /repos/issues/search?type=issues&state=open&assigned=true`). Gitea's search result only embeds RepositoryMeta (`id`, `name`, `owner`, `full_name`), so the worker then `GET /repos/{owner}/{repo}` for `clone_url` / `default_branch` before cloning. If a claim PID is dead or the heartbeat is stale, the worker reclaims the same worktree and reruns. If an open PR by jumi already closes the issue (`Fixes #n` / `Closes #n`), scan skips it.
+Follow-up does not open a second PR. It checks out the existing `pr.head.ref`, writes `JUMI_TASK.md` plus `JUMI_FEEDBACK.md`, runs OpenCode for 60 minutes, and pushes to that same branch. Stickies go on the PR (`Jumi is addressing review comments.` → `Pushed follow-up to {url}` / `no follow-up changes` / `stuck: too many follow-up rounds`). At most 3 follow-up rounds per issue.
+
+A scan loop (`WORKER_SCAN_INTERVAL_MS`, default 5 minutes) searches open issues assigned to the authenticated bot (`GET /repos/issues/search?type=issues&state=open&assigned=true`). Gitea's search result only embeds RepositoryMeta (`id`, `name`, `owner`, `full_name`), so the worker then `GET /repos/{owner}/{repo}` for `clone_url` / `default_branch` before cloning. If a claim PID is dead or the heartbeat is stale, the worker reclaims the same worktree and reruns. If an open **jumi** PR already closes the issue (`Fixes #n` / `Closes #n`) and there are unhandled human review comments, scan enqueues follow-up; otherwise it skips. A human-only closing PR still skips first-run and does not follow up.
 
 The worker image is separate from the reviewer: `gitea.kirmanak.stream/personal/jumi-worker` built with `--target worker` and `CMD ["bun", "run", "src/worker_server.ts"]`. `GET /healthz` is `200 {"ok":true}`. `GET /metrics` is the same unauthenticated Prometheus token exporter as the reviewer (`runOpenCode` already calls `recordOpenCodeDb`). The worker image sets `AGENT_INSTANCE=jumi-worker` so series do not collide with the reviewer.
 

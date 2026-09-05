@@ -2,6 +2,7 @@ import type { ServiceConfig } from "../src/config.ts";
 import type {
   GiteaComment,
   GiteaIssue,
+  GiteaIssueCommentPayload,
   GiteaIssuePayload,
   GiteaPR,
   GiteaPRBranch,
@@ -121,6 +122,32 @@ export function makeIssue(overrides: Partial<GiteaIssue> = {}): GiteaIssue {
     assignees: [makeUser({ login: "jumi" })],
     updated_at: "2026-05-23T00:00:00Z",
     created_at: "2026-05-23T00:00:00Z",
+    ...overrides,
+  };
+}
+
+export function makeIssueCommentPayload(overrides: Partial<GiteaIssueCommentPayload> = {}): GiteaIssueCommentPayload {
+  const repository = overrides.repository ?? makeRepo();
+  const issue =
+    overrides.issue ??
+    makeIssue({
+      number: 127,
+      title: "Fix the thing",
+      body: "Fixes #12",
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      user: makeUser({ login: "jumi" }),
+      pull_request: { merged_at: null },
+    });
+  return {
+    action: "created",
+    comment: makeComment({
+      id: 55,
+      body: "please fix the tests",
+      user: makeUser({ login: "alice" }),
+    }),
+    issue,
+    repository,
+    sender: makeUser({ login: "alice" }),
     ...overrides,
   };
 }

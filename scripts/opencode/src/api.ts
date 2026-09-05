@@ -1,4 +1,13 @@
-import type { GiteaComment, GiteaCommitStatusPayload, GiteaIssue, GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
+import type {
+  GiteaComment,
+  GiteaCommitStatusPayload,
+  GiteaIssue,
+  GiteaPR,
+  GiteaPRFile,
+  GiteaPullReview,
+  GiteaPullReviewComment,
+  GiteaRepo,
+} from "./types.ts";
 
 /**
  * Minimal Gitea REST API client.
@@ -64,6 +73,19 @@ export class GiteaAPI {
       results.push(...batch);
       if (batch.length < 50) break;
       page++;
+    }
+    return results;
+  }
+
+  private async getPages<T>(path: string): Promise<T[]> {
+    const results: T[] = [];
+    let page = 1;
+    while (page <= 40) {
+      const sep = path.includes("?") ? "&" : "?";
+      const batch = await this.get<T[]>(`${path}${sep}limit=50&page=${page}`);
+      results.push(...batch);
+      if (batch.length !== 50) break;
+      page += 1;
     }
     return results;
   }
@@ -142,6 +164,18 @@ export class GiteaAPI {
 
   async updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment> {
     return this.patch<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/comments/${commentId}`, { body });
+  }
+
+  async listIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]> {
+    return this.getPages<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`);
+  }
+
+  async listPullReviewComments(owner: string, repo: string, index: number): Promise<GiteaPullReviewComment[]> {
+    return this.getPages<GiteaPullReviewComment>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/comments`);
+  }
+
+  async listPullReviews(owner: string, repo: string, index: number): Promise<GiteaPullReview[]> {
+    return this.getPages<GiteaPullReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews`);
   }
 
   // ── Commit statuses ───────────────────────────────────────────────────────────

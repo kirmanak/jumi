@@ -19,6 +19,10 @@ export function claimFilePath(home: string, owner: string, repo: string, issueNu
   return join(home, "worker", "jobs", owner, repo, `${issueNumber}.json`);
 }
 
+export function followUpStatePath(home: string, owner: string, repo: string, issueNumber: number): string {
+  return join(home, "worker", "jobs", owner, repo, `${issueNumber}.followup.json`);
+}
+
 export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {

@@ -51,6 +51,9 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
       comments.push(body);
       return makeComment({ body });
     },
+    listIssueComments: async () => [],
+    listPullReviewComments: async () => [],
+    listPullReviews: async () => [],
   };
   return { ...defaults, ...overrides, comments, pulls };
 }

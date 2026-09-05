@@ -1,5 +1,11 @@
 import { GiteaAPI } from "./api.ts";
 import { scrubSecretEnv } from "./config.ts";
+import {
+  parseIssueCommentPayload,
+  parsePullRejectedPayload,
+  shouldEnqueueIssueCommentFollowUp,
+  shouldEnqueuePullRejectedFollowUp,
+} from "./followup_webhook.ts";
 import { parseIssuesPayload, shouldEnqueueIssue } from "./issue_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult, ReviewQueue } from "./queue.ts";
@@ -35,6 +41,40 @@ function authMatches(actual: string | null, expected?: string): boolean {
 /** Gitea HookEventType.Event() maps issues/issue_assign/issue_label/issue_milestone → "issues". */
 export function isIssuesWebhookEvent(event: string | null, eventType: string | null): boolean {
   return event === "issues" || event === "issue_assign" || eventType === "issues" || eventType === "issue_assign";
+}
+
+const FOLLOWUP_EVENTS = new Set([
+  "issue_comment",
+  "pull_request_comment",
+  "pull_request_rejected",
+  "pull_request_review_comment",
+  "pull_request_review_rejected",
+]);
+
+export function isFollowUpWebhookEvent(event: string | null, eventType: string | null): boolean {
+  if (event === "pull_request") return false;
+  return FOLLOWUP_EVENTS.has(event ?? "") || FOLLOWUP_EVENTS.has(eventType ?? "");
+}
+
+export function isWorkerWebhookEvent(event: string | null, eventType: string | null): boolean {
+  return isIssuesWebhookEvent(event, eventType) || isFollowUpWebhookEvent(event, eventType);
+}
+
+function isPullRejectedEvent(event: string | null, eventType: string | null): boolean {
+  return (
+    event === "pull_request_rejected" ||
+    eventType === "pull_request_rejected" ||
+    eventType === "pull_request_review_rejected"
+  );
+}
+
+function isPullRequestPayloadFollowUp(event: string | null, eventType: string | null): boolean {
+  if (event === "pull_request" || event === "issue_comment") return false;
+  return (
+    isPullRejectedEvent(event, eventType) ||
+    event === "pull_request_comment" ||
+    eventType === "pull_request_review_comment"
+  );
 }
 
 export interface WorkerFetchHandlerDeps {
@@ -78,20 +118,42 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
     const event = request.headers.get("x-gitea-event");
     const eventType = request.headers.get("x-gitea-event-type");
     if (event === "ping" || eventType === "ping") return json(200, { ok: true });
+    if (event === "pull_request") {
+      return json(202, { skipped: `unsupported event ${event}` });
+    }
     // Gitea 1.27: assignment uses X-Gitea-Event=issues and X-Gitea-Event-Type=issue_assign.
     // Accept either header so a proxy that copies Event-Type into Event still works.
-    if (!isIssuesWebhookEvent(event, eventType)) {
+    if (!isWorkerWebhookEvent(event, eventType)) {
       return json(202, { skipped: `unsupported event ${event ?? eventType ?? "unknown"}` });
     }
 
+    const policy = {
+      giteaUrl: config.giteaUrl,
+      allowedOrgs: config.allowedOrgs,
+      allowedRepos: config.allowedRepos,
+      botUsername: config.botUsername,
+    };
+
     try {
+      if (isFollowUpWebhookEvent(event, eventType)) {
+        const eventName = event ?? eventType ?? "issue_comment";
+        const decision = isPullRequestPayloadFollowUp(event, eventType)
+          ? shouldEnqueuePullRejectedFollowUp(parsePullRejectedPayload(rawBody), policy, eventName)
+          : shouldEnqueueIssueCommentFollowUp(parseIssueCommentPayload(rawBody), policy, eventName);
+        if (decision.type === "skip") return json(202, { skipped: decision.reason });
+        const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+        const job: IssueJob = {
+          ...decision.job,
+          delivery,
+          receivedAt: new Date().toISOString(),
+        };
+        const result: EnqueueResult = deps.queue.enqueue(job);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        return json(202, result);
+      }
+
       const payload = parseIssuesPayload(rawBody);
-      const decision = shouldEnqueueIssue(payload, {
-        giteaUrl: config.giteaUrl,
-        allowedOrgs: config.allowedOrgs,
-        allowedRepos: config.allowedRepos,
-        botUsername: config.botUsername,
-      });
+      const decision = shouldEnqueueIssue(payload, policy);
 
       if (decision.type === "skip") return json(202, { skipped: decision.reason });
       if (decision.type === "cancel") {
