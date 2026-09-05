@@ -260,6 +260,46 @@ describe("implementConflict", () => {
     });
   });
 
+  test("git merge --no-ff --no-commit receives committer identity", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      let mergeEnv: Record<string, string | undefined> | undefined;
+      const gitRunner: GitRunner = notAncestorGit(async (args, opts) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge" && gitArgs.includes("--no-ff") && gitArgs.includes("--no-commit")) {
+          mergeEnv = opts.env;
+          if (!opts.env.GIT_COMMITTER_NAME || !opts.env.GIT_COMMITTER_EMAIL) {
+            throw new Error("fatal: unable to auto-detect email address (got 'jumi@jumi-worker. (none)')");
+          }
+        }
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(mergeEnv?.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+      expect(mergeEnv?.GIT_CONFIG_NOSYSTEM).toBe("1");
+      expect(mergeEnv?.GIT_COMMITTER_NAME).toBe("jumi");
+      expect(mergeEnv?.GIT_COMMITTER_EMAIL).toBe("jumi@noreply.kirmanak.stream");
+      expect(mergeEnv?.GIT_AUTHOR_NAME).toBe("jumi");
+      expect(mergeEnv?.GIT_AUTHOR_EMAIL).toBe("jumi@noreply.kirmanak.stream");
+    });
+  });
+
   test("Chart.lock conflict → regenerates via helm, does not leave <<<<<<<", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
