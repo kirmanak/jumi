@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   extractClosingIssueNumber,
+  extractClosingIssueNumbers,
   findOpenClosingPullRequest,
   findOpenJumiClosingPullRequest,
   pullRequestClosesIssue,
@@ -65,6 +66,53 @@ describe("extractClosingIssueNumber", () => {
         head: { ref: "jumi/issue-12-fix-the-thing" },
       })
     ).toBeUndefined();
+  });
+});
+
+describe("extractClosingIssueNumbers", () => {
+  test("unique first-seen from title and body with optional colon", () => {
+    expect(
+      extractClosingIssueNumbers({
+        title: "Fixes #12 and also Fixes #12",
+        body: "Fixed: #13\nCloses #12",
+      })
+    ).toEqual([12, 13]);
+  });
+
+  test("appends jumi issue branch when not already listed", () => {
+    expect(
+      extractClosingIssueNumbers({
+        title: "x",
+        body: "Fixes #12",
+        head: { ref: "jumi/issue-13-other" },
+      })
+    ).toEqual([12, 13]);
+    expect(
+      extractClosingIssueNumbers({
+        title: "x",
+        body: "Fixes #12\nFixes #13",
+        head: { ref: "jumi/issue-12-fix-the-thing" },
+      })
+    ).toEqual([12, 13]);
+  });
+
+  test("excludes the PR number itself", () => {
+    expect(
+      extractClosingIssueNumbers({
+        number: 127,
+        title: "Fixes #127",
+        body: "",
+      })
+    ).toEqual([]);
+  });
+
+  test("ignores see #n mentions without close keywords", () => {
+    expect(
+      extractClosingIssueNumbers({
+        title: "x",
+        body: "see #12",
+      })
+    ).toEqual([]);
   });
 });
 

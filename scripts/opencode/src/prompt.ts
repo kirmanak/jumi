@@ -1,3 +1,4 @@
+import { formatLinkedIssuesXml, formatPrCommentsXml, type ReviewThread } from "./review_context.ts";
 import type { GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
 /** Escape XML special characters in text content */
@@ -76,13 +77,16 @@ export interface PROpenedPromptOptions {
   pr: GiteaPR;
   prFiles: GiteaPRFile[];
   reviewNotes?: string[];
+  thread?: ReviewThread;
 }
 
 export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
-  const { repo, pr, prFiles, reviewNotes = [] } = opts;
+  const { repo, pr, prFiles, reviewNotes = [], thread } = opts;
   const formattedNotes = reviewNotes.length
     ? `\n  <review_notes>\n${reviewNotes.map((note) => `    <note>${escapeXml(note)}</note>`).join("\n")}\n  </review_notes>`
     : "";
+  const commentsXml = formatPrCommentsXml(thread?.comments ?? []);
+  const linkedXml = formatLinkedIssuesXml(thread?.linkedIssues ?? []);
 
   return `${PREAMBLE}
 
@@ -93,13 +97,14 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
   <pull_request number="${pr.number}" state="${pr.state}" author="${escapeXml(pr.user.login)}" created_at="${pr.created_at}" head="${escapeXml(pr.head.ref)}" base="${escapeXml(pr.base.ref)}">
     <title>${escapeXml(pr.title)}</title>
     <body>${escapeXml(pr.body ?? "")}</body>
-    <pull_request_changed_files>
+${commentsXml ? `${commentsXml}\n` : ""}    <pull_request_changed_files>
 ${formatPRFiles(prFiles)}
     </pull_request_changed_files>
-  </pull_request>${formattedNotes}
+  </pull_request>${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}
 </gitea_action_context>
 
 Review the pull request above using the checked-out repository and the caveman-review skill below. The PR head is checked out on jumi/pr-${pr.number}; the stable target ref is jumi/target. Prefer stable refs like jumi/target and HEAD in shell commands instead of untrusted branch names.
+<linked_issues> and <comments> are product intent and prior discussion. Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug.
 
 Shell is open for inspection. Pipes, quotes, and git grep regex are allowed. Prefer built-in read/list/glob/grep for file contents. Do not dump large patches into context.
 - Start from the patches already in <pull_request_changed_files>; only re-fetch a file when that patch is missing, truncated, or you need surrounding code.

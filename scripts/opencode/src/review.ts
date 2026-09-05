@@ -1,8 +1,18 @@
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { OpenCodeRunOptions } from "./git.ts";
 import { runOpenCode } from "./git.ts";
+import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
-import type { GiteaComment, GiteaCommitStatusPayload, GiteaPR, GiteaPRFile, GiteaRepo, ReviewJob } from "./types.ts";
+import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
+import type {
+  GiteaComment,
+  GiteaCommitStatusPayload,
+  GiteaIssue,
+  GiteaPR,
+  GiteaPRFile,
+  GiteaRepo,
+  ReviewJob,
+} from "./types.ts";
 import { parseReviewOutput } from "./verdict.ts";
 import { checkoutPullRequestWorkspace } from "./workspace.ts";
 
@@ -25,6 +35,8 @@ export interface ReviewApi {
   getRepo(owner: string, repo: string): Promise<GiteaRepo>;
   getPR(owner: string, repo: string, index: number): Promise<GiteaPR>;
   getPRFiles(owner: string, repo: string, index: number): Promise<GiteaPRFile[]>;
+  getIssue(owner: string, repo: string, index: number): Promise<GiteaIssue>;
+  listIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]>;
   findStickyIssueComment(
     owner: string,
     repo: string,
@@ -70,6 +82,7 @@ export interface ReviewOptions {
   timeoutMs?: number;
   maxFiles?: number;
   maxPatchBytes?: number;
+  maxThreadBytes?: number;
   maxOutputBytes?: number;
   openCodeRunner?: OpenCodeRunner;
   workspacePreparer?: WorkspacePreparer;
@@ -201,6 +214,40 @@ function prepareFiles(
   return { files: prepared, notes };
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function loadPrComments(
+  api: ReviewApi,
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<{ comments: GiteaComment[]; note?: string }> {
+  try {
+    return { comments: await api.listIssueComments(owner, repo, prNumber) };
+  } catch (err) {
+    return { comments: [], note: `Failed to load PR comments: ${errorMessage(err)}` };
+  }
+}
+
+async function loadLinkedIssue(
+  api: ReviewApi,
+  owner: string,
+  repo: string,
+  id: number
+): Promise<{ issue: GiteaIssue; comments: GiteaComment[] } | { note: string }> {
+  try {
+    const [issue, comments] = await Promise.all([
+      api.getIssue(owner, repo, id),
+      api.listIssueComments(owner, repo, id),
+    ]);
+    return { issue, comments };
+  } catch (err) {
+    return { note: `Failed to load linked issue #${id}: ${errorMessage(err)}` };
+  }
+}
+
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
   const openCodeRunner = opts.openCodeRunner ?? runOpenCode;
@@ -215,15 +262,33 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
-    const [repoInfo, prFiles] = await Promise.all([
+    const [repoInfo, prFiles, prCommentResult] = await Promise.all([
       opts.api.getRepo(opts.owner, opts.repo),
       opts.api.getPRFiles(opts.owner, opts.repo, pr.number),
+      loadPrComments(opts.api, opts.owner, opts.repo, pr.number),
     ]);
+
+    const ids = extractClosingIssueNumbers(pr);
+    const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(opts.api, opts.owner, opts.repo, id)));
+    const notes: string[] = [];
+    if (prCommentResult.note) notes.push(prCommentResult.note);
+    const linkedIssues: Array<{ issue: GiteaIssue; comments: GiteaComment[] }> = [];
+    for (const result of linkedResults) {
+      if ("note" in result) {
+        notes.push(result.note);
+        continue;
+      }
+      linkedIssues.push({ issue: result.issue, comments: result.comments });
+    }
+    const prComments = prCommentResult.comments;
+    const thread = mapReviewThread({ prComments, linkedIssues });
 
     const maxFiles = opts.maxFiles ?? 100;
     const maxPatchBytes = opts.maxPatchBytes ?? 500_000;
+    const maxThreadBytes = opts.maxThreadBytes ?? DEFAULT_MAX_THREAD_BYTES;
     const rawPatchBytes = prFiles.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
-    const { files, notes } = prepareFiles(prFiles, maxFiles, maxPatchBytes);
+    const { files, notes: fileNotes } = prepareFiles(prFiles, maxFiles, maxPatchBytes);
+    notes.push(...fileNotes);
     const includedPatchBytes = files.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const reviewLabel = `${repoFullName}#${pr.number}`;
 
@@ -239,6 +304,21 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       included_patch_bytes_h: formatBytes(includedPatchBytes),
       max_patch_bytes: maxPatchBytes,
       notes: notes.length,
+    });
+
+    const fitted = fitReviewThread(thread, maxThreadBytes);
+    if (fitted.truncated) {
+      notes.push(`Thread context truncated to maxThreadBytes (dropped ${fitted.droppedCommentBodies} comment bodies).`);
+    }
+    logDiagnostic(log, "review_thread", {
+      review: reviewLabel,
+      pr_comments: fitted.thread.comments.length,
+      linked_issues: fitted.thread.linkedIssues.length,
+      linked_issue_comments: fitted.thread.linkedIssues.reduce((sum, issue) => sum + issue.comments.length, 0),
+      thread_bytes: fitted.threadBytes,
+      thread_bytes_h: formatBytes(fitted.threadBytes),
+      max_thread_bytes: maxThreadBytes,
+      truncated: fitted.truncated,
     });
 
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
@@ -257,6 +337,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       pr,
       prFiles: files,
       reviewNotes: notes,
+      thread: fitted.thread,
     });
 
     logDiagnostic(log, "review_prompt", {

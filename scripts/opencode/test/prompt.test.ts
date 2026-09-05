@@ -65,4 +65,78 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("<review_notes>");
     expect(prompt).toContain("Patch budget exhausted");
   });
+
+  test("escapes PR comments and includes linked issue title, body, and comments", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      thread: {
+        comments: [
+          {
+            id: 55,
+            author: "jumi",
+            created_at: "2026-05-23T00:00:00Z",
+            body: 'Uses <tag> & "quotes"',
+          },
+        ],
+        linkedIssues: [
+          {
+            number: 12,
+            state: "open",
+            author: "kirmanak",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/12",
+            title: "Fix the <thing>",
+            body: "Please implement & test",
+            comments: [
+              {
+                id: 1,
+                author: "alice",
+                created_at: "2026-05-22T00:00:00Z",
+                body: "Agreed <ok>",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(prompt).toContain(
+      '<comment id="55" author="jumi" created_at="2026-05-23T00:00:00Z">Uses &lt;tag&gt; &amp; &quot;quotes&quot;</comment>'
+    );
+    expect(prompt).toContain(
+      '<issue number="12" state="open" author="kirmanak" html_url="https://gitea.kirmanak.stream/kirmanak/demo/issues/12">'
+    );
+    expect(prompt).toContain("<title>Fix the &lt;thing&gt;</title>");
+    expect(prompt).toContain("<body>Please implement &amp; test</body>");
+    expect(prompt).toContain(
+      '<comment id="1" author="alice" created_at="2026-05-22T00:00:00Z">Agreed &lt;ok&gt;</comment>'
+    );
+  });
+
+  test("omits empty comments and linked_issues wrappers", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      thread: { comments: [], linkedIssues: [] },
+    });
+
+    expect(prompt).not.toContain("</comments>");
+    expect(prompt).not.toContain("</linked_issues>");
+    expect(prompt).not.toContain("<comment ");
+    expect(prompt).not.toContain("<issue ");
+  });
+
+  test("steers the reviewer to treat thread XML as product intent", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).toContain(
+      "<linked_issues> and <comments> are product intent and prior discussion. Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug."
+    );
+  });
 });

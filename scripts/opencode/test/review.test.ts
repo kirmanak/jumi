@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { ReviewApi } from "../src/review.ts";
 import { reviewPullRequest } from "../src/review.ts";
-import { makeBranch, makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
+import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   const defaults: ReviewApi = {
     getRepo: async () => makeRepo(),
     getPR: async () => makePR(),
     getPRFiles: async () => [makeFile()],
+    getIssue: async () => makeIssue(),
+    listIssueComments: async () => [],
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
     updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
@@ -358,5 +360,79 @@ describe("reviewPullRequest", () => {
     expect(prompt).toContain("Only the first 1 of 2 changed files are included.");
     expect(prompt).toContain("Patch for first.ts was truncated to fit the patch budget.");
     expect(prompt).toContain("abc\n[patch truncated]");
+  });
+
+  test("loads linked issue 12 and PR comments for Fixes #12", async () => {
+    const calls: Array<{ method: string; index: number }> = [];
+    await reviewPullRequest({
+      ...baseOptions,
+      api: makeApi({
+        getPR: async () => makePR({ body: "Fixes #12" }),
+        getIssue: async (_owner, _repo, index) => {
+          calls.push({ method: "getIssue", index });
+          return makeIssue({ number: index });
+        },
+        listIssueComments: async (_owner, _repo, index) => {
+          calls.push({ method: "listIssueComments", index });
+          return [];
+        },
+      }),
+      openCodeRunner: async () => "Review",
+    });
+
+    expect(calls).toContainEqual({ method: "getIssue", index: 12 });
+    expect(calls).toContainEqual({ method: "listIssueComments", index: 7 });
+    expect(calls).toContainEqual({ method: "listIssueComments", index: 12 });
+  });
+
+  test("still posts a review when a linked issue 404s", async () => {
+    let prompt = "";
+    const result = await reviewPullRequest({
+      ...baseOptions,
+      api: makeApi({
+        getPR: async () => makePR({ body: "Fixes #12" }),
+        getIssue: async () => {
+          throw new Error("Gitea API GET https://gitea.example/issues/12 → 404: not found");
+        },
+      }),
+      openCodeRunner: async (value) => {
+        prompt = value;
+        return "Review\n<!-- jumi-check: success -->";
+      },
+    });
+
+    expect(result.status).toBe("posted");
+    expect(prompt).toContain("Failed to load linked issue #12");
+    expect(prompt).toContain("404");
+  });
+
+  test("injects Jumi sticky and human comments into the OpenCode prompt", async () => {
+    let prompt = "";
+    await reviewPullRequest({
+      ...baseOptions,
+      api: makeApi({
+        listIssueComments: async () => [
+          makeComment({
+            id: 10,
+            body: "<!-- jumi-review:kirmanak/demo#7 -->\nPrevious findings",
+            user: makeUser({ login: "jumi" }),
+          }),
+          makeComment({
+            id: 11,
+            body: "please also handle timeouts",
+            user: makeUser({ login: "alice" }),
+          }),
+        ],
+      }),
+      openCodeRunner: async (value) => {
+        prompt = value;
+        return "Review";
+      },
+    });
+
+    expect(prompt).toContain("Previous findings");
+    expect(prompt).toContain("please also handle timeouts");
+    expect(prompt).toContain('author="jumi"');
+    expect(prompt).toContain('author="alice"');
   });
 });

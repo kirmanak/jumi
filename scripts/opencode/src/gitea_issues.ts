@@ -51,6 +51,35 @@ export function jumiIssueBranchNumber(ref: string | undefined): number | undefin
   return Number(match[1]);
 }
 
+export function extractClosingIssueNumbers(pr: {
+  number?: number;
+  title: string;
+  body?: string | null;
+  head?: { ref?: string };
+}): number[] {
+  const text = `${pr.title}\n${pr.body ?? ""}`;
+  const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)\b/gi;
+  const seen = new Set<number>();
+  const result: number[] = [];
+
+  const add = (value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return;
+    if (pr.number !== undefined && value === pr.number) return;
+    if (seen.has(value)) return;
+    seen.add(value);
+    result.push(value);
+  };
+
+  for (const match of text.matchAll(pattern)) {
+    add(Number(match[1]));
+  }
+
+  const fromBranch = jumiIssueBranchNumber(pr.head?.ref);
+  if (fromBranch !== undefined) add(fromBranch);
+
+  return result;
+}
+
 export function extractClosingIssueNumber(pr: {
   title: string;
   body?: string | null;
