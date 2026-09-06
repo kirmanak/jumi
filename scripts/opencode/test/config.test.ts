@@ -23,6 +23,41 @@ describe("loadConfig", () => {
     expect(config.opencodeWellKnownKey).toBe("OPENCODE_WELLKNOWN_TOKEN");
     expect(config.opencodeWellKnownToken).toBe("unused");
     expect(config.queueConcurrency).toBe(1);
+    expect(config.role).toBe("monolith");
+    expect(config.databaseUrl).toBeUndefined();
+    expect(config.leaseMs).toBe(900_000 + 10 * 60 * 1000);
+    expect(config.maxJobAttempts).toBe(2);
+  });
+
+  test("ignores DATABASE_URL for monolith", () => {
+    const config = loadConfig({ ...required, DATABASE_URL: "postgres://ignored" });
+    expect(config.role).toBe("monolith");
+    expect(config.databaseUrl).toBeUndefined();
+  });
+
+  test("requires DATABASE_URL for router and engine", () => {
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "router" })).toThrow("DATABASE_URL");
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "engine" })).toThrow("DATABASE_URL");
+    expect(loadConfig({ ...required, JUMI_ROLE: "router", DATABASE_URL: "postgres://jumi" }).role).toBe("router");
+    expect(loadConfig({ ...required, JUMI_ROLE: "engine", DATABASE_URL: "postgres://jumi" }).databaseUrl).toBe(
+      "postgres://jumi"
+    );
+  });
+
+  test("parses LEASE_MS and MAX_JOB_ATTEMPTS", () => {
+    const config = loadConfig({
+      ...required,
+      JUMI_ROLE: "engine",
+      DATABASE_URL: "postgres://jumi",
+      LEASE_MS: "1000",
+      MAX_JOB_ATTEMPTS: "3",
+    });
+    expect(config.leaseMs).toBe(1000);
+    expect(config.maxJobAttempts).toBe(3);
+  });
+
+  test("rejects invalid JUMI_ROLE", () => {
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "worker" })).toThrow("Invalid JUMI_ROLE");
   });
 
   test("parses CSV and integer options", () => {
@@ -55,6 +90,29 @@ describe("loadConfig", () => {
     );
     expect(() => loadConfig({ ...required, MAX_FILES: "0" })).toThrow("Invalid positive integer");
     expect(() => loadConfig({ ...required, PORT: "abc" })).toThrow("Invalid positive integer");
+  });
+
+  test("engine does not require GITEA_WEBHOOK_SECRET; router and monolith still do", () => {
+    const config = loadConfig({
+      JUMI_ROLE: "engine",
+      DATABASE_URL: "postgres://jumi",
+      GITEA_URL: "https://gitea.kirmanak.stream",
+      GITEA_BOT_TOKEN: "token",
+    });
+    expect(config.role).toBe("engine");
+    expect(config.webhookSecret).toBe("");
+    expect(config.giteaToken).toBe("token");
+    expect(() =>
+      loadConfig({
+        JUMI_ROLE: "router",
+        DATABASE_URL: "postgres://jumi",
+        GITEA_URL: "https://gitea.kirmanak.stream",
+        GITEA_BOT_TOKEN: "token",
+      })
+    ).toThrow("GITEA_WEBHOOK_SECRET");
+    expect(() => loadConfig({ GITEA_URL: "https://gitea.kirmanak.stream", GITEA_BOT_TOKEN: "token" })).toThrow(
+      "GITEA_WEBHOOK_SECRET"
+    );
   });
 
   test("scrubSecretEnv unsets Gitea secrets after they have been copied into config", () => {

@@ -121,6 +121,7 @@ export interface ReviewJob {
   action: string;
   headSha: string;
   receivedAt: string;
+  prUpdatedAt?: string;
 }
 
 export interface GiteaIssue {

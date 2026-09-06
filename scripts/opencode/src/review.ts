@@ -90,12 +90,31 @@ export interface ReviewOptions {
   workspacePreparer?: WorkspacePreparer;
   gitRunner?: GitRunner;
   logger?: (message: string) => void;
+  persistResult?: (result: PersistReviewResult) => Promise<void>;
 }
+
+export type PersistReviewResult =
+  | { kind: "markdown"; markdown: string }
+  | { kind: "skip"; reason: string }
+  | { kind: "error"; error: string };
 
 export interface ReviewResult {
   status: "posted" | "updated" | "skipped";
   reason?: string;
   commentId?: number;
+}
+
+export interface PublishReviewOptions {
+  api: ReviewApi;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  expectedHeadSha: string;
+  botUsername: string;
+  resultMarkdown?: string | null;
+  resultReason?: string | null;
+  error?: string | null;
+  logger?: (message: string) => void;
 }
 
 const encoder = new TextEncoder();
@@ -190,13 +209,15 @@ function truncateStatusDescription(description: string): string {
 }
 
 async function postReviewStatus(
-  opts: ReviewOptions,
+  api: ReviewApi,
+  owner: string,
+  repo: string,
   headSha: string,
   state: GiteaCommitStatusPayload["state"],
   description: string,
   targetUrl?: string
 ): Promise<void> {
-  await opts.api.createCommitStatus(opts.owner, opts.repo, headSha, {
+  await api.createCommitStatus(owner, repo, headSha, {
     state,
     context: CHECK_CONTEXT,
     description: truncateStatusDescription(description),
@@ -230,9 +251,14 @@ function skipReasonForPR(pr: GiteaPR): string | undefined {
   }
 }
 
-function skipReasonForHeadChange(pr: GiteaPR, expectedHeadSha: string): string | undefined {
+export function skipReasonForHeadChange(pr: GiteaPR, expectedHeadSha: string): string | undefined {
   if (pr.head.sha === expectedHeadSha) return undefined;
   return `PR head changed from ${expectedHeadSha} to ${pr.head.sha}`;
+}
+
+export function isTerminalSkipReason(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  return reason.startsWith("Incomplete review:") || reason.startsWith("PR head changed from ");
 }
 
 function prepareFiles(
@@ -303,6 +329,65 @@ async function loadLinkedIssue(
   }
 }
 
+export async function publishReviewResult(opts: PublishReviewOptions): Promise<ReviewResult> {
+  const log = opts.logger ?? defaultLog;
+  const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+  const reviewLabel = `${opts.owner}/${opts.repo}#${opts.prNumber}`;
+  const skipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, opts.expectedHeadSha);
+  if (skipReason) {
+    const result: ReviewResult = { status: "skipped", reason: skipReason };
+    const { state, description } = statusForResult(result);
+    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+    return result;
+  }
+
+  if (opts.error && !opts.resultMarkdown) {
+    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, "failure", opts.error, pr.html_url);
+    return { status: "skipped", reason: opts.error };
+  }
+
+  if (!opts.resultMarkdown) {
+    const reason = opts.resultReason ?? "Incomplete review: no output";
+    const result: ReviewResult = { status: "skipped", reason };
+    const { state, description } = statusForResult(result);
+    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+    return result;
+  }
+
+  const marker = markerFor(opts.owner, opts.repo, pr.number);
+  const parsed = parseReviewOutput(opts.resultMarkdown);
+  const body = buildCommentBody(marker, opts.expectedHeadSha, parsed.comment, parsed.checkLine);
+  await logParentDiag(log, "post_find_sticky", {
+    review: reviewLabel,
+    body_bytes: byteLength(body),
+    body_bytes_h: formatBytes(byteLength(body)),
+  });
+  const existing = await opts.api.findStickyIssueComment(opts.owner, opts.repo, pr.number, opts.botUsername, marker);
+  await logParentDiag(log, "post_sticky_result", {
+    review: reviewLabel,
+    sticky_id: existing?.id ?? null,
+    sticky_found: Boolean(existing),
+  });
+
+  if (existing) {
+    await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
+    const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
+    const result: ReviewResult = { status: "updated", commentId: updated.id };
+    const { state, description } = statusForResult(result, parsed.verdict);
+    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+    await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
+    return result;
+  }
+
+  await logParentDiag(log, "post_comment_create", { review: reviewLabel });
+  const created = await opts.api.createIssueComment(opts.owner, opts.repo, pr.number, body);
+  const result: ReviewResult = { status: "posted", commentId: created.id };
+  const { state, description } = statusForResult(result, parsed.verdict);
+  await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+  await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
+  return result;
+}
+
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
   const openCodeRunner = opts.openCodeRunner ?? runOpenCode;
@@ -313,8 +398,28 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   const initialSkipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, reviewedHeadSha);
   if (initialSkipReason) return { status: "skipped", reason: initialSkipReason };
 
-  await postReviewStatus(opts, reviewedHeadSha, "pending", "Jumi review is running", pr.html_url);
+  await postReviewStatus(
+    opts.api,
+    opts.owner,
+    opts.repo,
+    reviewedHeadSha,
+    "pending",
+    "Jumi review is running",
+    pr.html_url
+  );
 
+  let persisted = false;
+  let persistFailed = false;
+  const persistOutcome = async (result: PersistReviewResult): Promise<void> => {
+    if (!opts.persistResult) return;
+    try {
+      await opts.persistResult(result);
+      persisted = true;
+    } catch (err) {
+      persistFailed = true;
+      throw err;
+    }
+  };
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
     const [repoInfo, prFiles, prCommentResult] = await Promise.all([
@@ -423,16 +528,18 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
     await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
+    const persistSkipAndStatus = async (reason: string, htmlUrl?: string): Promise<ReviewResult> => {
+      const result: ReviewResult = { status: "skipped", reason };
+      await persistOutcome({ kind: "skip", reason });
+      const { state, description } = statusForResult(result);
+      await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, state, description, htmlUrl);
+      return result;
+    };
     try {
       await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
       const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
       const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
-      if (currentSkipReason) {
-        const result: ReviewResult = { status: "skipped", reason: currentSkipReason };
-        const { state, description } = statusForResult(result);
-        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-        return result;
-      }
+      if (currentSkipReason) return await persistSkipAndStatus(currentSkipReason, currentPR.html_url);
 
       const git = opts.gitRunner ?? runGit;
       const gitCmdEnv: Record<string, string | undefined> = {
@@ -444,89 +551,45 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       };
       const headAfter = (await git(["rev-parse", "HEAD"], { cwd: opts.workspace, env: gitCmdEnv })).trim();
       if (headAfter !== reviewedHeadSha) {
-        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: HEAD moved" };
-        const { state, description } = statusForResult(result);
-        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-        return result;
+        return await persistSkipAndStatus("Incomplete review: HEAD moved", currentPR.html_url);
       }
 
       const porcelain = await git(["status", "--porcelain"], { cwd: opts.workspace, env: gitCmdEnv });
       if (!porcelainAllowsOnlyReviewArtifact(porcelain)) {
-        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: dirty tree" };
-        const { state, description } = statusForResult(result);
-        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-        return result;
+        return await persistSkipAndStatus("Incomplete review: dirty tree", currentPR.html_url);
       }
       if (!porcelainIncludesReviewArtifact(porcelain)) {
-        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: no output" };
-        const { state, description } = statusForResult(result);
-        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-        return result;
+        return await persistSkipAndStatus("Incomplete review: no output", currentPR.html_url);
       }
 
       const artifact = await readReviewArtifact(opts.workspace, opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
       if (artifact.status === "too_large") {
-        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: output too large" };
-        const { state, description } = statusForResult(result);
-        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-        return result;
+        return await persistSkipAndStatus("Incomplete review: output too large", currentPR.html_url);
       }
       if (artifact.status === "missing" || !artifact.content.trim()) {
-        const result: ReviewResult = { status: "skipped", reason: "Incomplete review: no output" };
-        const { state, description } = statusForResult(result);
-        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-        return result;
+        return await persistSkipAndStatus("Incomplete review: no output", currentPR.html_url);
       }
 
-      const marker = markerFor(opts.owner, opts.repo, currentPR.number);
-      const parsed = parseReviewOutput(artifact.content);
-      const body = buildCommentBody(marker, reviewedHeadSha, parsed.comment, parsed.checkLine);
-      await logParentDiag(log, "post_find_sticky", {
-        review: reviewLabel,
-        body_bytes: byteLength(body),
-        body_bytes_h: formatBytes(byteLength(body)),
+      await persistOutcome({ kind: "markdown", markdown: artifact.content });
+      return await publishReviewResult({
+        api: opts.api,
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        expectedHeadSha: reviewedHeadSha,
+        botUsername: opts.botUsername,
+        resultMarkdown: artifact.content,
+        logger: log,
       });
-      const existing = await opts.api.findStickyIssueComment(
-        opts.owner,
-        opts.repo,
-        currentPR.number,
-        opts.botUsername,
-        marker
-      );
-      await logParentDiag(log, "post_sticky_result", {
-        review: reviewLabel,
-        sticky_id: existing?.id ?? null,
-        sticky_found: Boolean(existing),
-      });
-
-      if (existing) {
-        await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
-        const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
-        const result: ReviewResult = { status: "updated", commentId: updated.id };
-        const { state, description } = statusForResult(result, parsed.verdict);
-        await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-        await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
-        return result;
-      }
-
-      await logParentDiag(log, "post_comment_create", { review: reviewLabel });
-      const created = await opts.api.createIssueComment(opts.owner, opts.repo, currentPR.number, body);
-      const result: ReviewResult = { status: "posted", commentId: created.id };
-      const { state, description } = statusForResult(result, parsed.verdict);
-      await postReviewStatus(opts, reviewedHeadSha, state, description, currentPR.html_url);
-      await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
-      return result;
     } finally {
       await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
     }
   } catch (err) {
-    await postReviewStatus(
-      opts,
-      reviewedHeadSha,
-      "failure",
-      `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`,
-      pr.html_url
-    );
+    if (!persisted && !persistFailed) {
+      const message = `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`;
+      await opts.persistResult?.({ kind: "error", error: message });
+      await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, "failure", message, pr.html_url);
+    }
     throw err;
   }
 }

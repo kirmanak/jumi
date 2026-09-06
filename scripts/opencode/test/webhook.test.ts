@@ -48,6 +48,7 @@ describe("validateWebhookPayload", () => {
         expect(result.repo).toBe("demo");
         expect(result.prNumber).toBe(7);
         expect(result.headSha).toBe("headsha");
+        expect(result.prUpdatedAt).toBe("2026-05-23T00:00:00Z");
         expect(result.action).toBe(action);
       }
     }

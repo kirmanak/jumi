@@ -1,8 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import { MemoryReviewJobStore, QueueUnavailableError, renderQueueMetrics } from "../src/review_jobs.ts";
 import type { ReviewQueueLike } from "../src/server.ts";
-import { createFetchHandler } from "../src/server.ts";
+import { createFetchHandler, shouldSeedOpenCodeAuth, startReviewer } from "../src/server.ts";
 import type { ReviewJob } from "../src/types.ts";
-import { encodeJson, makeConfig, makePayload, responseJson, signBody } from "./fixtures.ts";
+import {
+  encodeJson,
+  makeBranch,
+  makeConfig,
+  makeJob,
+  makePayload,
+  makePR,
+  responseJson,
+  signBody,
+} from "./fixtures.ts";
 
 function makeQueue(): ReviewQueueLike & { jobs: ReviewJob[] } {
   const jobs: ReviewJob[] = [];
@@ -102,5 +112,141 @@ describe("createFetchHandler", () => {
 
     expect(response.status).toBe(400);
     expect((await responseJson(response)).error).toContain("missing repository");
+  });
+
+  test("does not enqueue a stale SHA when GET PR head differs", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob({ headSha: "sha2", prUpdatedAt: "2026-05-23T00:00:01Z" }));
+    const handler = createFetchHandler(makeConfig({ role: "router" }), {
+      queue: store,
+      getPR: async () => makePR({ head: makeBranch({ sha: "sha2" }) }),
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "synchronize",
+          pull_request: makePR({
+            head: makeBranch({ sha: "sha1" }),
+            updated_at: "2026-05-23T00:00:01Z",
+          }),
+        })
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:sha1", queued: false });
+    expect(store.rows.find((row) => row.headSha === "sha2")?.state).toBe("queued");
+    expect(store.rows.find((row) => row.headSha === "sha1")).toBeUndefined();
+  });
+
+  test("enqueues when GET PR fails", async () => {
+    const queue = makeQueue();
+    const handler = createFetchHandler(makeConfig(), {
+      queue,
+      getPR: async () => {
+        throw new Error("gitea down");
+      },
+    });
+    const response = await handler(await signedRequest(makePayload()));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  test("router enqueues when GET PR fails", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(makeConfig({ role: "router" }), {
+      queue: store,
+      getPR: async () => {
+        throw new Error("gitea down");
+      },
+    });
+    const response = await handler(await signedRequest(makePayload()));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows).toHaveLength(1);
+    expect(store.rows[0]?.state).toBe("queued");
+  });
+
+  test("returns 503 when the queue backend is down", async () => {
+    const handler = createFetchHandler(makeConfig(), {
+      queue: {
+        enqueue() {
+          throw new QueueUnavailableError(new Error("connection refused"));
+        },
+      },
+    });
+    const response = await handler(await signedRequest(makePayload()));
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "queue unavailable" });
+  });
+
+  test("router webhook persists a job and serves queue metrics", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(makeConfig({ role: "router" }), {
+      queue: store,
+      renderMetrics: () => renderQueueMetrics(store),
+    });
+    const response = await handler(await signedRequest(makePayload()));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows).toHaveLength(1);
+    expect(store.rows[0]?.state).toBe("queued");
+
+    const metrics = await handler(new Request("https://reviewer.test/metrics"));
+    expect(await metrics.text()).toContain('jumi_review_jobs{state="queued"} 1');
+  });
+
+  test("engine does not expose the webhook", async () => {
+    const handler = createFetchHandler(makeConfig({ role: "engine" }), {
+      queue: makeQueue(),
+      webhookEnabled: false,
+    });
+    expect((await handler(await signedRequest(makePayload()))).status).toBe(404);
+  });
+});
+
+describe("shouldSeedOpenCodeAuth", () => {
+  test("router does not seed OpenCode auth", () => {
+    expect(shouldSeedOpenCodeAuth("router")).toBe(false);
+    expect(shouldSeedOpenCodeAuth("engine")).toBe(true);
+    expect(shouldSeedOpenCodeAuth("monolith")).toBe(true);
+  });
+});
+
+describe("startReviewer", () => {
+  test("router does not call ensureOpenCodeWellKnownAuth", async () => {
+    let seeded = 0;
+    const store = new MemoryReviewJobStore();
+    await startReviewer(makeConfig({ role: "router", databaseUrl: "postgres://unused" }), {
+      store,
+      listen: false,
+      ensureAuth: async () => {
+        seeded++;
+        return undefined;
+      },
+    });
+    expect(seeded).toBe(0);
+  });
+
+  test("engine seeds OpenCode auth and does not spawn OpenCode on boot", async () => {
+    let seeded = 0;
+    let ran = 0;
+    const store = new MemoryReviewJobStore();
+    await startReviewer(makeConfig({ role: "engine", databaseUrl: "postgres://unused" }), {
+      store,
+      listen: false,
+      ensureAuth: async () => {
+        seeded++;
+        return undefined;
+      },
+      extras: {
+        openCodeRunner: async () => {
+          ran++;
+          return "stdout";
+        },
+      },
+    });
+    expect(seeded).toBe(1);
+    expect(ran).toBe(0);
   });
 });

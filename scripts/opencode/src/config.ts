@@ -1,5 +1,7 @@
 import { readFileSync, unlinkSync } from "node:fs";
 
+export type JumiRole = "monolith" | "router" | "engine";
+
 export interface ServiceConfig {
   host: string;
   port: number;
@@ -23,6 +25,10 @@ export interface ServiceConfig {
   maxOutputBytes: number;
   maxWebhookBytes: number;
   opencodeTimeoutMs: number;
+  role: JumiRole;
+  databaseUrl?: string;
+  leaseMs: number;
+  maxJobAttempts: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -89,14 +95,23 @@ function normalizeUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+export function parseJumiRole(value: string | undefined): JumiRole {
+  if (!value || value === "monolith") return "monolith";
+  if (value === "router" || value === "engine") return value;
+  throw new Error(`Invalid JUMI_ROLE: ${value}`);
+}
+
 export function loadConfig(env: Env = process.env): ServiceConfig {
   const resolved = overlaySecretsFromFile(env);
+  const role = parseJumiRole(resolved.JUMI_ROLE);
+  const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
     giteaUrl: normalizeUrl(requireEnv(resolved, "GITEA_URL")),
     giteaToken: requireEnv(resolved, "GITEA_BOT_TOKEN"),
-    webhookSecret: requireEnv(resolved, "GITEA_WEBHOOK_SECRET"),
+    webhookSecret:
+      role === "engine" ? (resolved.GITEA_WEBHOOK_SECRET ?? "") : requireEnv(resolved, "GITEA_WEBHOOK_SECRET"),
     webhookAuthToken: optionalEnv(resolved, "GITEA_WEBHOOK_AUTH_TOKEN"),
     allowedOrgs: csvEnv(resolved, "GITEA_ALLOWED_ORGS", ["kirmanak"]),
     allowedRepos: csvEnv(resolved, "GITEA_ALLOWED_REPOS"),
@@ -114,6 +129,10 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     maxPatchBytes: intEnv(resolved, "MAX_PATCH_BYTES", 500_000),
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
-    opencodeTimeoutMs: intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000),
+    opencodeTimeoutMs,
+    role,
+    databaseUrl: role === "monolith" ? undefined : requireEnv(resolved, "DATABASE_URL"),
+    leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
+    maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
   };
 }

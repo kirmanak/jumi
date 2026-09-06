@@ -108,6 +108,7 @@ export function validateWebhookPayload(payload: GiteaPRPayload, policy: WebhookP
 
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   if (!payload.pull_request.head?.sha) throw new Error("Invalid webhook payload: missing pull_request.head.sha");
+  if (!payload.pull_request.updated_at) throw new Error("Invalid webhook payload: missing pull_request.updated_at");
 
   return {
     delivery: "",
@@ -117,5 +118,6 @@ export function validateWebhookPayload(payload: GiteaPRPayload, policy: WebhookP
     action: payload.action,
     headSha: payload.pull_request.head.sha,
     receivedAt: new Date().toISOString(),
+    prUpdatedAt: payload.pull_request.updated_at,
   };
 }

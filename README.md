@@ -29,6 +29,8 @@ The trailer is kept as the last non-empty line of the sticky comment so the work
 
 The service intentionally does not checkout or execute PR-head code. It reviews Gitea's PR metadata and file patches from the trusted Gitea API.
 
+`JUMI_ROLE` (default `monolith`) keeps that in-process path so existing images stay live until GitOps flips. The same reviewer image can run `JUMI_ROLE=router` (HMAC webhook, persist `review_jobs` in Postgres, reclaim expired leases, queue metrics; no OpenCode) or `JUMI_ROLE=engine` (lease a row, run OpenCode, persist `JUMI_REVIEW.md` before workspace teardown, publish sticky/status). Both need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is required on `router` and `monolith` only. The issue worker is unchanged and is not `JUMI_ROLE=router`.
+
 ## Worker Service
 
 `jumi-worker` is a sibling HTTP service in the same Bun package. Gitea sends **Issues** webhooks, follow-up review events, and **push** events on the default branch to `POST /webhooks/gitea`. The worker verifies `X-Gitea-Signature` the same way as the reviewer, then enqueues work only when the issue is assigned to bot username `jumi` (`BOT_USERNAME`, default `jumi`). Pull-request issues (`issue.pull_request` present / non-null) are ignored for first-run implement. Org-hook checkboxes and GitOps IngressRoutes are not configured in this repo.
@@ -102,7 +104,7 @@ Required environment variables:
 |------|-------------|
 | `GITEA_URL` | Trusted Gitea base URL, e.g. `https://gitea.kirmanak.stream` |
 | `GITEA_BOT_TOKEN` | Bot token used by the service to fetch PR data and post comments |
-| `GITEA_WEBHOOK_SECRET` | Secret used to verify `X-Gitea-Signature` |
+| `GITEA_WEBHOOK_SECRET` | Secret used to verify `X-Gitea-Signature`. Required for `monolith`/`router`; not required for `engine` |
 
 Optional environment variables:
 
@@ -128,6 +130,10 @@ Optional environment variables:
 | `MAX_WEBHOOK_BYTES` | `1048576` | Max accepted webhook payload bytes |
 | `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics` |
+| `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (webhook + PG enqueue/reclaim), or `engine` (lease + OpenCode). Unset is `monolith`. |
+| `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith` and the issue worker |
+| `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
+| `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job |
 
 
 ## Review diagnostics (Loki)

@@ -3,8 +3,8 @@ import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isJumiReviewFinding } from "../src/followup.ts";
-import type { ReviewApi } from "../src/review.ts";
-import { reviewPullRequest } from "../src/review.ts";
+import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
+import { publishReviewResult, reviewPullRequest } from "../src/review.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -128,6 +128,7 @@ describe("reviewPullRequest", () => {
         description?: string;
         target_url?: string;
       }> = [];
+      const persisted: PersistReviewResult[] = [];
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
         api: makeApi({
@@ -141,6 +142,9 @@ describe("reviewPullRequest", () => {
             return status;
           },
         }),
+        persistResult: async (value) => {
+          persisted.push(value);
+        },
         openCodeRunner: async () => {
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
           return "I'll inspect the Valkey bump…";
@@ -154,6 +158,7 @@ describe("reviewPullRequest", () => {
       expect(createdBody).not.toContain("I'll inspect");
       expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: success -->");
       expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(false);
+      expect(persisted).toEqual([{ kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->" }]);
       await expect(access(join(workspace, "JUMI_REVIEW.md"))).rejects.toThrow();
       expect(statuses).toEqual([
         {
@@ -203,6 +208,7 @@ describe("reviewPullRequest", () => {
     await withWorkspace(async (workspace) => {
       let created = false;
       const statuses: Array<{ state: string; description?: string }> = [];
+      const persisted: PersistReviewResult[] = [];
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
@@ -216,10 +222,14 @@ describe("reviewPullRequest", () => {
               return status;
             },
           }),
+          persistResult: async (value) => {
+            persisted.push(value);
+          },
           openCodeRunner: async () => "I'll inspect the Valkey bump…",
         })
       ).resolves.toEqual({ status: "skipped", reason: "Incomplete review: no output" });
       expect(created).toBe(false);
+      expect(persisted).toEqual([{ kind: "skip", reason: "Incomplete review: no output" }]);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("Incomplete review: no output");
     });
@@ -516,6 +526,137 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("monolith posts failure status when sticky write fails after a good review", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createIssueComment: async () => {
+              throw new Error("sticky write failed");
+            },
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          openCodeRunner: async () => {
+            await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+            return "I'll inspect…";
+          },
+        })
+      ).rejects.toThrow("sticky write failed");
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(statuses[1].description).toBe("Jumi review failed: sticky write failed");
+    });
+  });
+
+  test("engine does not overwrite pending after persist when publish throws", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const persisted: PersistReviewResult[] = [];
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createIssueComment: async () => {
+              throw new Error("sticky write failed");
+            },
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          persistResult: async (value) => {
+            persisted.push(value);
+          },
+          openCodeRunner: async () => {
+            await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+            return "I'll inspect…";
+          },
+        })
+      ).rejects.toThrow("sticky write failed");
+      expect(persisted).toEqual([{ kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->" }]);
+      expect(statuses.map((status) => status.state)).toEqual(["pending"]);
+    });
+  });
+
+  test("does not persist error or post failure when markdown persist throws", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const persisted: PersistReviewResult[] = [];
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          persistResult: async (value) => {
+            persisted.push(value);
+            throw new Error("cannot save result");
+          },
+          openCodeRunner: async () => {
+            await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+            return "I'll inspect…";
+          },
+        })
+      ).rejects.toThrow("cannot save result");
+      expect(persisted).toEqual([{ kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->" }]);
+      expect(statuses.map((status) => status.state)).toEqual(["pending"]);
+    });
+  });
+
+  test("does not persist error or post failure when skip persist throws", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const persisted: PersistReviewResult[] = [];
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
+          api: makeApi({
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          persistResult: async (value) => {
+            persisted.push(value);
+            throw new Error("cannot save result");
+          },
+          openCodeRunner: async () => "I'll inspect…",
+        })
+      ).rejects.toThrow("cannot save result");
+      expect(persisted).toEqual([{ kind: "skip", reason: "Incomplete review: no output" }]);
+      expect(statuses.map((status) => status.state)).toEqual(["pending"]);
+    });
+  });
+
+  test("monolith posts failure status when skip status write fails", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
+          api: makeApi({
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              if (status.state === "failure") throw new Error("status write failed");
+              return status;
+            },
+          }),
+          openCodeRunner: async () => "I'll inspect…",
+        })
+      ).rejects.toThrow("status write failed");
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure", "failure"]);
+      expect(statuses[2].description).toBe("Jumi review failed: status write failed");
+    });
+  });
+
   test("marks the commit status failed when the review crashes", async () => {
     const statuses: Array<{ state: string; description?: string }> = [];
     await expect(
@@ -763,5 +904,103 @@ describe("reviewPullRequest", () => {
       expect(prompt).toContain('author="jumi"');
       expect(prompt).toContain('author="alice"');
     });
+  });
+});
+
+describe("publishReviewResult", () => {
+  const publishOpts = {
+    owner: "kirmanak",
+    repo: "demo",
+    prNumber: 7,
+    expectedHeadSha: "headsha",
+    botUsername: "jumi",
+    logger: () => undefined,
+  };
+
+  test("SHA moved at publish skips and does not overwrite sticky with stale markdown", async () => {
+    let created = false;
+    let updated = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      expectedHeadSha: "oldsha",
+      resultMarkdown: "stale review\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ head: makeBranch({ sha: "newsha" }) }),
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          created = true;
+          return makeComment({ body });
+        },
+        updateIssueComment: async (_owner, _repo, commentId, body) => {
+          updated = true;
+          return makeComment({ id: commentId, body });
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "PR head changed from oldsha to newsha" });
+    expect(created).toBe(false);
+    expect(updated).toBe(false);
+  });
+
+  test("finds an existing sticky by marker then updates (crash after Gitea write)", async () => {
+    const bodies: string[] = [];
+    const first = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "first\n<!-- jumi-check: success -->",
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          bodies.push(body);
+          return makeComment({ id: 44, body });
+        },
+      }),
+    });
+    expect(first).toEqual({ status: "posted", commentId: 44 });
+
+    const second = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "second\n<!-- jumi-check: success -->",
+      api: makeApi({
+        findStickyIssueComment: async () => ({ id: 44 }),
+        updateIssueComment: async (_owner, _repo, commentId, body) => {
+          bodies.push(body);
+          return makeComment({ id: commentId, body });
+        },
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          bodies.push(`created:${body}`);
+          return makeComment({ id: 99, body });
+        },
+      }),
+    });
+    expect(second).toEqual({ status: "updated", commentId: 44 });
+    expect(bodies[1]).toContain("second");
+    expect(bodies[1]).not.toContain("created:");
+  });
+
+  test("publishes an incomplete skip as failure without a sticky", async () => {
+    let created = false;
+    const statuses: Array<{ state: string; description?: string; context?: string; target_url?: string }> = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultReason: "Incomplete review: no output",
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          created = true;
+          return makeComment({ body });
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
+    expect(created).toBe(false);
+    expect(statuses).toEqual([
+      {
+        state: "failure",
+        context: "jumi/opencode-review",
+        description: "Incomplete review: no output",
+        target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
+      },
+    ]);
   });
 });

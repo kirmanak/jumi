@@ -207,6 +207,7 @@ export function makeJob(overrides: Partial<ReviewJob> = {}): ReviewJob {
     action: "opened",
     headSha: "headsha",
     receivedAt: "2026-05-23T00:00:00Z",
+    prUpdatedAt: "2026-05-23T00:00:00Z",
     ...overrides,
   };
 }
@@ -233,6 +234,9 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
     maxOutputBytes: 80_000,
     maxWebhookBytes: 1_048_576,
     opencodeTimeoutMs: 900_000,
+    role: "monolith",
+    leaseMs: 1_500_000,
+    maxJobAttempts: 2,
     ...overrides,
   };
 }
