@@ -154,18 +154,45 @@ export function removedRequiredFields(previous: ImageContract, current: ImageCon
   return removed;
 }
 
+function hasRequiredGitOpsChange(previous: ImageContract, current: ImageContract): boolean {
+  return (
+    addedItems(previous.requiredEnv, current.requiredEnv).length > 0 ||
+    removedItems(previous.requiredEnv, current.requiredEnv).length > 0 ||
+    addedItems(previous.ports, current.ports).length > 0 ||
+    removedItems(previous.ports, current.ports).length > 0 ||
+    previous.runAs !== current.runAs ||
+    addedItems(previous.probes, current.probes).length > 0 ||
+    removedItems(previous.probes, current.probes).length > 0 ||
+    previous.command !== current.command ||
+    previous.imageTarget !== current.imageTarget
+  );
+}
+
+function hasOptionalGitOpsChange(previous: ImageContract, current: ImageContract): boolean {
+  return (
+    addedItems(previous.volumes, current.volumes).length > 0 ||
+    removedItems(previous.volumes, current.volumes).length > 0
+  );
+}
+
 export function classifyBump(previousMarkdown: string | null, currentMarkdown: string): BumpKind {
   if (previousMarkdown === null) return "initial";
-  if (previousMarkdown.trim() === currentMarkdown.trim()) return "patch";
+  if (hasBreakingMarker(previousMarkdown, currentMarkdown)) return "major";
   const previous = parseContract(previousMarkdown);
   const current = parseContract(currentMarkdown);
-  if (hasBreakingMarker(previousMarkdown, currentMarkdown)) return "major";
-  const removed = [
-    ...removedRequiredFields(previous.reviewer, current.reviewer),
-    ...removedRequiredFields(previous.worker, current.worker),
-  ];
-  if (removed.length > 0) return "major";
-  return "minor";
+  if (
+    hasRequiredGitOpsChange(previous.reviewer, current.reviewer) ||
+    hasRequiredGitOpsChange(previous.worker, current.worker)
+  ) {
+    return "major";
+  }
+  if (
+    hasOptionalGitOpsChange(previous.reviewer, current.reviewer) ||
+    hasOptionalGitOpsChange(previous.worker, current.worker)
+  ) {
+    return "minor";
+  }
+  return "patch";
 }
 
 export function nextVersionFrom(latestTag: string | null, bump: BumpKind): string {
@@ -177,10 +204,17 @@ export function nextVersionFrom(latestTag: string | null, bump: BumpKind): strin
   return formatSemVerTag({ major: parsed.major, minor: parsed.minor, patch: parsed.patch + 1 });
 }
 
-function gitOpsBullets(previous: ImageContract, current: ImageContract): string[] {
+function requiresEnvBullet(image: ImageName, key: string): string {
+  if (image === "worker" && key === "DATABASE_URL") {
+    return `- **requires** \`${key}\``;
+  }
+  return `- **requires** \`${key}\` (new; missing → crash)`;
+}
+
+function gitOpsBullets(image: ImageName, previous: ImageContract, current: ImageContract): string[] {
   const bullets: string[] = [];
   for (const key of addedItems(previous.requiredEnv, current.requiredEnv)) {
-    bullets.push(`- **requires** \`${key}\` (new; missing → crash)`);
+    bullets.push(requiresEnvBullet(image, key));
   }
   for (const key of removedItems(previous.requiredEnv, current.requiredEnv)) {
     bullets.push(`- **removed** \`${key}\` (was required)`);
@@ -216,11 +250,11 @@ function gitOpsBullets(previous: ImageContract, current: ImageContract): string[
 }
 
 function formatGitOpsSection(previousMarkdown: string | null, currentMarkdown: string): string {
-  if (previousMarkdown === null || previousMarkdown.trim() === currentMarkdown.trim()) return "none";
+  if (previousMarkdown === null) return "none";
   const previous = parseContract(previousMarkdown);
   const current = parseContract(currentMarkdown);
-  const reviewer = gitOpsBullets(previous.reviewer, current.reviewer);
-  const worker = gitOpsBullets(previous.worker, current.worker);
+  const reviewer = gitOpsBullets("reviewer", previous.reviewer, current.reviewer);
+  const worker = gitOpsBullets("worker", previous.worker, current.worker);
   if (reviewer.length === 0 && worker.length === 0) return "none";
   const reviewerBlock = reviewer.length > 0 ? reviewer.join("\n") : "- none";
   const workerBlock = worker.length > 0 ? worker.join("\n") : "- none";

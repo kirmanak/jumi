@@ -2,9 +2,9 @@
 
 GitOps runtime contract for `jumi-reviewer` and `jumi-worker`. Not the application API.
 
-This file is the semver source of truth. Unchanged vs the last `vX.Y.Z` tag → patch. Additive GitOps → minor. Removed required env/port/user/probe/command/target, or a `BREAKING` heading/marker → major. Reviewer and worker share one version.
+This file is the semver source of truth. Unchanged vs the last `vX.Y.Z` tag → patch. New optional GitOps (env/port/volume) → minor. Required GitOps change (new or removed required env, UID, probe, command, port, image target), or a `BREAKING` heading/marker → major. Reviewer and worker share one version.
 
-Notes (not keys): `GITEA_WEBHOOK_SECRET` is not required when `JUMI_ROLE=engine`. `DATABASE_URL` is required only when `JUMI_ROLE` is `router` or `engine` (default `monolith` does not need it).
+Notes (not keys): `GITEA_WEBHOOK_SECRET` is not required when `JUMI_ROLE=engine`. Worker requires `DATABASE_URL` (chart must set it; process start stays fail-closed if unset). Reviewer `DATABASE_URL` is required only when `JUMI_ROLE` is `router` or `engine` (default `monolith` does not need it).
 
 ## GitOps
 
@@ -40,6 +40,7 @@ Notes (not keys): `GITEA_WEBHOOK_SECRET` is not required when `JUMI_ROLE=engine`
 - `GITEA_URL`
 - `GITEA_BOT_TOKEN`
 - `GITEA_WEBHOOK_SECRET`
+- `DATABASE_URL`
 
 #### ports
 - `3000`

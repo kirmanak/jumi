@@ -84,7 +84,7 @@ gitea.kirmanak.stream/personal/jumi-worker:latest
 gitea.kirmanak.stream/personal/jumi-worker:vX.Y.Z
 ```
 
-Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, additive GitOps → minor, removed required keys or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA). GitOps pin/changelog wiring is a follow-up in `server_configuration`, not this repo.
+Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA). GitOps pin/changelog wiring is a follow-up in `server_configuration`, not this repo.
 
 Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml` and `.gitea/workflows/jumi-worker-image.yml`:
 
@@ -135,7 +135,7 @@ Optional environment variables:
 | `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics` |
 | `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (webhook + PG enqueue/reclaim), or `engine` (lease + OpenCode). Unset is `monolith`. |
-| `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith`. Optional on the issue worker: when set, implement/follow-up/conflict use the shared `review_jobs` ledger; when unset, first-run assign stays on the in-memory queue |
+| `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith`. GitOps must set it on the worker; process start stays fail-closed if unset (first-run assign uses the in-memory queue). When set, implement/follow-up/conflict use the shared `review_jobs` ledger |
 | `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
 | `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine aborts OpenCode and requeues the same SHA without consuming an attempt. Crash/OOM still uses reclaim. |
 

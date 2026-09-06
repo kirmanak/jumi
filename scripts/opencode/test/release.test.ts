@@ -17,6 +17,71 @@ import {
 
 const repoRoot = join(process.cwd(), "../..");
 
+const REVIEWER_OPTIONAL_ENV = [
+  "HOST",
+  "PORT",
+  "GITEA_WEBHOOK_AUTH_TOKEN",
+  "GITEA_ALLOWED_ORGS",
+  "GITEA_ALLOWED_REPOS",
+  "BOT_USERNAME",
+  "OPENCODE_MODEL",
+  "OPENCODE_CONFIG",
+  "OPENCODE_WELLKNOWN_URL",
+  "OPENCODE_WELLKNOWN_KEY",
+  "OPENCODE_WELLKNOWN_TOKEN",
+  "HOME",
+  "WORKDIR",
+  "QUEUE_CONCURRENCY",
+  "MAX_FILES",
+  "MAX_PATCH_BYTES",
+  "MAX_OUTPUT_BYTES",
+  "MAX_WEBHOOK_BYTES",
+  "OPENCODE_TIMEOUT_MS",
+  "JUMI_ROLE",
+  "DATABASE_URL",
+  "LEASE_MS",
+  "MAX_JOB_ATTEMPTS",
+];
+
+const WORKER_OPTIONAL_ENV = [
+  "HOST",
+  "PORT",
+  "GITEA_WEBHOOK_AUTH_TOKEN",
+  "GITEA_ALLOWED_ORGS",
+  "GITEA_ALLOWED_REPOS",
+  "BOT_USERNAME",
+  "OPENCODE_MODEL",
+  "OPENCODE_CONFIG",
+  "OPENCODE_WELLKNOWN_URL",
+  "OPENCODE_WELLKNOWN_KEY",
+  "OPENCODE_WELLKNOWN_TOKEN",
+  "HOME",
+  "WORKDIR",
+  "QUEUE_CONCURRENCY",
+  "MAX_OUTPUT_BYTES",
+  "MAX_WEBHOOK_BYTES",
+  "OPENCODE_TIMEOUT_MS",
+  "WORKER_SCAN_INTERVAL_MS",
+  "LEASE_MS",
+  "MAX_JOB_ATTEMPTS",
+];
+
+function loaderEnvNames(source: string): string[] {
+  const names = new Set<string>();
+  for (const match of source.matchAll(/(?:requireEnv|optionalEnv|intEnv|csvEnv)\(\s*\w+\s*,\s*"([A-Z][A-Z0-9_]*)"/g)) {
+    names.add(match[1]);
+  }
+  for (const match of source.matchAll(/\b(?:resolved|env)\.([A-Z][A-Z0-9_]*)\b/g)) {
+    names.add(match[1]);
+  }
+  return [...names].sort();
+}
+
+function gitOpsRequiredEnv(source: string, optional: string[]): string[] {
+  const skip = new Set(optional);
+  return loaderEnvNames(source).filter((name) => !skip.has(name));
+}
+
 const BASE_CONTRACT = `# Deploy contract
 
 ## GitOps
@@ -74,12 +139,14 @@ const BASE_CONTRACT = `# Deploy contract
 - \`/work\`
 `;
 
+function addListItem(contract: string, image: "reviewer" | "worker", heading: string, value: string): string {
+  const headingIdx = contract.indexOf(`#### ${heading}`, contract.indexOf(`### ${image}`));
+  const insertAt = contract.indexOf("\n", headingIdx) + 1;
+  return `${contract.slice(0, insertAt)}- \`${value}\`\n${contract.slice(insertAt)}`;
+}
+
 function addRequiredEnv(contract: string, image: "reviewer" | "worker", key: string): string {
-  const heading = `### ${image}`;
-  const idx = contract.indexOf(heading);
-  const envIdx = contract.indexOf("#### required env", idx);
-  const insertAt = contract.indexOf("\n", envIdx) + 1;
-  return `${contract.slice(0, insertAt)}- \`${key}\`\n${contract.slice(insertAt)}`;
+  return addListItem(contract, image, "required env", key);
 }
 
 function removeRequiredEnv(contract: string, key: string): string {
@@ -133,10 +200,10 @@ describe("version bump", () => {
     expect(body).toContain("- def5678 fix queue");
   });
 
-  test("additive contract → minor with namespaced GitOps bullets", () => {
+  test("additive required env → major with namespaced GitOps bullets", () => {
     const next = addRequiredEnv(BASE_CONTRACT, "reviewer", "FOO");
-    expect(classifyBump(BASE_CONTRACT, next)).toBe("minor");
-    expect(nextVersionFrom("v1.0.0", "minor")).toBe("v1.1.0");
+    expect(classifyBump(BASE_CONTRACT, next)).toBe("major");
+    expect(nextVersionFrom("v1.0.0", "major")).toBe("v2.0.0");
     const body = buildReleaseBody({
       previousContract: BASE_CONTRACT,
       currentContract: next,
@@ -145,6 +212,31 @@ describe("version bump", () => {
     expect(body).toContain(
       "## GitOps\n### reviewer\n- **requires** `FOO` (new; missing → crash)\n### worker\n- none\n"
     );
+    expect(body).toContain("## Breaking\nnone\n");
+  });
+
+  test("additive optional volume → minor", () => {
+    const next = addListItem(BASE_CONTRACT, "worker", "volumes", "/var/cache");
+    expect(classifyBump(BASE_CONTRACT, next)).toBe("minor");
+    expect(nextVersionFrom("v1.0.0", "minor")).toBe("v1.1.0");
+    const body = buildReleaseBody({
+      previousContract: BASE_CONTRACT,
+      currentContract: next,
+      changes: ["ddd4444 add cache volume"],
+    });
+    expect(body).toContain("### worker\n- **volume** `/var/cache` (new)\n");
+    expect(body).toContain("## Breaking\nnone\n");
+  });
+
+  test("additive port → major", () => {
+    const next = addListItem(BASE_CONTRACT, "reviewer", "ports", "9090");
+    expect(classifyBump(BASE_CONTRACT, next)).toBe("major");
+    const body = buildReleaseBody({
+      previousContract: BASE_CONTRACT,
+      currentContract: next,
+      changes: ["eee5555 add metrics port"],
+    });
+    expect(body).toContain("**port** `9090` (new)");
     expect(body).toContain("## Breaking\nnone\n");
   });
 
@@ -176,9 +268,36 @@ describe("version bump", () => {
   test("reviewer and worker share one version", () => {
     const reviewerOnly = addRequiredEnv(BASE_CONTRACT, "reviewer", "FOO");
     const workerOnly = addRequiredEnv(BASE_CONTRACT, "worker", "BAR");
-    expect(nextVersionFrom("v1.0.0", classifyBump(BASE_CONTRACT, reviewerOnly))).toBe("v1.1.0");
-    expect(nextVersionFrom("v1.0.0", classifyBump(BASE_CONTRACT, workerOnly))).toBe("v1.1.0");
+    const volumeOnly = addListItem(BASE_CONTRACT, "worker", "volumes", "/var/cache");
+    expect(nextVersionFrom("v1.0.0", classifyBump(BASE_CONTRACT, reviewerOnly))).toBe("v2.0.0");
+    expect(nextVersionFrom("v1.0.0", classifyBump(BASE_CONTRACT, workerOnly))).toBe("v2.0.0");
+    expect(nextVersionFrom("v1.0.0", classifyBump(BASE_CONTRACT, volumeOnly))).toBe("v1.1.0");
     expect(nextVersionFrom("v1.0.0", classifyBump(BASE_CONTRACT, BASE_CONTRACT))).toBe("v1.0.1");
+  });
+
+  test("worker DATABASE_URL is GitOps-required, not Breaking, and does not claim crash", () => {
+    const next = addRequiredEnv(BASE_CONTRACT, "worker", "DATABASE_URL");
+    expect(classifyBump(BASE_CONTRACT, next)).toBe("major");
+    const body = buildReleaseBody({
+      previousContract: BASE_CONTRACT,
+      currentContract: next,
+      changes: ["fff6666 worker DATABASE_URL"],
+    });
+    expect(body).toContain("### worker\n- **requires** `DATABASE_URL`\n");
+    expect(body).not.toContain("**requires** `DATABASE_URL` (new; missing → crash)");
+    expect(body).toContain("## Breaking\nnone\n");
+  });
+
+  test("prose-only contract notes stay patch with GitOps none", () => {
+    const next = `${BASE_CONTRACT}\nNotes changed without keys.\n`;
+    expect(classifyBump(BASE_CONTRACT, next)).toBe("patch");
+    const body = buildReleaseBody({
+      previousContract: BASE_CONTRACT,
+      currentContract: next,
+      changes: ["ggg7777 notes"],
+    });
+    expect(body).toContain("## GitOps\nnone\n");
+    expect(body).toContain("## Breaking\nnone\n");
   });
 });
 
@@ -187,7 +306,7 @@ describe("deploy/contract.md", () => {
     const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
     const parsed = parseContract(markdown);
     expect(parsed.reviewer.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
-    expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
+    expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET", "DATABASE_URL"]);
     expect(parsed.reviewer.ports).toEqual(["3000"]);
     expect(parsed.worker.ports).toEqual(["3000"]);
     expect(parsed.reviewer.runAs).toBe("10001:10001");
@@ -200,6 +319,17 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.imageTarget).toBe("worker");
     expect(parsed.reviewer.volumes).toEqual(["/data", "/work"]);
     expect(parsed.worker.volumes).toEqual(["/data", "/work"]);
+  });
+
+  test("required env matches loader runtime minus GitOps-optional keys", async () => {
+    const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
+    const parsed = parseContract(markdown);
+    const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
+    const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
+    expect([...parsed.reviewer.requiredEnv].sort()).toEqual(gitOpsRequiredEnv(reviewerSrc, REVIEWER_OPTIONAL_ENV));
+    expect([...parsed.worker.requiredEnv].sort()).toEqual(gitOpsRequiredEnv(workerSrc, WORKER_OPTIONAL_ENV));
+    expect(parsed.worker.requiredEnv).toContain("DATABASE_URL");
+    expect(parsed.reviewer.requiredEnv).not.toContain("DATABASE_URL");
   });
 });
 
@@ -231,6 +361,16 @@ describe("computeRelease git adapter", () => {
         expect(patch.version).toBe("v1.0.1");
         expect(patch.bump).toBe("patch");
         expect(patch.body).toContain("## GitOps\nnone\n");
+
+        await writeFile(join(dir, "deploy/contract.md"), addRequiredEnv(BASE_CONTRACT, "worker", "DATABASE_URL"));
+        git(["add", "deploy/contract.md"], dir);
+        git(["commit", "-m", "require worker DATABASE_URL"], dir);
+        const major = computeRelease(dir);
+        expect(major.version).toBe("v2.0.0");
+        expect(major.bump).toBe("major");
+        expect(major.body).toContain("### worker\n- **requires** `DATABASE_URL`\n");
+        expect(major.body).toContain("## Breaking\nnone\n");
+        expect(major.body).not.toMatch(/^## GitOps\nnone\n/m);
       }
     );
   });
