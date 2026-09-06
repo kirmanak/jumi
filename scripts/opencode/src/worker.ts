@@ -1,10 +1,11 @@
-import { claimFilePath, conflictStatePath, deleteClaim, followUpStatePath, readClaim } from "./claim.ts";
+import { claimFilePath, conflictStatePath, deleteClaim, followUpStatePath, isPidAlive, readClaim } from "./claim.ts";
 import { CONFLICT_TIMEOUT_MS, implementConflict } from "./conflict.ts";
 import { FOLLOWUP_TIMEOUT_MS, implementFollowUp } from "./followup.ts";
 import { createGiteaForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { ReviewQueue } from "./queue.ts";
+import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { scanAssignedIssues } from "./scan.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -12,7 +13,13 @@ import type { WorkerConfig } from "./worker_config.ts";
 export { issueJobKey };
 
 export interface WorkerQueueLike {
-  enqueue(job: IssueJob): { key: string; queued: boolean };
+  enqueue(job: IssueJob): { key: string; queued: boolean } | Promise<{ key: string; queued: boolean }>;
+}
+
+export interface RunWorkerJobExtras {
+  implement?: typeof implementIssue;
+  followUp?: typeof implementFollowUp;
+  conflict?: typeof implementConflict;
 }
 
 function log(message: string) {
@@ -78,13 +85,26 @@ export async function handleIssueCancel(
   owner: string,
   repo: string,
   issueNumber: number,
-  queue?: ReviewQueue<IssueJob>
+  queue?: ReviewQueue<IssueJob>,
+  store?: ReviewJobStore,
+  aborts?: Map<string, AbortController>,
+  pids?: Map<string, number>
 ): Promise<{ key: string; cancelled: true }> {
   const key = issueJobKey({ owner, repo, issueNumber });
   if (queue) {
     queue.drop(key);
     abortIssueJob(queue, key);
   }
+  aborts?.get(key)?.abort();
+  const pid = pids?.get(key);
+  if (pid && pid !== process.pid && isPidAlive(pid)) {
+    try {
+      process.kill(pid);
+    } catch {
+      // Child may have already exited.
+    }
+  }
+  const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
   const claim = await readClaim(claimPath);
   await deleteClaim(followUpStatePath(config.home, owner, repo, issueNumber));
@@ -94,6 +114,16 @@ export async function handleIssueCancel(
     return { key, cancelled: true };
   }
   if (!claim) {
+    if (cancelledQueued > 0) {
+      await cancelIssueWork({
+        api,
+        owner,
+        repo,
+        issueNumber,
+        botUsername: config.botUsername,
+        home: config.home,
+      });
+    }
     return { key, cancelled: true };
   }
   await cancelIssueWork({
@@ -125,7 +155,131 @@ export async function runAssignedIssueScan(
     logger,
   });
   for (const job of jobs) {
-    const result = queue.enqueue(job);
+    const result = await queue.enqueue(job);
     logger(`${result.queued ? "queued" : "deduped"} ${result.key} from scan`);
+  }
+}
+
+function workerPublishedState(status: string): "succeeded" | "skipped" | "failed" {
+  if (status === "skipped" || status === "cancelled" || status === "no-changes") return "skipped";
+  if (status === "failed") return "failed";
+  return "succeeded";
+}
+
+export async function reclaimExpiredWorkerJobs(
+  store: ReviewJobStore,
+  maxAttempts: number,
+  logger: (message: string) => void = log
+): Promise<{ requeued: number; published: number }> {
+  const { requeued, publish } = await store.reclaimExpired(maxAttempts, undefined, HEARTBEAT_MS, WORKER_JOB_KINDS);
+  for (const row of requeued) {
+    logger(`requeued ${row.jobKey} attempt=${row.attempt}`);
+  }
+  for (const row of publish) {
+    try {
+      if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
+      await store.markPublished(row.id, row.leasedBy, {
+        state: "failed",
+        reason: row.error ?? row.resultReason ?? undefined,
+      });
+      logger(`reclaim-published ${row.jobKey} failed`);
+    } catch (err) {
+      logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        if (row.leasedBy == null) throw new Error(`cannot expire lease for job ${row.id}`);
+        await store.expireLease(row.id, row.leasedBy);
+      } catch (expireErr) {
+        logger(
+          `reclaim expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+        );
+      }
+    }
+  }
+  return { requeued: requeued.length, published: publish.length };
+}
+
+export async function processWorkerTick(
+  store: ReviewJobStore,
+  config: WorkerConfig,
+  api: IssueApi,
+  leasedBy: string,
+  extras: RunWorkerJobExtras = {},
+  logger: (message: string) => void = log,
+  aborts?: Map<string, AbortController>,
+  pids?: Map<string, number>
+): Promise<"idle" | "processed"> {
+  const row = await store.lease(leasedBy, config.leaseMs, undefined, WORKER_JOB_KINDS);
+  if (!row) return "idle";
+
+  let heartbeatStopped = false;
+  const heartbeat = setInterval(() => {
+    if (heartbeatStopped) return;
+    void store.heartbeat(row.id, leasedBy, config.leaseMs);
+  }, HEARTBEAT_MS);
+  const stopHeartbeat = () => {
+    heartbeatStopped = true;
+    clearInterval(heartbeat);
+  };
+
+  const key = issueJobKey({ owner: row.owner, repo: row.repo, issueNumber: row.issueNumber ?? 0 });
+  const abort = new AbortController();
+  aborts?.set(key, abort);
+
+  try {
+    const job = issueJobFromRecord(row);
+    const shared = {
+      api,
+      job,
+      giteaUrl: config.giteaUrl,
+      giteaToken: config.giteaToken,
+      botUsername: config.botUsername,
+      model: config.model,
+      home: config.home,
+      workdir: config.workdir,
+      opencodeConfig: config.opencodeConfig,
+      maxOutputBytes: config.maxOutputBytes,
+      sanitizeOpenCodeEnv: true,
+      useClaim: false,
+      abortSignal: abort.signal,
+      onPid: (pid: number) => {
+        pids?.set(key, pid);
+      },
+      logger: (message: string) => logger(message),
+    };
+    const runImplement = extras.implement ?? implementIssue;
+    const runFollowUp = extras.followUp ?? implementFollowUp;
+    const runConflict = extras.conflict ?? implementConflict;
+    const result =
+      job.mode === "conflict"
+        ? await runConflict({ ...shared, timeoutMs: CONFLICT_TIMEOUT_MS })
+        : job.mode === "follow-up"
+          ? await runFollowUp({ ...shared, timeoutMs: FOLLOWUP_TIMEOUT_MS })
+          : await runImplement({ ...shared, timeoutMs: config.opencodeTimeoutMs });
+    stopHeartbeat();
+    const reason =
+      result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
+    try {
+      await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
+    } catch (publishErr) {
+      const current = await store.get(row.id);
+      if (current?.state !== "cancelled") throw publishErr;
+    }
+    logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
+    return "processed";
+  } catch (err) {
+    logger(`worker job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+    stopHeartbeat();
+    try {
+      await store.expireLease(row.id, leasedBy);
+    } catch (expireErr) {
+      logger(
+        `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+      );
+    }
+    return "processed";
+  } finally {
+    aborts?.delete(key);
+    pids?.delete(key);
+    stopHeartbeat();
   }
 }

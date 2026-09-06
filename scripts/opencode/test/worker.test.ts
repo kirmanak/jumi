@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, readClaim, writeClaim } from "../src/claim.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
-import { handleIssueCancel } from "../src/worker.ts";
-import { makeComment, makeIssue, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
+import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
+import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
 
 function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: string[] } {
   const comments: string[] = [];
@@ -86,5 +87,62 @@ describe("handleIssueCancel", () => {
     } finally {
       await rm(home, { recursive: true, force: true });
     }
+  });
+
+  test("kills recorded pid and cancels leased rows", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
+    try {
+      const child = Bun.spawn(["sleep", "30"]);
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+      const key = "kirmanak/demo#12";
+      const aborts = new Map<string, AbortController>([[key, new AbortController()]]);
+      const pids = new Map<string, number>([[key, child.pid]]);
+      const api = makeApi();
+      await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store, aborts, pids);
+      expect(aborts.get(key)?.signal.aborted).toBe(true);
+      expect(store.rows[0]?.state).toBe("cancelled");
+      expect(store.rows[0]?.leasedBy).toBeNull();
+      await child.exited;
+      expect(child.exitCode === 0).toBe(false);
+      expect(api.comments.at(-1)).toContain("stopped");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reclaimExpiredWorkerJobs", () => {
+  test("marks max-attempt implement failed so the key can be re-enqueued", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeIssueJob();
+    await store.enqueueIssue(job);
+    const past = new Date(Date.now() - 10_000);
+    await store.lease("worker-1", 1, past, WORKER_JOB_KINDS);
+    expect(await reclaimExpiredWorkerJobs(store, 2, () => undefined)).toEqual({ requeued: 1, published: 0 });
+    await store.lease("worker-1", 1, past, WORKER_JOB_KINDS);
+    expect(await reclaimExpiredWorkerJobs(store, 2, () => undefined)).toEqual({ requeued: 0, published: 1 });
+    expect(store.rows[0]?.state).toBe("failed");
+    expect(store.rows[0]?.leasedBy).toBeNull();
+    expect(await store.enqueueIssue(job)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+  });
+});
+
+describe("processWorkerTick", () => {
+  test("maps implement no-changes to skipped so an issue edit can re-enqueue", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeIssueJob();
+    await store.enqueueIssue(job);
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      implement: async () => ({ status: "no-changes" }),
+    });
+    expect(store.rows[0]?.state).toBe("skipped");
+    expect(store.rows[0]?.resultReason).toBe("no-changes");
+    expect(await store.enqueueIssue(job)).toEqual({ key: "implement:kirmanak/demo#12", queued: false });
+    expect(await store.enqueueIssue(makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z" }))).toEqual({
+      key: "implement:kirmanak/demo#12",
+      queued: true,
+    });
   });
 });

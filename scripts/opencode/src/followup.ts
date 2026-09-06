@@ -470,12 +470,18 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   const claimPath = claimFilePath(opts.home, owner, repo, issueNumber);
   const statePath = followUpStatePath(opts.home, owner, repo, issueNumber);
   const sanitizeEnv = opts.sanitizeOpenCodeEnv ?? true;
+  const useClaim = opts.useClaim !== false;
+  const forgetClaim = async () => {
+    if (useClaim) await deleteClaim(claimPath);
+  };
 
   throwIfAborted(opts.abortSignal);
 
   const startedAt = now().toISOString();
-  const existingClaim = await readClaim(claimPath);
-  if (existingClaim?.terminal) await deleteClaim(claimPath);
+  if (useClaim) {
+    const existingClaim = await readClaim(claimPath);
+    if (existingClaim?.terminal) await forgetClaim();
+  }
 
   const claim: ClaimRecord = {
     pid: 0,
@@ -487,9 +493,11 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     headShaAtStart: "",
     terminal: false,
   };
-  const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
-  if (!acquired) {
-    return { status: "skipped", reason: "claim is live" };
+  if (useClaim) {
+    const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
+    if (!acquired) {
+      return { status: "skipped", reason: "claim is live" };
+    }
   }
 
   const sticky = (body: string, index: number) =>
@@ -498,50 +506,54 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   try {
     const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
     if (!isAssignedToBot(currentIssue, opts.botUsername) || currentIssue.state !== "open") {
-      await deleteClaim(claimPath);
+      await forgetClaim();
       return { status: "cancelled" };
     }
   } catch (err) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
   }
 
   const pr = await findOpenJumiClosingPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername);
   if (!pr) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
+  }
+  if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
+    await forgetClaim();
+    return { status: "skipped", reason: `PR head changed from ${opts.job.headSha} to ${pr.head.sha}` };
   }
 
   const branch = pr.head.ref;
   claim.branch = branch;
   if (!branch || branch === opts.job.defaultBranch) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "refusing to follow up on the default branch" };
   }
 
   const state = await readFollowUpState(statePath);
   if (state.round >= MAX_FOLLOWUP_ROUNDS) {
     await sticky("stuck: too many follow-up rounds", pr.number);
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "stuck: too many follow-up rounds" };
   }
   if (
     (opts.job.trigger?.commentId !== undefined && state.handledCommentIds.includes(opts.job.trigger.commentId)) ||
     (opts.job.trigger?.reviewId !== undefined && state.handledReviewIds.includes(opts.job.trigger.reviewId))
   ) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "comment already handled" };
   }
   const pendingItems = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
   if (!hasUnhandledFollowUpItems(pendingItems, state)) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "no unhandled feedback" };
   }
   const conflictPath = conflictStatePath(opts.home, owner, repo, issueNumber);
   const previousConflict = await readConflictState(conflictPath);
   if (previousConflict.round >= MAX_CONFLICT_ROUNDS) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
   }
 
@@ -579,7 +591,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     await serializeClaim(async () => undefined);
   };
   heartbeat =
-    heartbeatMs > 0
+    heartbeatMs > 0 && useClaim
       ? setInterval(() => {
           void serializeClaim(async () => {
             if (heartbeatStopped) return;
@@ -638,7 +650,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       .catch(() => false);
     if (!originExists) {
       await stopHeartbeat();
-      await deleteClaim(claimPath);
+      await forgetClaim();
       await detachWorktree();
       return { status: "skipped", reason: `missing branch ${branch}` };
     }
@@ -663,7 +675,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     attemptedHeadSha = headSha;
     attemptedBaseSha = baseSha;
     await serializeClaim(async () => {
-      if (heartbeatStopped) return;
+      if (heartbeatStopped || !useClaim) return;
       claim.headShaAtStart = headSha;
       claim.heartbeatAt = now().toISOString();
       await writeClaim(claimPath, claim);
@@ -676,7 +688,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       previousConflict.lastBaseSha === baseSha
     ) {
       await stopHeartbeat();
-      await deleteClaim(claimPath);
+      await forgetClaim();
       await detachWorktree();
       return { status: "skipped", reason: "same head and base already attempted" };
     }
@@ -711,8 +723,9 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       logger: log,
       abortSignal: opts.abortSignal,
       onPid: async (pid) => {
+        await opts.onPid?.(pid);
         await serializeClaim(async () => {
-          if (heartbeatStopped) return;
+          if (heartbeatStopped || !useClaim) return;
           const current = await readClaim(claimPath);
           if (heartbeatStopped || !current || current.terminal) return;
           current.pid = pid;
@@ -739,7 +752,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       await sticky("stuck: cannot resolve conflicts", pr.number);
       await stopHeartbeat();
       await serializeClaim(async () => {
-        await deleteClaim(claimPath);
+        await forgetClaim();
       });
       await detachWorktree();
       return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
@@ -790,9 +803,11 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       maxOutputBytes: opts.maxOutputBytes,
       reviewLabel: `${owner}/${repo}#${issueNumber}`,
       logger: log,
+      abortSignal: opts.abortSignal,
       onPid: async (pid) => {
+        await opts.onPid?.(pid);
         await serializeClaim(async () => {
-          if (heartbeatStopped) return;
+          if (heartbeatStopped || !useClaim) return;
           const current = await readClaim(claimPath);
           if (heartbeatStopped || !current || current.terminal) return;
           current.pid = pid;
@@ -821,7 +836,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         await sticky("no follow-up changes", pr.number);
         await recordAttempt(sha || pr.head.sha);
         await serializeClaim(async () => {
-          await deleteClaim(claimPath);
+          await forgetClaim();
         });
         await detachWorktree();
         return { status: "no-changes" };
@@ -851,7 +866,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     await recordAttempt(sha || pr.head.sha);
     await stopHeartbeat();
     await serializeClaim(async () => {
-      await deleteClaim(claimPath);
+      await forgetClaim();
     });
     await detachWorktree();
     return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
@@ -882,7 +897,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     }).catch(() => undefined);
     await stopHeartbeat();
     await serializeClaim(async () => {
-      await deleteClaim(claimPath);
+      await forgetClaim();
     }).catch(() => undefined);
     await detachWorktree();
     throw err;

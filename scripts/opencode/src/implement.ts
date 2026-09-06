@@ -56,6 +56,8 @@ export interface ImplementOptions {
   pid?: number;
   pidAlive?: (pid: number) => boolean;
   logger?: (message: string) => void;
+  useClaim?: boolean;
+  onPid?: (pid: number) => void | Promise<void>;
 }
 
 function logDefault(message: string) {
@@ -148,6 +150,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
   const branch = issueBranchName(issueNumber, opts.job.title);
   const claimPath = claimFilePath(opts.home, owner, repo, issueNumber);
   const sanitizeEnv = opts.sanitizeOpenCodeEnv ?? true;
+  const useClaim = opts.useClaim !== false;
 
   throwIfAborted(opts.abortSignal);
 
@@ -162,27 +165,33 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
     headShaAtStart: "",
     terminal: false,
   };
-  const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
-  if (!acquired) {
-    return { status: "skipped", reason: "claim is live" };
+  if (useClaim) {
+    const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
+    if (!acquired) {
+      return { status: "skipped", reason: "claim is live" };
+    }
   }
+
+  const forgetClaim = async () => {
+    if (useClaim) await deleteClaim(claimPath);
+  };
 
   const existingPr = await findOpenClosingPullRequest(opts.api, owner, repo, issueNumber);
   if (existingPr) {
     // Scan already skips open Fixes/Closes PRs. Do not persist terminal: closing
     // that PR unmerged often leaves issueUpdatedAt unchanged, which would trap acquireClaim.
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: `open PR already closes #${issueNumber}` };
   }
 
   try {
     const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
     if (!isAssignedToBot(currentIssue, opts.botUsername) || currentIssue.state !== "open") {
-      await deleteClaim(claimPath);
+      await forgetClaim();
       return { status: "cancelled" };
     }
   } catch (err) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
   }
 
@@ -220,6 +229,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
     await serializeClaim(async () => undefined);
   };
   const stampTerminalClaim = async () => {
+    if (!useClaim) return;
     let updatedAt = claim.issueUpdatedAt;
     try {
       const current = await opts.api.getIssue(owner, repo, issueNumber);
@@ -236,7 +246,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
     });
   };
   heartbeat =
-    heartbeatMs > 0
+    heartbeatMs > 0 && useClaim
       ? setInterval(() => {
           void serializeClaim(async () => {
             if (heartbeatStopped) return;
@@ -295,7 +305,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
 
     const headSha = (await runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env })).trim();
     await serializeClaim(async () => {
-      if (heartbeatStopped) return;
+      if (heartbeatStopped || !useClaim) return;
       claim.headShaAtStart = headSha;
       claim.heartbeatAt = now().toISOString();
       await writeClaim(claimPath, claim);
@@ -322,9 +332,11 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
       maxOutputBytes: opts.maxOutputBytes,
       reviewLabel: `${owner}/${repo}#${issueNumber}`,
       logger: log,
+      abortSignal: opts.abortSignal,
       onPid: async (pid) => {
+        await opts.onPid?.(pid);
         await serializeClaim(async () => {
-          if (heartbeatStopped) return;
+          if (heartbeatStopped || !useClaim) return;
           const current = await readClaim(claimPath);
           if (heartbeatStopped || !current || current.terminal) return;
           current.pid = pid;
@@ -388,7 +400,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
     await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, `Opened ${pr.html_url}`);
     await stopHeartbeat();
     await serializeClaim(async () => {
-      await deleteClaim(claimPath);
+      await forgetClaim();
     });
     await detachWorktree();
     return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };

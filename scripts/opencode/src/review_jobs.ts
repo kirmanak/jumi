@@ -1,10 +1,27 @@
 import { SQL } from "bun";
 import type { EnqueueResult } from "./queue.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
-import type { ReviewJob } from "./types.ts";
+import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
 export const REVIEW_JOB_STATES = ["queued", "leased", "succeeded", "skipped", "failed", "cancelled"] as const;
 export type ReviewJobState = (typeof REVIEW_JOB_STATES)[number];
+
+export const JOB_KINDS = ["review", "implement", "follow-up", "conflict"] as const;
+export type JobKind = (typeof JOB_KINDS)[number];
+export const REVIEW_KIND: JobKind = "review";
+export const WORKER_JOB_KINDS: readonly JobKind[] = ["implement", "follow-up", "conflict"];
+
+export interface IssueJobPayload {
+  issueNumber: number;
+  title: string;
+  body: string;
+  htmlUrl: string;
+  issueUpdatedAt: string;
+  defaultBranch: string;
+  cloneUrl: string;
+  action: string;
+  trigger?: IssueJobTrigger;
+}
 
 export const MAX_ATTEMPTS_REASON = "Jumi review failed: max attempts exceeded";
 export const HEARTBEAT_MS = 30_000;
@@ -30,10 +47,13 @@ export type { PersistReviewResult };
 export interface ReviewJobRecord {
   id: number;
   jobKey: string;
+  kind: JobKind;
   owner: string;
   repo: string;
   prNumber: number;
   headSha: string;
+  issueNumber: number | null;
+  payload: IssueJobPayload | null;
   delivery: string;
   state: ReviewJobState;
   attempt: number;
@@ -57,8 +77,14 @@ export interface ReclaimResult {
 export interface ReviewJobStore {
   migrate(): Promise<void>;
   enqueue(job: ReviewJob): Promise<EnqueueResult>;
+  enqueueIssue(job: IssueJob): Promise<EnqueueResult>;
   drop(key: string): Promise<boolean>;
-  lease(leasedBy: string, leaseMs: number, now?: Date): Promise<ReviewJobRecord | undefined>;
+  lease(
+    leasedBy: string,
+    leaseMs: number,
+    now?: Date,
+    kinds?: readonly JobKind[]
+  ): Promise<ReviewJobRecord | undefined>;
   heartbeat(id: number, leasedBy: string, leaseMs: number, now?: Date): Promise<boolean>;
   expireLease(id: number, leasedBy: string, now?: Date): Promise<boolean>;
   saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void>;
@@ -67,7 +93,9 @@ export interface ReviewJobStore {
     leasedBy: string,
     outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
   ): Promise<void>;
-  reclaimExpired(maxAttempts: number, now?: Date, leaseMs?: number): Promise<ReclaimResult>;
+  reclaimExpired(maxAttempts: number, now?: Date, leaseMs?: number, kinds?: readonly JobKind[]): Promise<ReclaimResult>;
+  cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number>;
+  countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number>;
   countByState(): Promise<Record<ReviewJobState, number>>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
 }
@@ -108,6 +136,13 @@ CREATE INDEX IF NOT EXISTS review_jobs_leased_until
   WHERE state = 'leased';
 
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pr_updated_at TIMESTAMPTZ;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'review';
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS payload JSONB;
+
+CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
+  ON review_jobs (kind, created_at, id)
+  WHERE state = 'queued';
 `;
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
@@ -124,8 +159,15 @@ function jobPrUpdatedAtMs(job: ReviewJob): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function isSamePullRequest(row: { owner: string; repo: string; prNumber: number }, job: ReviewJob): boolean {
+function isSamePullRequest(
+  row: { owner: string; repo: string; prNumber: number },
+  job: { owner: string; repo: string; prNumber: number }
+): boolean {
   return row.owner === job.owner && row.repo === job.repo && row.prNumber === job.prNumber;
+}
+
+function rowKind(row: { kind?: JobKind | null }): JobKind {
+  return row.kind || REVIEW_KIND;
 }
 
 function hasNewerInflight(rows: ReviewJobRecord[], job: ReviewJob, key: string): boolean {
@@ -133,11 +175,101 @@ function hasNewerInflight(rows: ReviewJobRecord[], job: ReviewJob, key: string):
   if (incomingTs == null) return false;
   return rows.some(
     (row) =>
+      rowKind(row) === REVIEW_KIND &&
       isSamePullRequest(row, job) &&
       (row.state === "queued" || row.state === "leased") &&
       row.jobKey !== key &&
       row.prUpdatedAt != null &&
       row.prUpdatedAt > incomingTs
+  );
+}
+
+export function workerJobKind(job: IssueJob): JobKind {
+  return job.mode ?? "implement";
+}
+
+export function workerJobKey(job: IssueJob): string {
+  const kind = workerJobKind(job);
+  if (kind === "implement") return `implement:${job.owner}/${job.repo}#${job.issueNumber}`;
+  return `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
+}
+
+export function issueJobPayload(job: IssueJob): IssueJobPayload {
+  return {
+    issueNumber: job.issueNumber,
+    title: job.title,
+    body: job.body,
+    htmlUrl: job.htmlUrl,
+    issueUpdatedAt: job.issueUpdatedAt,
+    defaultBranch: job.defaultBranch,
+    cloneUrl: job.cloneUrl,
+    action: job.action,
+    trigger: job.trigger,
+  };
+}
+
+export function issueJobFromRecord(row: ReviewJobRecord): IssueJob {
+  const payload = row.payload;
+  if (!payload) throw new Error(`job ${row.id} missing payload`);
+  const kind = rowKind(row);
+  return {
+    delivery: row.delivery,
+    owner: row.owner,
+    repo: row.repo,
+    issueNumber: payload.issueNumber,
+    action: payload.action,
+    title: payload.title,
+    body: payload.body,
+    htmlUrl: payload.htmlUrl,
+    issueUpdatedAt: payload.issueUpdatedAt,
+    defaultBranch: payload.defaultBranch,
+    cloneUrl: payload.cloneUrl,
+    receivedAt: new Date(row.createdAt).toISOString(),
+    mode: kind === "review" ? undefined : kind,
+    prNumber: row.prNumber || undefined,
+    headSha: row.headSha || undefined,
+    trigger: payload.trigger,
+  };
+}
+
+function parsePayload(value: unknown): IssueJobPayload | null {
+  if (value == null) return null;
+  let parsed: unknown = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const rec = parsed as Partial<IssueJobPayload>;
+  if (typeof rec.issueNumber !== "number" || typeof rec.title !== "string") return null;
+  return {
+    issueNumber: rec.issueNumber,
+    title: rec.title,
+    body: typeof rec.body === "string" ? rec.body : "",
+    htmlUrl: typeof rec.htmlUrl === "string" ? rec.htmlUrl : "",
+    issueUpdatedAt: typeof rec.issueUpdatedAt === "string" ? rec.issueUpdatedAt : "",
+    defaultBranch: typeof rec.defaultBranch === "string" ? rec.defaultBranch : "",
+    cloneUrl: typeof rec.cloneUrl === "string" ? rec.cloneUrl : "",
+    action: typeof rec.action === "string" ? rec.action : "",
+    trigger: rec.trigger,
+  };
+}
+
+function kindsOrReview(kinds?: readonly JobKind[]): readonly JobKind[] {
+  return kinds && kinds.length > 0 ? kinds : [REVIEW_KIND];
+}
+
+function isImplementTerminal(
+  row: Pick<ReviewJobRecord, "kind" | "state" | "resultReason" | "payload">,
+  job: IssueJob
+): boolean {
+  if (rowKind(row) !== "implement") return false;
+  if (row.state === "succeeded") return true;
+  return (
+    row.state === "skipped" && row.resultReason === "no-changes" && row.payload?.issueUpdatedAt === job.issueUpdatedAt
   );
 }
 
@@ -178,6 +310,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const incomingTs = jobPrUpdatedAtMs(job);
       for (const row of this.rows) {
         if (
+          rowKind(row) === REVIEW_KIND &&
           isSamePullRequest(row, job) &&
           row.state === "queued" &&
           row.jobKey !== key &&
@@ -190,10 +323,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       this.rows.push({
         id: this.nextId++,
         jobKey: key,
+        kind: REVIEW_KIND,
         owner: job.owner,
         repo: job.repo,
         prNumber: job.prNumber,
         headSha: job.headSha,
+        issueNumber: null,
+        payload: null,
         delivery: job.delivery,
         state: "queued",
         attempt: 0,
@@ -212,6 +348,59 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
+  enqueueIssue(job: IssueJob): Promise<EnqueueResult> {
+    return this.locked(() => {
+      const key = workerJobKey(job);
+      const kind = workerJobKind(job);
+      const now = Date.now();
+      const sameKey = this.rows.filter((row) => row.jobKey === key);
+      if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
+        return { key, queued: false };
+      }
+      if (kind === "implement" && sameKey.some((row) => isImplementTerminal(row, job))) {
+        return { key, queued: false };
+      }
+      if (kind !== "implement" && job.prNumber) {
+        for (const row of this.rows) {
+          if (
+            rowKind(row) === kind &&
+            isSamePullRequest(row, { owner: job.owner, repo: job.repo, prNumber: job.prNumber }) &&
+            row.state === "queued" &&
+            row.jobKey !== key
+          ) {
+            row.state = "cancelled";
+            row.updatedAt = now;
+          }
+        }
+      }
+      this.rows.push({
+        id: this.nextId++,
+        jobKey: key,
+        kind,
+        owner: job.owner,
+        repo: job.repo,
+        prNumber: job.prNumber ?? 0,
+        headSha: job.headSha ?? "",
+        issueNumber: job.issueNumber,
+        payload: issueJobPayload(job),
+        delivery: job.delivery,
+        state: "queued",
+        attempt: 0,
+        leasedBy: null,
+        leasedUntil: null,
+        resultMarkdown: null,
+        resultReason: null,
+        error: null,
+        pendingStatusAt: null,
+        publishedAt: null,
+        prUpdatedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { key, queued: true };
+    });
+  }
+
   drop(key: string): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.jobKey === key && item.state === "queued");
@@ -222,9 +411,15 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  lease(leasedBy: string, leaseMs: number, now = new Date()): Promise<ReviewJobRecord | undefined> {
+  lease(
+    leasedBy: string,
+    leaseMs: number,
+    now = new Date(),
+    kinds?: readonly JobKind[]
+  ): Promise<ReviewJobRecord | undefined> {
     return this.locked(() => {
-      const row = this.rows.find((item) => item.state === "queued");
+      const allowed = kindsOrReview(kinds);
+      const row = this.rows.find((item) => item.state === "queued" && allowed.includes(rowKind(item)));
       if (!row) return undefined;
       const ts = now.getTime();
       row.state = "leased";
@@ -296,14 +491,21 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  reclaimExpired(maxAttempts: number, now = new Date(), leaseMs = HEARTBEAT_MS): Promise<ReclaimResult> {
+  reclaimExpired(
+    maxAttempts: number,
+    now = new Date(),
+    leaseMs = HEARTBEAT_MS,
+    kinds?: readonly JobKind[]
+  ): Promise<ReclaimResult> {
     return this.locked(() => {
+      const allowed = kindsOrReview(kinds);
       const ts = now.getTime();
       const claimedUntil = ts + leaseMs;
       const requeued: ReviewJobRecord[] = [];
       const publish: ReviewJobRecord[] = [];
       for (const row of this.rows) {
         if (row.state !== "leased" || row.leasedUntil == null || row.leasedUntil >= ts) continue;
+        if (!allowed.includes(rowKind(row))) continue;
         if (hasPersistedResult(row)) {
           row.leasedBy = RECLAIM_LEASED_BY;
           row.leasedUntil = claimedUntil;
@@ -344,6 +546,37 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       return row ? { ...row } : undefined;
     });
   }
+
+  cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
+    return this.locked(() => {
+      const now = Date.now();
+      let n = 0;
+      for (const row of this.rows) {
+        if (row.owner !== owner || row.repo !== repo || row.issueNumber !== issueNumber) continue;
+        if (!WORKER_JOB_KINDS.includes(rowKind(row))) continue;
+        if (row.state !== "queued" && row.state !== "leased") continue;
+        row.state = "cancelled";
+        row.leasedBy = null;
+        row.leasedUntil = null;
+        row.updatedAt = now;
+        n++;
+      }
+      return n;
+    });
+  }
+
+  countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number> {
+    return this.locked(() => {
+      return this.rows.filter(
+        (row) =>
+          rowKind(row) === kind &&
+          row.owner === owner &&
+          row.repo === repo &&
+          row.issueNumber === issueNumber &&
+          row.state === "succeeded"
+      ).length;
+    });
+  }
 }
 
 type SqlClient = {
@@ -355,10 +588,13 @@ type SqlClient = {
 type ReviewJobRow = {
   id: unknown;
   job_key: unknown;
+  kind: unknown;
   owner: unknown;
   repo: unknown;
   pr_number: unknown;
   head_sha: unknown;
+  issue_number: unknown;
+  payload: unknown;
   delivery: unknown;
   state: unknown;
   attempt: unknown;
@@ -425,10 +661,13 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
   return {
     id: num(row.id),
     jobKey: str(row.job_key),
+    kind: (str(row.kind) || REVIEW_KIND) as JobKind,
     owner: str(row.owner),
     repo: str(row.repo),
     prNumber: num(row.pr_number),
     headSha: str(row.head_sha),
+    issueNumber: row.issue_number == null || row.issue_number === "" ? null : num(row.issue_number),
+    payload: parsePayload(row.payload),
     delivery: str(row.delivery),
     state: str(row.state) as ReviewJobState,
     attempt: num(row.attempt),
@@ -498,10 +737,10 @@ export class PgReviewJobStore implements ReviewJobStore {
       const inflight = asRows<{ job_key: unknown; pr_updated_at: unknown }>(
         await tx.unsafe(
           `SELECT job_key, pr_updated_at FROM review_jobs
-           WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND state IN ('queued', 'leased')
+           WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = $4 AND state IN ('queued', 'leased')
            ORDER BY id
            FOR UPDATE`,
-          [job.owner, job.repo, job.prNumber]
+          [job.owner, job.repo, job.prNumber, REVIEW_KIND]
         )
       );
       if (inflight.some((row) => str(row.job_key) === key)) return { key, queued: false };
@@ -532,10 +771,85 @@ export class PgReviewJobStore implements ReviewJobStore {
       await tx.unsafe(
         `UPDATE review_jobs
          SET state = 'cancelled', updated_at = NOW()
-         WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND state = 'queued' AND job_key <> $4
+         WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = $6 AND state = 'queued' AND job_key <> $4
            AND ($5::timestamptz IS NULL OR pr_updated_at IS NULL OR pr_updated_at <= $5::timestamptz)`,
-        [job.owner, job.repo, job.prNumber, key, prUpdatedAt]
+        [job.owner, job.repo, job.prNumber, key, prUpdatedAt, REVIEW_KIND]
       );
+      return { key, queued: true };
+    });
+  }
+
+  async enqueueIssue(job: IssueJob): Promise<EnqueueResult> {
+    const key = workerJobKey(job);
+    const kind = workerJobKind(job);
+    const payload = issueJobPayload(job);
+    return this.sql.begin(async (tx) => {
+      if (kind === "implement") {
+        const done = asRows<{ state: unknown; result_reason: unknown; payload: unknown }>(
+          await tx.unsafe(
+            `SELECT state, result_reason, payload FROM review_jobs WHERE job_key = $1 AND state IN ('succeeded', 'skipped')`,
+            [key]
+          )
+        );
+        if (
+          done.some((row) =>
+            isImplementTerminal(
+              {
+                kind,
+                state: str(row.state) as ReviewJobState,
+                resultReason: strOrNull(row.result_reason),
+                payload: parsePayload(row.payload),
+              },
+              job
+            )
+          )
+        ) {
+          return { key, queued: false };
+        }
+      }
+
+      const inflight = asRows<{ job_key: unknown }>(
+        await tx.unsafe(
+          `SELECT job_key FROM review_jobs
+           WHERE job_key = $1 AND state IN ('queued', 'leased')
+           ORDER BY id
+           FOR UPDATE`,
+          [key]
+        )
+      );
+      if (inflight.length > 0) return { key, queued: false };
+
+      const inserted = asRows<{ id: unknown }>(
+        await tx.unsafe(
+          `INSERT INTO review_jobs (
+             job_key, kind, owner, repo, pr_number, head_sha, issue_number, payload, delivery, state, attempt
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'queued', 0)
+           ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
+           DO NOTHING
+           RETURNING id`,
+          [
+            key,
+            kind,
+            job.owner,
+            job.repo,
+            job.prNumber ?? 0,
+            job.headSha ?? "",
+            job.issueNumber,
+            JSON.stringify(payload),
+            job.delivery,
+          ]
+        )
+      );
+      if (inserted.length === 0) return { key, queued: false };
+
+      if (kind !== "implement" && job.prNumber) {
+        await tx.unsafe(
+          `UPDATE review_jobs
+           SET state = 'cancelled', updated_at = NOW()
+           WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = $4 AND state = 'queued' AND job_key <> $5`,
+          [job.owner, job.repo, job.prNumber, kind, key]
+        );
+      }
       return { key, queued: true };
     });
   }
@@ -552,20 +866,26 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async lease(leasedBy: string, leaseMs: number, now = new Date()): Promise<ReviewJobRecord | undefined> {
+  async lease(
+    leasedBy: string,
+    leaseMs: number,
+    now = new Date(),
+    kinds?: readonly JobKind[]
+  ): Promise<ReviewJobRecord | undefined> {
+    const allowed = kindsOrReview(kinds);
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
         `UPDATE review_jobs
          SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
          WHERE id = (
            SELECT id FROM review_jobs
-           WHERE state = 'queued'
+           WHERE state = 'queued' AND kind = ANY($3::text[])
            ORDER BY created_at ASC, id ASC
            FOR UPDATE SKIP LOCKED
            LIMIT 1
          )
          RETURNING *`,
-        [leasedBy, new Date(now.getTime() + leaseMs).toISOString()]
+        [leasedBy, new Date(now.getTime() + leaseMs).toISOString(), [...allowed]]
       )
     );
     return rows[0] ? mapRow(rows[0]) : undefined;
@@ -655,17 +975,23 @@ export class PgReviewJobStore implements ReviewJobStore {
     if (rows.length === 0) throw new Error(`cannot mark published for job ${id}`);
   }
 
-  async reclaimExpired(maxAttempts: number, now = new Date(), leaseMs = HEARTBEAT_MS): Promise<ReclaimResult> {
+  async reclaimExpired(
+    maxAttempts: number,
+    now = new Date(),
+    leaseMs = HEARTBEAT_MS,
+    kinds?: readonly JobKind[]
+  ): Promise<ReclaimResult> {
     return this.sql.begin(async (tx) => {
+      const allowed = kindsOrReview(kinds);
       const ts = now.toISOString();
       const claimedUntil = new Date(now.getTime() + leaseMs).toISOString();
       const expired = asRows<ReviewJobRow>(
         await tx.unsafe(
           `SELECT * FROM review_jobs
-           WHERE state = 'leased' AND leased_until < $1::timestamptz
+           WHERE state = 'leased' AND leased_until < $1::timestamptz AND kind = ANY($2::text[])
            ORDER BY id
            FOR UPDATE SKIP LOCKED`,
-          [ts]
+          [ts, [...allowed]]
         )
       );
 
@@ -742,6 +1068,29 @@ export class PgReviewJobStore implements ReviewJobStore {
   async get(id: number): Promise<ReviewJobRecord | undefined> {
     const rows = asRows<ReviewJobRow>(await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [id]));
     return rows[0] ? mapRow(rows[0]) : undefined;
+  }
+
+  async cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
+    const rows = asRows<{ id: unknown }>(
+      await this.sql.unsafe(
+        `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, updated_at = NOW()
+         WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
+         RETURNING id`,
+        [owner, repo, issueNumber, [...WORKER_JOB_KINDS]]
+      )
+    );
+    return rows.length;
+  }
+
+  async countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number> {
+    const rows = asRows<{ n: unknown }>(
+      await this.sql.unsafe(
+        `SELECT COUNT(*)::bigint AS n FROM review_jobs
+         WHERE kind = $1 AND owner = $2 AND repo = $3 AND issue_number = $4 AND state = 'succeeded'`,
+        [kind, owner, repo, issueNumber]
+      )
+    );
+    return rows[0] ? num(rows[0].n) : 0;
   }
 }
 

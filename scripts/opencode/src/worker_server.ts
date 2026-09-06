@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import { scrubSecretEnv } from "./config.ts";
 import {
   parseIssueCommentPayload,
@@ -11,6 +12,7 @@ import { parseIssuesPayload, shouldEnqueueIssue } from "./issue_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult, ReviewQueue } from "./queue.ts";
+import { createPgReviewJobStore, isQueueUnavailable, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
 import { renderTokenMetrics } from "./token_metrics.ts";
 import type { IssueJob } from "./types.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
@@ -18,6 +20,8 @@ import {
   createIssueQueue,
   handleIssueCancel,
   issueJobKey,
+  processWorkerTick,
+  reclaimExpiredWorkerJobs,
   runAssignedIssueScan,
   type WorkerQueueLike,
 } from "./worker.ts";
@@ -161,12 +165,16 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
         const keys: string[] = [];
         for (const partial of decision.jobs) {
           const job: IssueJob = { ...partial, delivery, receivedAt };
-          const result: EnqueueResult = deps.queue.enqueue(job);
+          const result: EnqueueResult = await deps.queue.enqueue(job);
           keys.push(result.key);
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         }
         return json(202, { queued: true, keys });
       } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
+        }
         return json(500, { error: err instanceof Error ? err.message : String(err) });
       }
     }
@@ -184,7 +192,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
           delivery,
           receivedAt: new Date().toISOString(),
         };
-        const result: EnqueueResult = deps.queue.enqueue(job);
+        const result: EnqueueResult = await deps.queue.enqueue(job);
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         return json(202, result);
       }
@@ -207,13 +215,39 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
         delivery,
         receivedAt: new Date().toISOString(),
       };
-      const result: EnqueueResult = deps.queue.enqueue(job);
+      const result: EnqueueResult = await deps.queue.enqueue(job);
       logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
       return json(202, result);
     } catch (err) {
+      if (isQueueUnavailable(err)) {
+        logger(`queue unavailable: ${err.message}`);
+        return json(503, { error: "queue unavailable" });
+      }
       return json(400, { error: err instanceof Error ? err.message : String(err) });
     }
   };
+}
+
+function workerId(): string {
+  return `worker-${hostname()}-${process.pid}-${crypto.randomUUID()}`;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("aborted"));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("aborted"));
+      },
+      { once: true }
+    );
+  });
 }
 
 async function main() {
@@ -227,14 +261,21 @@ async function main() {
     logger: log,
   });
   const api = createGiteaForge(config.giteaUrl, config.giteaToken);
-  const queue: ReviewQueue<IssueJob> = createIssueQueue(config, api);
+  const store: ReviewJobStore | undefined = config.databaseUrl
+    ? await createPgReviewJobStore(config.databaseUrl)
+    : undefined;
+  const ramQueue: ReviewQueue<IssueJob> | undefined = store ? undefined : createIssueQueue(config, api);
+  const aborts = new Map<string, AbortController>();
+  const pids = new Map<string, number>();
+  const queue: WorkerQueueLike = store ? { enqueue: (job) => store.enqueueIssue(job) } : ramQueue!;
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
     fetch: createWorkerFetchHandler(config, {
       queue,
       api,
-      cancel: (owner, repo, issueNumber) => handleIssueCancel(config, api, owner, repo, issueNumber, queue),
+      cancel: (owner, repo, issueNumber) =>
+        handleIssueCancel(config, api, owner, repo, issueNumber, ramQueue, store, aborts, pids),
     }),
   });
 
@@ -246,7 +287,24 @@ async function main() {
   scan();
   setInterval(scan, config.scanIntervalMs);
 
-  log(`listening on ${server.hostname}:${server.port}`);
+  if (store) {
+    const leasedBy = workerId();
+    const run = async () => {
+      while (true) {
+        try {
+          await reclaimExpiredWorkerJobs(store, config.maxJobAttempts, log);
+          const result = await processWorkerTick(store, config, api, leasedBy, {}, log, aborts, pids);
+          if (result === "idle") await sleep(QUEUE_POLL_MS);
+        } catch (err) {
+          log(`worker tick failed: ${err instanceof Error ? err.message : String(err)}`);
+          await sleep(QUEUE_POLL_MS).catch(() => undefined);
+        }
+      }
+    };
+    void run();
+  }
+
+  log(`listening on ${server.hostname}:${server.port}${store ? " ledger=postgres" : ""}`);
 }
 
 if (import.meta.main) {

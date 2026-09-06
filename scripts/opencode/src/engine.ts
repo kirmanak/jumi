@@ -9,6 +9,7 @@ export interface EngineRunOptions {
   reviewLabel?: string;
   memorySampleIntervalMs?: number;
   extraEnv?: Record<string, string>;
+  abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;
   logger?: (message: string) => void;
 }

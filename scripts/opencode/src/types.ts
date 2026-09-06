@@ -189,6 +189,7 @@ export interface IssueJob {
   receivedAt: string;
   mode?: "implement" | "follow-up" | "conflict";
   prNumber?: number;
+  headSha?: string;
   trigger?: IssueJobTrigger;
 }
 

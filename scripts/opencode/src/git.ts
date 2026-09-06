@@ -160,6 +160,12 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
   let tracker: MemoryPeakState | undefined;
   let finalSample: MemorySample | undefined;
 
+  if (opts.abortSignal?.aborted) {
+    const err = new Error("cancelled");
+    err.name = "AbortError";
+    throw err;
+  }
+
   try {
     const proc = Bun.spawn(["opencode", "run", "--dir", opts.workdir, "-m", opts.model], {
       stdin: Bun.file(tmpPath),
@@ -170,6 +176,15 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
 
     const childPid = proc.pid;
     await opts.onPid?.(childPid);
+    const onAbort = () => {
+      try {
+        proc.kill();
+      } catch {
+        return;
+      }
+    };
+    if (opts.abortSignal?.aborted) onAbort();
+    else opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
     let trackerStartedAt = Date.now();
     tracker = trackMemoryPeak(childPid, opts.memorySampleIntervalMs ?? 5_000, (sample, peaks) => {
       logDiagnostic(log, "opencode_sample", {
@@ -207,6 +222,7 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
     } catch (err) {
       runError = err;
     } finally {
+      opts.abortSignal?.removeEventListener("abort", onAbort);
       if (timeout) clearTimeout(timeout);
       finalSample = await finalizeMemoryTracker(tracker, childPid);
     }
@@ -248,6 +264,12 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
     });
     recordOpenCodeDb(dbPath);
+
+    if (opts.abortSignal?.aborted) {
+      const err = new Error("cancelled");
+      err.name = "AbortError";
+      throw err;
+    }
 
     if (runError) throw runError;
 

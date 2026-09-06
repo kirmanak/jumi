@@ -157,6 +157,7 @@ function followUpJob(
     cloneUrl: repository.clone_url,
     mode: "follow-up",
     prNumber: pr.number,
+    headSha: pr.head?.sha || undefined,
     trigger,
   };
 }

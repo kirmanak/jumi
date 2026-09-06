@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MemoryReviewJobStore, QueueUnavailableError } from "../src/review_jobs.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
@@ -150,5 +151,39 @@ describe("createWorkerFetchHandler", () => {
     const response = await handler(await signedRequest({ action: "assigned" }));
     expect(response.status).toBe(400);
     expect((await responseJson(response)).error).toContain("missing repository");
+  });
+
+  test("first-run assign still 202s on the in-memory queue without a store", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
+    expect(queue.jobs[0]?.mode).toBeUndefined();
+  });
+
+  test("ledger enqueue uses the implement job key", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue: { enqueue: (job) => store.enqueueIssue(job) },
+    });
+    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows[0]?.kind).toBe("implement");
+    expect(store.rows[0]?.state).toBe("queued");
+  });
+
+  test("fails closed with 503 when the ledger is unavailable", async () => {
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue: {
+        enqueue() {
+          throw new QueueUnavailableError("down");
+        },
+      },
+    });
+    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "queue unavailable" });
   });
 });

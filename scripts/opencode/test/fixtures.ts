@@ -262,6 +262,8 @@ export function makeWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerC
     maxWebhookBytes: 1_048_576,
     opencodeTimeoutMs: 14_400_000,
     scanIntervalMs: 300_000,
+    leaseMs: 14_400_000 + 10 * 60 * 1000,
+    maxJobAttempts: 2,
     ...overrides,
   };
 }

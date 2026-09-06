@@ -4,6 +4,7 @@ import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { createGiteaForge } from "./forge.ts";
+import { enqueueFollowUpFromReview } from "./handover.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { ReviewQueue } from "./queue.ts";
@@ -15,6 +16,7 @@ import {
   hasPersistedResult,
   isQueueUnavailable,
   QUEUE_POLL_MS,
+  REVIEW_KIND,
   type ReviewJobRecord,
   type ReviewJobStore,
   renderQueueMetrics,
@@ -242,7 +244,9 @@ export async function reclaimExpiredJobs(
   config: ServiceConfig,
   logger: (message: string) => void = log
 ): Promise<ReclaimResultSummary> {
-  const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS);
+  const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, [
+    REVIEW_KIND,
+  ]);
   for (const row of requeued) {
     logger(`requeued ${row.jobKey} attempt=${row.attempt}`);
   }
@@ -270,6 +274,30 @@ export interface ReclaimResultSummary {
   published: number;
 }
 
+async function handoverFollowUp(
+  store: ReviewJobStore,
+  api: ReviewApi,
+  config: ServiceConfig,
+  row: ReviewJobRecord,
+  published: ReviewResult,
+  logger: (message: string) => void
+): Promise<void> {
+  try {
+    const current = await store.get(row.id);
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: current ?? row,
+      botUsername: config.botUsername,
+      published,
+      markdown: current?.resultMarkdown ?? row.resultMarkdown,
+    });
+    if (result?.queued) logger(`handover follow-up ${result.key}`);
+  } catch (err) {
+    logger(`handover failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function publishAndCompleteJob(
   store: ReviewJobStore,
   api: ReviewApi,
@@ -284,6 +312,7 @@ async function publishAndCompleteJob(
     state: failed ? "failed" : publishedState(result),
     reason: result.reason,
   });
+  await handoverFollowUp(store, api, config, row, result, logger);
   return result;
 }
 
@@ -295,7 +324,7 @@ export async function processEngineTick(
   extras: RunReviewJobExtras = {},
   logger: (message: string) => void = log
 ): Promise<"idle" | "processed"> {
-  const row = await store.lease(leasedBy, config.leaseMs);
+  const row = await store.lease(leasedBy, config.leaseMs, undefined, [REVIEW_KIND]);
   if (!row) return "idle";
 
   let heartbeatStopped = false;
@@ -326,6 +355,7 @@ export async function processEngineTick(
     });
     stopHeartbeat();
     await store.markPublished(row.id, leasedBy, { state: publishedState(result), reason: result.reason });
+    await handoverFollowUp(store, api, config, row, result, logger);
     return "processed";
   } catch (err) {
     logger(`engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);

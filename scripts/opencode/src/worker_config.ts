@@ -23,6 +23,9 @@ export interface WorkerConfig {
   maxWebhookBytes: number;
   opencodeTimeoutMs: number;
   scanIntervalMs: number;
+  databaseUrl?: string;
+  leaseMs: number;
+  maxJobAttempts: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -80,6 +83,7 @@ function normalizeUrl(value: string): string {
 
 export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
   const resolved = overlaySecretsFromFile(env);
+  const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
@@ -101,7 +105,10 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     queueConcurrency: intEnv(resolved, "QUEUE_CONCURRENCY", 1),
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
-    opencodeTimeoutMs: intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000),
+    opencodeTimeoutMs,
     scanIntervalMs: intEnv(resolved, "WORKER_SCAN_INTERVAL_MS", 5 * 60 * 1000),
+    databaseUrl: optionalEnv(resolved, "DATABASE_URL"),
+    leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
+    maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
   };
 }

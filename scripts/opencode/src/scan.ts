@@ -93,6 +93,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
             ...issueJobFrom(owner, repo, issue, repository, "scan"),
             mode: "follow-up",
             prNumber: jumiPr.number,
+            headSha: jumiPr.head.sha,
             delivery: `scan-${owner}-${repo}-${issue.number}`,
             receivedAt: new Date(nowMs).toISOString(),
           });
@@ -101,6 +102,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
             ...issueJobFrom(owner, repo, issue, repository, "scan"),
             mode: "conflict",
             prNumber: jumiPr.number,
+            headSha: jumiPr.head.sha,
             delivery: `scan-${owner}-${repo}-${issue.number}`,
             receivedAt: new Date(nowMs).toISOString(),
           });
@@ -109,6 +111,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
             ...issueJobFrom(owner, repo, issue, repository, "scan"),
             mode: "follow-up",
             prNumber: jumiPr.number,
+            headSha: jumiPr.head.sha,
             delivery: `scan-${owner}-${repo}-${issue.number}`,
             receivedAt: new Date(nowMs).toISOString(),
           });

@@ -440,6 +440,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       maxOutputBytes: opts.maxOutputBytes,
       reviewLabel: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
       logger: log,
+      abortSignal: opts.abortSignal,
       onPid: opts.onPid,
     });
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
@@ -478,12 +479,18 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const claimPath = claimFilePath(opts.home, owner, repo, issueNumber);
   const statePath = conflictStatePath(opts.home, owner, repo, issueNumber);
   const sanitizeEnv = opts.sanitizeOpenCodeEnv ?? true;
+  const useClaim = opts.useClaim !== false;
+  const forgetClaim = async () => {
+    if (useClaim) await deleteClaim(claimPath);
+  };
 
   throwIfAborted(opts.abortSignal);
 
   const startedAt = now().toISOString();
-  const existingClaim = await readClaim(claimPath);
-  if (existingClaim?.terminal) await deleteClaim(claimPath);
+  if (useClaim) {
+    const existingClaim = await readClaim(claimPath);
+    if (existingClaim?.terminal) await forgetClaim();
+  }
 
   const claim: ClaimRecord = {
     pid: 0,
@@ -495,9 +502,11 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     headShaAtStart: "",
     terminal: false,
   };
-  const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
-  if (!acquired) {
-    return { status: "skipped", reason: "claim is live" };
+  if (useClaim) {
+    const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
+    if (!acquired) {
+      return { status: "skipped", reason: "claim is live" };
+    }
   }
 
   const sticky = (body: string, index: number) =>
@@ -506,31 +515,31 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   try {
     const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
     if (!isAssignedToBot(currentIssue, opts.botUsername) || currentIssue.state !== "open") {
-      await deleteClaim(claimPath);
+      await forgetClaim();
       return { status: "cancelled" };
     }
   } catch (err) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
   }
 
   const pr = await findOpenJumiClosingPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername);
   if (!pr) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
   }
 
   const branch = pr.head.ref;
   claim.branch = branch;
   if (!branch || branch === opts.job.defaultBranch) {
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "skipped", reason: "refusing to merge on the default branch" };
   }
 
   const state = await readConflictState(statePath);
   if (state.round >= MAX_CONFLICT_ROUNDS) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
-    await deleteClaim(claimPath);
+    await forgetClaim();
     return { status: "stuck" };
   }
 
@@ -568,7 +577,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     await serializeClaim(async () => undefined);
   };
   heartbeat =
-    heartbeatMs > 0
+    heartbeatMs > 0 && useClaim
       ? setInterval(() => {
           void serializeClaim(async () => {
             if (heartbeatStopped) return;
@@ -617,7 +626,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       .catch(() => false);
     if (!originExists) {
       await stopHeartbeat();
-      await deleteClaim(claimPath);
+      await forgetClaim();
       await detachWorktree();
       return { status: "skipped", reason: `missing branch ${branch}` };
     }
@@ -642,7 +651,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     attemptedHeadSha = headSha;
     attemptedBaseSha = baseSha;
     await serializeClaim(async () => {
-      if (heartbeatStopped) return;
+      if (heartbeatStopped || !useClaim) return;
       claim.headShaAtStart = headSha;
       claim.heartbeatAt = now().toISOString();
       await writeClaim(claimPath, claim);
@@ -650,7 +659,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
     if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
       await stopHeartbeat();
-      await deleteClaim(claimPath);
+      await forgetClaim();
       await detachWorktree();
       return { status: "skipped", reason: "same head and base already attempted" };
     }
@@ -686,8 +695,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       logger: log,
       abortSignal: opts.abortSignal,
       onPid: async (pid) => {
+        await opts.onPid?.(pid);
         await serializeClaim(async () => {
-          if (heartbeatStopped) return;
+          if (heartbeatStopped || !useClaim) return;
           const current = await readClaim(claimPath);
           if (heartbeatStopped || !current || current.terminal) return;
           current.pid = pid;
@@ -703,7 +713,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     if (mergeResult.status === "up-to-date") {
       await stopHeartbeat();
       await serializeClaim(async () => {
-        await deleteClaim(claimPath);
+        await forgetClaim();
       });
       await detachWorktree();
       return { status: "up-to-date" };
@@ -714,7 +724,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
       await stopHeartbeat();
       await serializeClaim(async () => {
-        await deleteClaim(claimPath);
+        await forgetClaim();
       });
       await detachWorktree();
       return { status: "stuck" };
@@ -737,7 +747,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         await runConfiguredGit(["reset", "--hard", `origin/${branch}`], { cwd: worktree, env });
         await stopHeartbeat();
         await serializeClaim(async () => {
-          await deleteClaim(claimPath);
+          await forgetClaim();
         });
         await detachWorktree();
         return { status: "skipped", reason: "remote already contains default" };
@@ -750,7 +760,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
     await stopHeartbeat();
     await serializeClaim(async () => {
-      await deleteClaim(claimPath);
+      await forgetClaim();
     });
     await detachWorktree();
     return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
@@ -766,7 +776,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     }
     await stopHeartbeat();
     await serializeClaim(async () => {
-      await deleteClaim(claimPath);
+      await forgetClaim();
     }).catch(() => undefined);
     await detachWorktree();
     throw err;

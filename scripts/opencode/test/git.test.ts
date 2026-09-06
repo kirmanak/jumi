@@ -131,6 +131,26 @@ exit 7
     );
   });
 
+  test("kills the child when aborted", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const abort = new AbortController();
+        const run = runOpenCode("prompt", {
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          abortSignal: abort.signal,
+        });
+        await Bun.sleep(50);
+        abort.abort();
+        await expect(run).rejects.toMatchObject({ name: "AbortError", message: "cancelled" });
+      }
+    );
+  });
+
   test("caps stderr captured from failed opencode runs", async () => {
     await withFakeOpenCode(
       `#!/bin/sh

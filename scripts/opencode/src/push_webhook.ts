@@ -88,6 +88,7 @@ export async function shouldEnqueuePushConflicts(
         cloneUrl: payload.repository.clone_url,
         mode: "conflict",
         prNumber: pr.number,
+        headSha: pr.head.sha,
         trigger: { event: "push", sender },
       });
     } catch (err) {

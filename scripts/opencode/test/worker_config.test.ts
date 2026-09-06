@@ -14,12 +14,19 @@ describe("loadWorkerConfig", () => {
   test("does not require DATABASE_URL or JUMI_ROLE", () => {
     const config = loadWorkerConfig({
       ...required,
-      DATABASE_URL: "postgres://should-be-ignored",
       JUMI_ROLE: "router",
     });
     expect(config.giteaUrl).toBe("https://gitea.kirmanak.stream");
-    expect(config).not.toHaveProperty("databaseUrl");
+    expect(config.databaseUrl).toBeUndefined();
     expect(config).not.toHaveProperty("role");
+  });
+
+  test("loads optional DATABASE_URL when set", () => {
+    const config = loadWorkerConfig({
+      ...required,
+      DATABASE_URL: "postgres://jumi",
+    });
+    expect(config.databaseUrl).toBe("postgres://jumi");
   });
 });
 
