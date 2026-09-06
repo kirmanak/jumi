@@ -112,8 +112,10 @@ function markerFor(owner: string, repo: string, prNumber: number): string {
   return `<!-- jumi-review:${owner}/${repo}#${prNumber} -->`;
 }
 
-function buildCommentBody(marker: string, headSha: string, output: string): string {
-  return `${marker}\n### Jumi OpenCode review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`;
+function buildCommentBody(marker: string, headSha: string, output: string, checkLine?: string): string {
+  const body = `${marker}\n### Jumi OpenCode review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`;
+  if (!checkLine) return body;
+  return `${body.trimEnd()}\n\n${checkLine}`;
 }
 
 const CHECK_CONTEXT = "jumi/opencode-review";
@@ -478,7 +480,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
       const marker = markerFor(opts.owner, opts.repo, currentPR.number);
       const parsed = parseReviewOutput(artifact.content);
-      const body = buildCommentBody(marker, reviewedHeadSha, parsed.comment);
+      const body = buildCommentBody(marker, reviewedHeadSha, parsed.comment, parsed.checkLine);
       await logParentDiag(log, "post_find_sticky", {
         review: reviewLabel,
         body_bytes: byteLength(body),

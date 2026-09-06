@@ -25,7 +25,7 @@ The service posts `jumi/opencode-review` on the PR head SHA from an explicit tra
 - `failure` if OpenCode crashes, returns empty output, or omits the trailer
 - `warning` when a queued job is skipped after it already went pending (for example the PR head changed)
 
-The trailer is stripped from the sticky comment. Title-gated skips (`WIP:`, `[skip review]`) still post no status.
+The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure. Title-gated skips (`WIP:`, `[skip review]`) still post no status.
 
 The service intentionally does not checkout or execute PR-head code. It reviews Gitea's PR metadata and file patches from the trusted Gitea API.
 

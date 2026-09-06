@@ -2,10 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isJumiReviewFinding } from "../src/followup.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { reviewPullRequest } from "../src/review.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
+
+function lastNonEmptyLine(text: string): string {
+  const lines = text.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line) return line;
+  }
+  return "";
+}
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   const defaults: ReviewApi = {
@@ -62,6 +72,16 @@ function reviewOptions(workspace: string, gitRunner: GitRunner = frozenGit()) {
   return { ...skipOptions, workspace, gitRunner };
 }
 
+const REVIEW_SHA = "d90b7289701097dae3ffa3dc0ccdc348be552697";
+
+function reviewOptionsWithSha(workspace: string, sha = REVIEW_SHA) {
+  return {
+    ...skipOptions,
+    workspace,
+    gitRunner: frozenGit({ head: sha }),
+  };
+}
+
 describe("reviewPullRequest", () => {
   test("skips closed, merged, WIP, and skip-review PRs", async () => {
     const runner = async () => {
@@ -109,8 +129,9 @@ describe("reviewPullRequest", () => {
         target_url?: string;
       }> = [];
       const result = await reviewPullRequest({
-        ...reviewOptions(workspace),
+        ...reviewOptionsWithSha(workspace),
         api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             createdBody = body;
             return makeComment({ id: 123, body });
@@ -128,21 +149,22 @@ describe("reviewPullRequest", () => {
 
       expect(result).toEqual({ status: "posted", commentId: 123 });
       expect(createdBody).toContain("<!-- jumi-review:kirmanak/demo#7 -->");
-      expect(createdBody).toContain("Reviewed commit: `headsha`");
+      expect(createdBody).toContain(`Reviewed commit: \`${REVIEW_SHA}\``);
       expect(createdBody).toContain("Looks good");
       expect(createdBody).not.toContain("I'll inspect");
-      expect(createdBody).not.toContain("jumi-check");
+      expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: success -->");
+      expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(false);
       await expect(access(join(workspace, "JUMI_REVIEW.md"))).rejects.toThrow();
       expect(statuses).toEqual([
         {
-          sha: "headsha",
+          sha: REVIEW_SHA,
           state: "pending",
           context: "jumi/opencode-review",
           description: "Jumi review is running",
           target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
         },
         {
-          sha: "headsha",
+          sha: REVIEW_SHA,
           state: "success",
           context: "jumi/opencode-review",
           description: "No blocking issues",
@@ -173,6 +195,7 @@ describe("reviewPullRequest", () => {
       expect(result).toEqual({ status: "updated", commentId: 99 });
       expect(updatedBody).toContain("Updated review");
       expect(updatedBody).not.toContain("I'll inspect");
+      expect(lastNonEmptyLine(updatedBody)).toBe("<!-- jumi-check: success -->");
     });
   });
 
@@ -334,13 +357,14 @@ describe("reviewPullRequest", () => {
     });
   });
 
-  test("parses the trailer from JUMI_REVIEW.md and strips it from the sticky", async () => {
+  test("keeps a failure trailer on the sticky for worker follow-up", async () => {
     await withWorkspace(async (workspace) => {
       let createdBody = "";
       const statuses: Array<{ state: string; description?: string }> = [];
       const result = await reviewPullRequest({
-        ...reviewOptions(workspace),
+        ...reviewOptionsWithSha(workspace),
         api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             createdBody = body;
             return makeComment({ id: 44, body });
@@ -353,7 +377,7 @@ describe("reviewPullRequest", () => {
         openCodeRunner: async () => {
           await writeReview(
             workspace,
-            "L12: 🔴 bug: null deref. Guard it.\nL40: 🟡 risk: swallowed error. Fail closed.\n<!-- jumi-check: failure; 1 blocking, 1 risk -->"
+            "L12: 🔴 bug: null deref. Guard it.\nL40: 🟡 risk: swallowed error. Fail closed.\n<!-- jumi-check: failure; 2 blocking -->"
           );
           return "I'll inspect…";
         },
@@ -361,10 +385,11 @@ describe("reviewPullRequest", () => {
 
       expect(result.status).toBe("posted");
       expect(createdBody).toContain("L12: 🔴 bug: null deref");
-      expect(createdBody).not.toContain("jumi-check");
       expect(createdBody).not.toContain("I'll inspect");
+      expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: failure; 2 blocking -->");
+      expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(true);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
-      expect(statuses[1].description).toBe("1 blocking, 1 risk");
+      expect(statuses[1].description).toBe("2 blocking");
     });
   });
 
@@ -373,8 +398,9 @@ describe("reviewPullRequest", () => {
       let createdBody = "";
       const statuses: Array<{ state: string; description?: string }> = [];
       const result = await reviewPullRequest({
-        ...reviewOptions(workspace),
+        ...reviewOptionsWithSha(workspace),
         api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             createdBody = body;
             return makeComment({ id: 44, body });
@@ -393,9 +419,24 @@ describe("reviewPullRequest", () => {
       expect(result).toEqual({ status: "posted", commentId: 44 });
       expect(createdBody).toContain("No correctness bugs found.");
       expect(createdBody).not.toContain("I'll inspect");
+      expect(createdBody).not.toContain("jumi-check");
+      expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(false);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("Incomplete review: no check verdict");
     });
+  });
+
+  test("does not treat a #136-shaped sticky without a trailer as a finding", () => {
+    const body = [
+      "<!-- jumi-review:personal/jumi#136 -->",
+      "### Jumi OpenCode review",
+      "",
+      "Reviewed commit: `d90b7289701097dae3ffa3dc0ccdc348be552697`",
+      "",
+      "L12: 🔴 bug: null deref. Guard it.",
+      "L40: 🔴 bug: swallowed error. Fail closed.",
+    ].join("\n");
+    expect(isJumiReviewFinding({ body }, "d90b7289701097dae3ffa3dc0ccdc348be552697")).toBe(false);
   });
 
   test("keeps a questions-only review green when the artifact reports success", async () => {

@@ -9,6 +9,7 @@ export interface ReviewVerdict {
 export interface ParsedReviewOutput {
   comment: string;
   verdict: ReviewVerdict;
+  checkLine?: string;
 }
 
 const CHECK_LINE_RE = /^<!--\s*jumi-check:\s*(success|failure)(?:\s*;\s*([^>]*?))?\s*-->$/i;
@@ -47,7 +48,8 @@ export function parseReviewOutput(output: string): ParsedReviewOutput {
     };
   }
 
-  const check = parseCheckLine(lastNonEmptyLine(text));
+  const lastLine = lastNonEmptyLine(text);
+  const check = parseCheckLine(lastLine);
   const comment = stripCheckComments(text);
   if (!check) {
     return {
@@ -59,6 +61,7 @@ export function parseReviewOutput(output: string): ParsedReviewOutput {
   const description = check.reason || (check.state === "success" ? "No blocking issues" : "Review requested changes");
   return {
     comment,
+    checkLine: lastLine,
     verdict: { state: check.state, description, incomplete: false },
   };
 }

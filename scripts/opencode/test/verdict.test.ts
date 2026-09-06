@@ -5,6 +5,7 @@ describe("parseReviewOutput", () => {
   test("reads an explicit success check and strips it from the comment", () => {
     expect(parseReviewOutput("Looks good.\n\nNo correctness bugs.\n<!-- jumi-check: success -->")).toEqual({
       comment: "Looks good.\n\nNo correctness bugs.",
+      checkLine: "<!-- jumi-check: success -->",
       verdict: { state: "success", description: "No blocking issues", incomplete: false },
     });
   });
@@ -17,6 +18,7 @@ describe("parseReviewOutput", () => {
     ].join("\n");
     expect(parseReviewOutput(output)).toEqual({
       comment: "L12: 🔴 bug: null deref. Guard it.\nL40: 🟡 risk: swallowed error. Fail closed.",
+      checkLine: "<!-- jumi-check: failure; 1 blocking, 1 risk -->",
       verdict: { state: "failure", description: "1 blocking, 1 risk", incomplete: false },
     });
   });
