@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { HEARTBEAT_MS, MemoryReviewJobStore, PgReviewJobStore, RECLAIM_LEASED_BY } from "../src/review_jobs.ts";
+import {
+  HEARTBEAT_MS,
+  MemoryReviewJobStore,
+  PgReviewJobStore,
+  pgTextArrayLiteral,
+  RECLAIM_LEASED_BY,
+  WORKER_JOB_KINDS,
+} from "../src/review_jobs.ts";
 import { makeJob } from "./fixtures.ts";
 
 describe("MemoryReviewJobStore", () => {
@@ -512,5 +519,53 @@ describe("PgReviewJobStore.reclaimExpired", () => {
     const second = await store.reclaimExpired(2, new Date(5_000), 30_000);
     expect(second.publish).toHaveLength(0);
     expect(second.requeued).toHaveLength(0);
+  });
+});
+
+describe("pgTextArrayLiteral", () => {
+  test("formats closed job kinds as a postgres array literal, not a comma-string", () => {
+    expect(pgTextArrayLiteral(["review"])).toBe("{review}");
+    expect(pgTextArrayLiteral(["implement", "follow-up", "conflict"])).toBe("{implement,follow-up,conflict}");
+    expect(pgTextArrayLiteral([])).toBe("{}");
+  });
+
+  test("refuses elements that would break the literal", () => {
+    expect(() => pgTextArrayLiteral(["review,queued"])).toThrow(/refusing to bind/);
+  });
+});
+
+describe("PgReviewJobStore kind ANY() bind", () => {
+  test("lease/reclaim/cancel bind text[] literals instead of JS arrays", async () => {
+    const captured: { query: string; params?: unknown[] }[] = [];
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        captured.push({ query, params });
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+
+    await store.lease("engine-1", 60_000, new Date(0));
+    const leaseReview = captured.find((row) => row.query.includes("state = 'queued' AND kind = ANY($3::text[])"));
+    expect(leaseReview?.params?.[2]).toBe("{review}");
+    expect(Array.isArray(leaseReview?.params?.[2])).toBe(false);
+
+    captured.length = 0;
+    await store.lease("worker-1", 60_000, new Date(0), WORKER_JOB_KINDS);
+    const leaseWorker = captured.find((row) => row.query.includes("kind = ANY($3::text[])"));
+    expect(leaseWorker?.params?.[2]).toBe("{implement,follow-up,conflict}");
+
+    captured.length = 0;
+    await store.reclaimExpired(2, new Date(5_000), 30_000, WORKER_JOB_KINDS);
+    const reclaim = captured.find((row) => row.query.includes("kind = ANY($2::text[])"));
+    expect(reclaim?.params?.[1]).toBe("{implement,follow-up,conflict}");
+
+    captured.length = 0;
+    await store.cancelQueuedForIssue("personal", "jumi", 149);
+    const cancel = captured.find((row) => row.query.includes("kind = ANY($4::text[])"));
+    expect(cancel?.params?.[3]).toBe("{implement,follow-up,conflict}");
   });
 });

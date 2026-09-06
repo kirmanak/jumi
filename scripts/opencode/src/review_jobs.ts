@@ -263,6 +263,27 @@ function kindsOrReview(kinds?: readonly JobKind[]): readonly JobKind[] {
   return kinds && kinds.length > 0 ? kinds : [REVIEW_KIND];
 }
 
+const PG_TEXT_ARRAY_ELEMENT = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Bun `SQL.unsafe` stringifies JS arrays as `"a,b"`. Postgres then rejects
+ * `ANY($n::text[])` with 22P02 (`malformed array literal: "review"`).
+ */
+export function pgTextArrayLiteral(values: readonly string[]): string {
+  if (values.length === 0) return "{}";
+  for (const value of values) {
+    if (!PG_TEXT_ARRAY_ELEMENT.test(value)) {
+      throw new Error(`refusing to bind ${JSON.stringify(value)} as a postgres text[] element`);
+    }
+  }
+  return `{${values.join(",")}}`;
+}
+
+function bindUnsafeParams(params?: unknown[]): unknown[] | undefined {
+  if (!params) return params;
+  return params.map((value) => (Array.isArray(value) ? pgTextArrayLiteral(value.map(String)) : value));
+}
+
 function isImplementTerminal(
   row: Pick<ReviewJobRecord, "kind" | "state" | "resultReason" | "payload">,
   job: IssueJob
@@ -703,7 +724,7 @@ function wrapClient(client: SqlClient): SqlClient {
   return {
     async unsafe(query, params) {
       try {
-        return await client.unsafe(query, params);
+        return await client.unsafe(query, bindUnsafeParams(params));
       } catch (err) {
         wrapSqlError(err);
       }
@@ -900,7 +921,7 @@ export class PgReviewJobStore implements ReviewJobStore {
            LIMIT 1
          )
          RETURNING *`,
-        [leasedBy, new Date(now.getTime() + leaseMs).toISOString(), [...allowed]]
+        [leasedBy, new Date(now.getTime() + leaseMs).toISOString(), pgTextArrayLiteral(allowed)]
       )
     );
     return rows[0] ? mapRow(rows[0]) : undefined;
@@ -1020,7 +1041,7 @@ export class PgReviewJobStore implements ReviewJobStore {
            WHERE state = 'leased' AND leased_until < $1::timestamptz AND kind = ANY($2::text[])
            ORDER BY id
            FOR UPDATE SKIP LOCKED`,
-          [ts, [...allowed]]
+          [ts, pgTextArrayLiteral(allowed)]
         )
       );
 
@@ -1105,7 +1126,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, updated_at = NOW()
          WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
          RETURNING id`,
-        [owner, repo, issueNumber, [...WORKER_JOB_KINDS]]
+        [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
       )
     );
     return rows.length;
