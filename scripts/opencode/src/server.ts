@@ -1,12 +1,13 @@
 import { hostname } from "node:os";
-import { GiteaAPI } from "./api.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
+import type { Engine } from "./engine.ts";
+import { createGiteaForge } from "./forge.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { ReviewQueue } from "./queue.ts";
-import type { OpenCodeRunner, PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
+import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import { publishReviewResult, reviewJobKey, reviewPullRequest } from "./review.ts";
 import {
   createPgReviewJobStore,
@@ -58,7 +59,8 @@ export interface FetchHandlerDeps {
 
 export interface RunReviewJobExtras {
   persistResult?: (result: PersistReviewResult) => Promise<void>;
-  openCodeRunner?: OpenCodeRunner;
+  engine?: Engine;
+  openCodeRunner?: Engine;
   workspacePreparer?: WorkspacePreparer;
   gitRunner?: GitRunner;
 }
@@ -92,7 +94,7 @@ export async function runReviewJob(
       maxOutputBytes: config.maxOutputBytes,
       logger: (message) => logger(message),
       persistResult: extras.persistResult,
-      openCodeRunner: extras.openCodeRunner,
+      engine: extras.engine ?? extras.openCodeRunner,
       workspacePreparer: extras.workspacePreparer,
       gitRunner: extras.gitRunner,
     });
@@ -123,7 +125,7 @@ export async function runReviewJob(
 
 export function createReviewQueue(
   config: ServiceConfig,
-  api: ReviewApi = new GiteaAPI(config.giteaUrl, config.giteaToken),
+  api: ReviewApi = createGiteaForge(config.giteaUrl, config.giteaToken),
   logger: (message: string) => void = log
 ): ReviewQueue {
   return new ReviewQueue(
@@ -421,7 +423,7 @@ async function serveAndWait(
 
 export async function startReviewer(config: ServiceConfig, deps: StartReviewerDeps = {}): Promise<StartedReviewer> {
   const logger = deps.logger ?? log;
-  const api = deps.api ?? new GiteaAPI(config.giteaUrl, config.giteaToken);
+  const api = deps.api ?? createGiteaForge(config.giteaUrl, config.giteaToken);
 
   if (shouldSeedOpenCodeAuth(config.role)) {
     await (deps.ensureAuth ?? ensureOpenCodeWellKnownAuth)({

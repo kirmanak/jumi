@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import type { GiteaPR, GiteaRepo, ReviewJob } from "./types.ts";
 
 interface GitAuth {
@@ -122,10 +123,10 @@ export function gitOpenCodeChildEnv(auth: GitAuth): Record<string, string> {
     GIT_AUTH_HOST: env.GIT_AUTH_HOST ?? "",
     GIT_AUTH_USERNAME: env.GIT_AUTH_USERNAME ?? "",
     GIT_AUTH_TOKEN: env.GIT_AUTH_TOKEN ?? "",
-    GIT_AUTHOR_NAME: "jumi",
-    GIT_AUTHOR_EMAIL: "jumi@noreply.kirmanak.stream",
-    GIT_COMMITTER_NAME: "jumi",
-    GIT_COMMITTER_EMAIL: "jumi@noreply.kirmanak.stream",
+    GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
+    GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
+    GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
     GIT_CONFIG_COUNT: "3",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: "",
@@ -149,10 +150,10 @@ export function gitEnv(auth: GitAuth): Record<string, string | undefined> {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_LFS_SKIP_SMUDGE: "1",
-    GIT_AUTHOR_NAME: "jumi",
-    GIT_AUTHOR_EMAIL: "jumi@noreply.kirmanak.stream",
-    GIT_COMMITTER_NAME: "jumi",
-    GIT_COMMITTER_EMAIL: "jumi@noreply.kirmanak.stream",
+    GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
+    GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
+    GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
     GIT_AUTH_HOST: gitea.host,
     GIT_AUTH_USERNAME: auth.username,
     GIT_AUTH_TOKEN: auth.token,

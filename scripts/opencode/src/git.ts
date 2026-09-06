@@ -11,6 +11,7 @@ import {
   sampleMemory,
   trackMemoryPeak,
 } from "./diagnostics.ts";
+import type { Engine, EngineRunOptions } from "./engine.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -30,23 +31,7 @@ function stripAnsi(str: string): string {
  * consumed concurrently to prevent pipe-buffer deadlocks (64KB on Linux).
  * A non-zero exit code is surfaced as a thrown Error.
  */
-export interface OpenCodeRunOptions {
-  model: string;
-  workdir: string;
-  configPath?: string;
-  home?: string;
-  sanitizeEnv?: boolean;
-  timeoutMs?: number;
-  maxOutputBytes?: number;
-  /** Optional review label for structured diagnostics (e.g. org/repo#123). */
-  reviewLabel?: string;
-  /** RSS sample interval for the OpenCode child (ms). Default 5000. */
-  memorySampleIntervalMs?: number;
-  /** Extra env for sanitized runs. GITEA_* keys are dropped. */
-  extraEnv?: Record<string, string>;
-  onPid?: (pid: number) => void | Promise<void>;
-  logger?: (message: string) => void;
-}
+export type OpenCodeRunOptions = EngineRunOptions;
 
 function buildEnv(
   opts: OpenCodeRunOptions,
@@ -288,3 +273,5 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
     await rm(tmpDir, { recursive: true, force: true });
   }
 }
+
+export const openCodeEngine: Engine = runOpenCode;

@@ -12,19 +12,18 @@ import {
   readClaim,
   writeClaim,
 } from "./claim.ts";
-import type { OpenCodeRunOptions } from "./git.ts";
-import { runOpenCode } from "./git.ts";
+import { type Engine, resolveEngine } from "./engine.ts";
+import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
+import { openCodeEngine } from "./git.ts";
 import { closesIssuePattern, findOpenClosingPullRequest, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import type { IssueJob } from "./types.ts";
 import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
-const COMMIT_NAME = "jumi";
-const COMMIT_EMAIL = "jumi@noreply.kirmanak.stream";
 const PR_BODY_MAX_CHARS = 8000;
 const PR_DESCRIPTION_FILE = "JUMI_PR.md";
 
-export type OpenCodeRunner = (prompt: string, opts: OpenCodeRunOptions) => Promise<string>;
+export type OpenCodeRunner = Engine;
 
 export type HelmRunner = (args: string[], opts: { cwd: string }) => Promise<string>;
 
@@ -50,7 +49,8 @@ export interface ImplementOptions {
   heartbeatIntervalMs?: number;
   abortSignal?: AbortSignal;
   gitRunner?: GitRunner;
-  openCodeRunner?: OpenCodeRunner;
+  engine?: Engine;
+  openCodeRunner?: Engine;
   helmRunner?: HelmRunner;
   now?: () => Date;
   pid?: number;
@@ -139,7 +139,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
   const now = () => opts.now?.() ?? new Date();
   const pidAlive = opts.pidAlive ?? isPidAlive;
   const git = opts.gitRunner ?? runGit;
-  const openCodeRunner = opts.openCodeRunner ?? runOpenCode;
+  const engine = resolveEngine(opts, openCodeEngine);
   const owner = assertSafeSegment(opts.job.owner, "owner");
   const repo = assertSafeSegment(opts.job.repo, "repo");
   const issueNumber = opts.job.issueNumber;
@@ -307,7 +307,7 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
 
     throwIfAborted(opts.abortSignal);
     log(`Running OpenCode for ${owner}/${repo}#${issueNumber}`);
-    await openCodeRunner(IMPLEMENT_PROMPT, {
+    await engine(IMPLEMENT_PROMPT, {
       model: opts.model,
       workdir: worktree,
       configPath: opts.opencodeConfig,
@@ -364,10 +364,10 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
     if (porcelain) {
       const commitEnv = {
         ...env,
-        GIT_AUTHOR_NAME: COMMIT_NAME,
-        GIT_AUTHOR_EMAIL: COMMIT_EMAIL,
-        GIT_COMMITTER_NAME: COMMIT_NAME,
-        GIT_COMMITTER_EMAIL: COMMIT_EMAIL,
+        GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
+        GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
+        GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
+        GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
       };
       await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
       await runConfiguredGit(["commit", "-m", `Implement #${issueNumber}: ${opts.job.title}`], {

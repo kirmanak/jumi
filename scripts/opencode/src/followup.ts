@@ -19,8 +19,10 @@ import {
   shouldIncrementRound,
   writeConflictState,
 } from "./conflict.ts";
+import { resolveEngine } from "./engine.ts";
 import { isJumiInternalBody, isJumiWorkerBody } from "./followup_webhook.ts";
-import { runOpenCode } from "./git.ts";
+import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
+import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { findOpenJumiClosingPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
@@ -31,8 +33,6 @@ import { gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_FOLLOWUP_ROUNDS = 3;
 export const FEEDBACK_MAX_BYTES = 32 * 1024;
-const COMMIT_NAME = "jumi";
-const COMMIT_EMAIL = "jumi@noreply.kirmanak.stream";
 
 export const FOLLOWUP_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
 Address the feedback in this repository on the current branch.
@@ -461,7 +461,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   const now = () => opts.now?.() ?? new Date();
   const pidAlive = opts.pidAlive ?? isPidAlive;
   const git = opts.gitRunner ?? runGit;
-  const openCodeRunner = opts.openCodeRunner ?? runOpenCode;
+  const engine = resolveEngine(opts, openCodeEngine);
   const owner = assertSafeSegment(opts.job.owner, "owner");
   const repo = assertSafeSegment(opts.job.repo, "repo");
   const issueNumber = opts.job.issueNumber;
@@ -706,7 +706,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         token: opts.giteaToken,
       }),
       maxOutputBytes: opts.maxOutputBytes,
-      openCodeRunner,
+      openCodeRunner: engine,
       helmRunner: opts.helmRunner,
       logger: log,
       abortSignal: opts.abortSignal,
@@ -775,7 +775,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
 
     throwIfAborted(opts.abortSignal);
     log(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
-    await openCodeRunner(FOLLOWUP_PROMPT, {
+    await engine(FOLLOWUP_PROMPT, {
       model: opts.model,
       workdir: worktree,
       configPath: opts.opencodeConfig,
@@ -831,10 +831,10 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     if (porcelain) {
       const commitEnv = {
         ...env,
-        GIT_AUTHOR_NAME: COMMIT_NAME,
-        GIT_AUTHOR_EMAIL: COMMIT_EMAIL,
-        GIT_COMMITTER_NAME: COMMIT_NAME,
-        GIT_COMMITTER_EMAIL: COMMIT_EMAIL,
+        GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
+        GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
+        GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
+        GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
       };
       await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
       await runConfiguredGit(["commit", "-m", `Address review on #${pr.number}: ${opts.job.title}`], {

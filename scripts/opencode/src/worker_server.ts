@@ -1,4 +1,3 @@
-import { GiteaAPI } from "./api.ts";
 import { scrubSecretEnv } from "./config.ts";
 import {
   parseIssueCommentPayload,
@@ -6,6 +5,7 @@ import {
   shouldEnqueueIssueCommentFollowUp,
   shouldEnqueuePullRejectedFollowUp,
 } from "./followup_webhook.ts";
+import { createGiteaForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { parseIssuesPayload, shouldEnqueueIssue } from "./issue_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
@@ -226,7 +226,7 @@ async function main() {
     token: config.opencodeWellKnownToken,
     logger: log,
   });
-  const api = new GiteaAPI(config.giteaUrl, config.giteaToken);
+  const api = createGiteaForge(config.giteaUrl, config.giteaToken);
   const queue: ReviewQueue<IssueJob> = createIssueQueue(config, api);
   const server = Bun.serve({
     hostname: config.host,

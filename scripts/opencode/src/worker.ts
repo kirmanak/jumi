@@ -1,7 +1,7 @@
-import { GiteaAPI } from "./api.ts";
 import { claimFilePath, conflictStatePath, deleteClaim, followUpStatePath, readClaim } from "./claim.ts";
 import { CONFLICT_TIMEOUT_MS, implementConflict } from "./conflict.ts";
 import { FOLLOWUP_TIMEOUT_MS, implementFollowUp } from "./followup.ts";
+import { createGiteaForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { ReviewQueue } from "./queue.ts";
@@ -21,7 +21,7 @@ function log(message: string) {
 
 export function createIssueQueue(
   config: WorkerConfig,
-  api: IssueApi = new GiteaAPI(config.giteaUrl, config.giteaToken),
+  api: IssueApi = createGiteaForge(config.giteaUrl, config.giteaToken),
   logger: (message: string) => void = log
 ): ReviewQueue<IssueJob> {
   const aborts = new Map<string, AbortController>();

@@ -11,7 +11,9 @@ import {
   readClaim,
   writeClaim,
 } from "./claim.ts";
-import { runOpenCode } from "./git.ts";
+import { resolveEngine } from "./engine.ts";
+import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
+import { openCodeEngine } from "./git.ts";
 import { findOpenJumiClosingPullRequest, isInScopeJumiPR, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   buildTaskMarkdown,
@@ -25,8 +27,7 @@ import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, val
 
 export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_CONFLICT_ROUNDS = 3;
-const COMMIT_NAME = "jumi";
-const COMMIT_EMAIL = "jumi@noreply.kirmanak.stream";
+
 const GENERATED_LOCKS = new Set(["Chart.lock", "requirements.lock"]);
 
 export const CONFLICT_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_CONFLICT.md (merge vs the default branch).
@@ -320,10 +321,10 @@ async function commitMerge(
 ): Promise<void> {
   const commitEnv = {
     ...env,
-    GIT_AUTHOR_NAME: COMMIT_NAME,
-    GIT_AUTHOR_EMAIL: COMMIT_EMAIL,
-    GIT_COMMITTER_NAME: COMMIT_NAME,
-    GIT_COMMITTER_EMAIL: COMMIT_EMAIL,
+    GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
+    GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
+    GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
   };
   await git(["commit", "-m", `Merge ${defaultBranch} into ${headRef}`], { cwd: worktree, env: commitEnv });
 }
@@ -468,7 +469,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const now = () => opts.now?.() ?? new Date();
   const pidAlive = opts.pidAlive ?? isPidAlive;
   const git = opts.gitRunner ?? runGit;
-  const openCodeRunner = opts.openCodeRunner ?? runOpenCode;
+  const engine = resolveEngine(opts, openCodeEngine);
   const owner = assertSafeSegment(opts.job.owner, "owner");
   const repo = assertSafeSegment(opts.job.repo, "repo");
   const issueNumber = opts.job.issueNumber;
@@ -680,7 +681,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         token: opts.giteaToken,
       }),
       maxOutputBytes: opts.maxOutputBytes,
-      openCodeRunner,
+      openCodeRunner: engine,
       helmRunner: opts.helmRunner,
       logger: log,
       abortSignal: opts.abortSignal,

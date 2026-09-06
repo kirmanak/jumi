@@ -1,8 +1,8 @@
 import { lstat, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
-import type { OpenCodeRunOptions } from "./git.ts";
-import { runOpenCode } from "./git.ts";
+import { type Engine, resolveEngine } from "./engine.ts";
+import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
@@ -56,7 +56,7 @@ export interface ReviewApi {
   ): Promise<GiteaCommitStatusPayload>;
 }
 
-export type OpenCodeRunner = (prompt: string, opts: OpenCodeRunOptions) => Promise<string>;
+export type OpenCodeRunner = Engine;
 export type WorkspacePreparer = (opts: {
   workdir: string;
   repo: GiteaRepo;
@@ -86,7 +86,8 @@ export interface ReviewOptions {
   maxPatchBytes?: number;
   maxThreadBytes?: number;
   maxOutputBytes?: number;
-  openCodeRunner?: OpenCodeRunner;
+  engine?: Engine;
+  openCodeRunner?: Engine;
   workspacePreparer?: WorkspacePreparer;
   gitRunner?: GitRunner;
   logger?: (message: string) => void;
@@ -390,7 +391,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
 
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
-  const openCodeRunner = opts.openCodeRunner ?? runOpenCode;
+  const engine = resolveEngine(opts, openCodeEngine);
   const repoFullName = `${opts.owner}/${opts.repo}`;
   const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
   const reviewedHeadSha = opts.expectedHeadSha ?? pr.head.sha;
@@ -508,7 +509,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     });
 
     log(`Running OpenCode for ${repoFullName}#${pr.number}`);
-    const output = await openCodeRunner(prompt, {
+    const output = await engine(prompt, {
       model: opts.model,
       workdir: opts.workspace,
       configPath: opts.opencodeConfig,
