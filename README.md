@@ -73,6 +73,7 @@ The reviewer image workflow publishes:
 ```text
 gitea.kirmanak.stream/personal/jumi-reviewer:<commit-sha>
 gitea.kirmanak.stream/personal/jumi-reviewer:latest
+gitea.kirmanak.stream/personal/jumi-reviewer:vX.Y.Z
 ```
 
 The worker image workflow publishes:
@@ -80,7 +81,10 @@ The worker image workflow publishes:
 ```text
 gitea.kirmanak.stream/personal/jumi-worker:<commit-sha>
 gitea.kirmanak.stream/personal/jumi-worker:latest
+gitea.kirmanak.stream/personal/jumi-worker:vX.Y.Z
 ```
+
+Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, additive GitOps → minor, removed required keys or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA). GitOps pin/changelog wiring is a follow-up in `server_configuration`, not this repo.
 
 Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml` and `.gitea/workflows/jumi-worker-image.yml`:
 
@@ -252,6 +256,9 @@ bun run server
     opencode-checks.yml      # PR lint/typecheck/test and image build checks
     jumi-reviewer-image.yml  # Reviewer image build/push workflow
     jumi-worker-image.yml    # Worker image build/push workflow
+    jumi-release.yml         # Annotated vX.Y.Z git tag + Gitea Release
+deploy/
+  contract.md                # GitOps runtime contract (semver source of truth)
 review-skills/
   gitops-apply-review/       # Baked reviewer skill (copied to /app/review-skills)
 scripts/

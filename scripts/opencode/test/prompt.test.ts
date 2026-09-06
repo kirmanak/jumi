@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPROpenedPrompt, touchesGitOpsApplyReview } from "../src/prompt.ts";
+import { buildPROpenedPrompt, shouldLoadGitOpsApplyReview, touchesGitOpsApplyReview } from "../src/prompt.ts";
 import { makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("buildPROpenedPrompt", () => {
@@ -80,6 +80,28 @@ describe("buildPROpenedPrompt", () => {
     expect(touchesGitOpsApplyReview([makeFile({ filename: "src/demo.ts" })])).toBe(false);
     expect(prompt).toContain("Load the `gitops-apply-review` skill now");
     expect(prompt).toContain("Do not read or `git show` `charts/*.tgz`");
+  });
+
+  test("tells the reviewer to load gitops-apply-review on Jumi image bumps", () => {
+    const pr = makePR({
+      title: "chore(deps): update gitea.kirmanak.stream/personal/jumi-reviewer digest to abcdef",
+      body: "depName: gitea.kirmanak.stream/personal/jumi-reviewer\n\n## GitOps\nnone\n",
+    });
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr,
+      prFiles: [makeFile({ filename: "k3s/apps/jumi-reviewer/values.yaml" })],
+    });
+
+    expect(
+      shouldLoadGitOpsApplyReview({
+        files: [makeFile({ filename: "src/demo.ts" })],
+        title: pr.title,
+        body: pr.body,
+      })
+    ).toBe(true);
+    expect(prompt).toContain("Load the `gitops-apply-review` skill now");
+    expect(prompt).toContain("Parse the PR body `## GitOps` section");
   });
 
   test("includes review notes", () => {

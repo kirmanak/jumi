@@ -1,0 +1,496 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+export const CONTRACT_PATH = "deploy/contract.md";
+const SEMVER_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
+
+export type BumpKind = "major" | "minor" | "patch" | "initial";
+export type VersionDecision = BumpKind | "reuse";
+export type ImageName = "reviewer" | "worker";
+
+export interface SemVer {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+export interface ImageContract {
+  requiredEnv: string[];
+  ports: string[];
+  runAs: string;
+  probes: string[];
+  command: string;
+  imageTarget: string;
+  volumes: string[];
+}
+
+export interface DeployContract {
+  reviewer: ImageContract;
+  worker: ImageContract;
+}
+
+export interface ReleasePlan {
+  version: string;
+  bump: VersionDecision;
+  body: string;
+}
+
+export function parseSemVerTag(tag: string): SemVer | null {
+  const match = SEMVER_TAG.exec(tag.trim());
+  if (!match) return null;
+  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) };
+}
+
+export function formatSemVerTag(version: SemVer): string {
+  return `v${version.major}.${version.minor}.${version.patch}`;
+}
+
+export function compareSemVer(a: SemVer, b: SemVer): number {
+  return a.major - b.major || a.minor - b.minor || a.patch - b.patch;
+}
+
+function emptyImage(): ImageContract {
+  return {
+    requiredEnv: [],
+    ports: [],
+    runAs: "",
+    probes: [],
+    command: "",
+    imageTarget: "",
+    volumes: [],
+  };
+}
+
+function headingSection(markdown: string, level: number, title: string): string {
+  const re = new RegExp(`^#{${level}}\\s+${title}\\s*$`, "im");
+  const match = re.exec(markdown);
+  if (!match || match.index === undefined) return "";
+  const start = match.index + match[0].length;
+  const rest = markdown.slice(start);
+  const next = new RegExp(`^#{1,${level}}\\s+`, "m").exec(rest);
+  return (next ? rest.slice(0, next.index) : rest).trim();
+}
+
+function listValues(sectionText: string): string[] {
+  return sectionText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) =>
+      line
+        .slice(2)
+        .trim()
+        .replace(/^`([^`]+)`$/, "$1")
+    );
+}
+
+function firstValue(values: string[]): string {
+  return values[0] ?? "";
+}
+
+function parseImage(section: string): ImageContract {
+  return {
+    requiredEnv: listValues(headingSection(section, 4, "required env")),
+    ports: listValues(headingSection(section, 4, "ports")),
+    runAs: firstValue(listValues(headingSection(section, 4, "runAs"))),
+    probes: listValues(headingSection(section, 4, "probes")),
+    command: firstValue(listValues(headingSection(section, 4, "command"))),
+    imageTarget: firstValue(listValues(headingSection(section, 4, "image target"))),
+    volumes: listValues(headingSection(section, 4, "volumes")),
+  };
+}
+
+export function parseContract(markdown: string): DeployContract {
+  if (!markdown.trim()) {
+    return { reviewer: emptyImage(), worker: emptyImage() };
+  }
+  const reviewer = headingSection(markdown, 3, "reviewer");
+  const worker = headingSection(markdown, 3, "worker");
+  if (!reviewer || !worker) {
+    throw new Error("deploy/contract.md must contain ### reviewer and ### worker");
+  }
+  return { reviewer: parseImage(reviewer), worker: parseImage(worker) };
+}
+
+function addedLines(previous: string, current: string): string[] {
+  const prevLines = new Set(previous.split("\n"));
+  return current.split("\n").filter((line) => !prevLines.has(line));
+}
+
+export function hasBreakingMarker(previous: string, current: string): boolean {
+  return addedLines(previous, current).some((line) => {
+    const trimmed = line.trim();
+    return /^#{1,6}\s*BREAKING\b/i.test(trimmed) || /(^|\s)BREAKING(\s|:|$)/.test(trimmed);
+  });
+}
+
+function removedItems(previous: string[], current: string[]): string[] {
+  const next = new Set(current);
+  return previous.filter((item) => !next.has(item));
+}
+
+function addedItems(previous: string[], current: string[]): string[] {
+  const prev = new Set(previous);
+  return current.filter((item) => !prev.has(item));
+}
+
+export function removedRequiredFields(previous: ImageContract, current: ImageContract): string[] {
+  const removed: string[] = [];
+  for (const key of removedItems(previous.requiredEnv, current.requiredEnv)) {
+    removed.push(`env ${key}`);
+  }
+  for (const port of removedItems(previous.ports, current.ports)) {
+    removed.push(`port ${port}`);
+  }
+  if (previous.runAs && previous.runAs !== current.runAs) removed.push(`user ${previous.runAs}`);
+  for (const probe of removedItems(previous.probes, current.probes)) {
+    removed.push(`probe ${probe}`);
+  }
+  if (previous.command && previous.command !== current.command) removed.push(`command ${previous.command}`);
+  if (previous.imageTarget && previous.imageTarget !== current.imageTarget) {
+    removed.push(`target ${previous.imageTarget}`);
+  }
+  return removed;
+}
+
+export function classifyBump(previousMarkdown: string | null, currentMarkdown: string): BumpKind {
+  if (previousMarkdown === null) return "initial";
+  if (previousMarkdown.trim() === currentMarkdown.trim()) return "patch";
+  const previous = parseContract(previousMarkdown);
+  const current = parseContract(currentMarkdown);
+  if (hasBreakingMarker(previousMarkdown, currentMarkdown)) return "major";
+  const removed = [
+    ...removedRequiredFields(previous.reviewer, current.reviewer),
+    ...removedRequiredFields(previous.worker, current.worker),
+  ];
+  if (removed.length > 0) return "major";
+  return "minor";
+}
+
+export function nextVersionFrom(latestTag: string | null, bump: BumpKind): string {
+  if (bump === "initial" || latestTag === null) return "v1.0.0";
+  const parsed = parseSemVerTag(latestTag);
+  if (!parsed) return "v1.0.0";
+  if (bump === "major") return formatSemVerTag({ major: parsed.major + 1, minor: 0, patch: 0 });
+  if (bump === "minor") return formatSemVerTag({ major: parsed.major, minor: parsed.minor + 1, patch: 0 });
+  return formatSemVerTag({ major: parsed.major, minor: parsed.minor, patch: parsed.patch + 1 });
+}
+
+function gitOpsBullets(previous: ImageContract, current: ImageContract): string[] {
+  const bullets: string[] = [];
+  for (const key of addedItems(previous.requiredEnv, current.requiredEnv)) {
+    bullets.push(`- **requires** \`${key}\` (new; missing → crash)`);
+  }
+  for (const key of removedItems(previous.requiredEnv, current.requiredEnv)) {
+    bullets.push(`- **removed** \`${key}\` (was required)`);
+  }
+  for (const port of addedItems(previous.ports, current.ports)) {
+    bullets.push(`- **port** \`${port}\` (new)`);
+  }
+  for (const port of removedItems(previous.ports, current.ports)) {
+    bullets.push(`- **removed port** \`${port}\``);
+  }
+  if (previous.runAs !== current.runAs && (previous.runAs || current.runAs)) {
+    bullets.push(`- **runAs** \`${previous.runAs || "none"}\` → \`${current.runAs || "none"}\``);
+  }
+  for (const probe of addedItems(previous.probes, current.probes)) {
+    bullets.push(`- **probe** \`${probe}\` (new)`);
+  }
+  for (const probe of removedItems(previous.probes, current.probes)) {
+    bullets.push(`- **removed probe** \`${probe}\``);
+  }
+  if (previous.command !== current.command && (previous.command || current.command)) {
+    bullets.push(`- **command** \`${previous.command || "none"}\` → \`${current.command || "none"}\``);
+  }
+  if (previous.imageTarget !== current.imageTarget && (previous.imageTarget || current.imageTarget)) {
+    bullets.push(`- **image target** \`${previous.imageTarget || "none"}\` → \`${current.imageTarget || "none"}\``);
+  }
+  for (const volume of addedItems(previous.volumes, current.volumes)) {
+    bullets.push(`- **volume** \`${volume}\` (new)`);
+  }
+  for (const volume of removedItems(previous.volumes, current.volumes)) {
+    bullets.push(`- **removed volume** \`${volume}\``);
+  }
+  return bullets;
+}
+
+function formatGitOpsSection(previousMarkdown: string | null, currentMarkdown: string): string {
+  if (previousMarkdown === null || previousMarkdown.trim() === currentMarkdown.trim()) return "none";
+  const previous = parseContract(previousMarkdown);
+  const current = parseContract(currentMarkdown);
+  const reviewer = gitOpsBullets(previous.reviewer, current.reviewer);
+  const worker = gitOpsBullets(previous.worker, current.worker);
+  if (reviewer.length === 0 && worker.length === 0) return "none";
+  const reviewerBlock = reviewer.length > 0 ? reviewer.join("\n") : "- none";
+  const workerBlock = worker.length > 0 ? worker.join("\n") : "- none";
+  return `### reviewer\n${reviewerBlock}\n### worker\n${workerBlock}`;
+}
+
+function formatBreakingSection(previousMarkdown: string | null, currentMarkdown: string): string {
+  if (previousMarkdown === null) return "none";
+  const bullets: string[] = [];
+  if (hasBreakingMarker(previousMarkdown, currentMarkdown)) {
+    bullets.push("- BREAKING marker in deploy/contract.md");
+  }
+  const previous = parseContract(previousMarkdown);
+  const current = parseContract(currentMarkdown);
+  for (const image of ["reviewer", "worker"] as const) {
+    for (const field of removedRequiredFields(previous[image], current[image])) {
+      bullets.push(`- ${image}: removed required ${field}`);
+    }
+  }
+  return bullets.length > 0 ? bullets.join("\n") : "none";
+}
+
+export function buildReleaseBody(opts: {
+  previousContract: string | null;
+  currentContract: string;
+  changes: string[];
+}): string {
+  const gitOps = formatGitOpsSection(opts.previousContract, opts.currentContract);
+  const breaking = formatBreakingSection(opts.previousContract, opts.currentContract);
+  const changes = opts.changes.length > 0 ? opts.changes.map((line) => `- ${line}`).join("\n") : "- none";
+  return `## GitOps\n${gitOps}\n\n## Breaking\n${breaking}\n\n## Changes\n${changes}\n`;
+}
+
+export function workflowRebuildsOnTag(yaml: string): boolean {
+  const hasTagTrigger = /tags:\s*\["v\*"\]/.test(yaml) || /tags:\s*\n\s*-\s*"v\*"/m.test(yaml);
+  if (!hasTagTrigger) return false;
+  if (/if:\s*\$\{\{\s*github\.ref_type\s*!=\s*'tag'\s*\}\}/.test(yaml)) return false;
+  if (/if:\s*\$\{\{\s*github\.event_name\s*!=\s*'push'\s*\|\|\s*github\.ref_type\s*!=\s*'tag'/.test(yaml)) {
+    return false;
+  }
+  return true;
+}
+
+export function shouldSkipImageBuild(refType: string): boolean {
+  return refType === "tag";
+}
+
+function git(args: string[], cwd: string): string {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout || "").trim()}`);
+  }
+  return result.stdout.trim();
+}
+
+function gitAllowFail(args: string[], cwd: string): string | null {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) return null;
+  return result.stdout;
+}
+
+export function listSemverTags(repoDir: string): string[] {
+  const out = gitAllowFail(["tag", "--list", "v*"], repoDir) ?? "";
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((tag) => parseSemVerTag(tag))
+    .sort((a, b) => compareSemVer(parseSemVerTag(a)!, parseSemVerTag(b)!));
+}
+
+export function headSemverTag(repoDir: string): string | null {
+  const pointed = gitAllowFail(["tag", "--points-at", "HEAD"], repoDir) ?? "";
+  const tags = pointed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((tag) => parseSemVerTag(tag))
+    .sort((a, b) => compareSemVer(parseSemVerTag(a)!, parseSemVerTag(b)!));
+  return tags.at(-1) ?? null;
+}
+
+export function latestSemverTag(repoDir: string): string | null {
+  const tags = listSemverTags(repoDir);
+  return tags.at(-1) ?? null;
+}
+
+export function contractAt(repoDir: string, ref: string): string | null {
+  return gitAllowFail(["show", `${ref}:${CONTRACT_PATH}`], repoDir);
+}
+
+export function currentContract(repoDir: string): string {
+  return readFileSync(join(repoDir, CONTRACT_PATH), "utf8");
+}
+
+export function changesSince(repoDir: string, tag: string | null): string[] {
+  const range = tag ? `${tag}..HEAD` : "HEAD";
+  const out = tag
+    ? (gitAllowFail(["log", "--oneline", range], repoDir) ?? "")
+    : (gitAllowFail(["log", "--oneline", "-1"], repoDir) ?? "");
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export function computeRelease(repoDir: string): ReleasePlan {
+  const current = currentContract(repoDir);
+  const headTag = headSemverTag(repoDir);
+  if (headTag) {
+    const older = listSemverTags(repoDir).filter((tag) => tag !== headTag);
+    const previousTag = older.at(-1) ?? null;
+    const previous = previousTag ? (contractAt(repoDir, previousTag) ?? "") : null;
+    return {
+      version: headTag,
+      bump: "reuse",
+      body: buildReleaseBody({
+        previousContract: previous,
+        currentContract: current,
+        changes: changesSince(repoDir, previousTag),
+      }),
+    };
+  }
+  const latest = latestSemverTag(repoDir);
+  const previous = latest ? (contractAt(repoDir, latest) ?? "") : null;
+  const bump = classifyBump(previous, current);
+  return {
+    version: nextVersionFrom(latest, bump),
+    bump,
+    body: buildReleaseBody({
+      previousContract: previous,
+      currentContract: current,
+      changes: changesSince(repoDir, latest),
+    }),
+  };
+}
+
+function repoRoot(cwd = process.cwd()): string {
+  return git(["rev-parse", "--show-toplevel"], cwd);
+}
+
+interface GiteaTag {
+  name?: string;
+  commit?: { sha?: string };
+  id?: string;
+}
+
+export async function publishRelease(opts: {
+  serverUrl: string;
+  token: string;
+  owner: string;
+  repo: string;
+  sha: string;
+  version: string;
+  body: string;
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
+}): Promise<{ tagCreated: boolean; releaseCreated: boolean }> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const base = `${opts.serverUrl.replace(/\/+$/, "")}/api/v1/repos/${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}`;
+  const headers = {
+    Authorization: `token ${opts.token}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+
+  async function request(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
+    const res = await fetchImpl(`${base}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text().catch(() => "");
+    if (res.status === 403) {
+      throw new Error(
+        `Gitea API 403 ${method} ${path}. The default Actions token cannot write tags/releases. Do not add a PAT; fix token permissions.`
+      );
+    }
+    return { status: res.status, text };
+  }
+
+  const existingTag = await request("GET", `/tags/${encodeURIComponent(opts.version)}`);
+  let tagCreated = false;
+  if (existingTag.status === 200) {
+    const parsed = JSON.parse(existingTag.text) as GiteaTag;
+    const sha = parsed.commit?.sha ?? parsed.id ?? "";
+    if (sha && sha !== opts.sha) {
+      throw new Error(`Refusing to move immutable tag ${opts.version} from ${sha} to ${opts.sha}`);
+    }
+  } else if (existingTag.status === 404) {
+    const created = await request("POST", "/tags", {
+      tag_name: opts.version,
+      target: opts.sha,
+      message: opts.version,
+    });
+    if (created.status !== 200 && created.status !== 201) {
+      throw new Error(`Gitea API POST /tags → ${created.status}: ${created.text}`);
+    }
+    tagCreated = true;
+  } else {
+    throw new Error(`Gitea API GET /tags/${opts.version} → ${existingTag.status}: ${existingTag.text}`);
+  }
+
+  const existingRelease = await request("GET", `/releases/tags/${encodeURIComponent(opts.version)}`);
+  let releaseCreated = false;
+  if (existingRelease.status === 200) {
+    return { tagCreated, releaseCreated };
+  }
+  if (existingRelease.status !== 404) {
+    throw new Error(
+      `Gitea API GET /releases/tags/${opts.version} → ${existingRelease.status}: ${existingRelease.text}`
+    );
+  }
+  const createdRelease = await request("POST", "/releases", {
+    tag_name: opts.version,
+    target_commitish: opts.sha,
+    name: opts.version,
+    body: opts.body,
+    draft: false,
+    prerelease: false,
+  });
+  if (createdRelease.status !== 200 && createdRelease.status !== 201) {
+    throw new Error(`Gitea API POST /releases → ${createdRelease.status}: ${createdRelease.text}`);
+  }
+  releaseCreated = true;
+  return { tagCreated, releaseCreated };
+}
+
+async function main(args: string[]): Promise<void> {
+  const command = args[0] ?? "next-version";
+  const root = repoRoot();
+  const plan = computeRelease(root);
+  if (command === "next-version") {
+    process.stdout.write(`${plan.version}\n`);
+    return;
+  }
+  if (command === "release-body") {
+    process.stdout.write(plan.body);
+    return;
+  }
+  if (command === "skip-build") {
+    process.stdout.write(
+      `${shouldSkipImageBuild(process.env.REF_TYPE ?? process.env.GITHUB_REF_TYPE ?? "") ? "yes" : "no"}\n`
+    );
+    return;
+  }
+  if (command === "publish") {
+    const token = process.env.GITHUB_TOKEN || process.env.GITEA_TOKEN;
+    const repository = process.env.GITHUB_REPOSITORY;
+    const serverUrl = process.env.GITHUB_SERVER_URL || process.env.GITEA_URL;
+    const sha = process.env.GITHUB_SHA;
+    if (!token) throw new Error("GITHUB_TOKEN is required to publish a release");
+    if (!repository?.includes("/")) throw new Error("GITHUB_REPOSITORY is required");
+    if (!serverUrl) throw new Error("GITHUB_SERVER_URL is required");
+    if (!sha) throw new Error("GITHUB_SHA is required");
+    const [owner, repo] = repository.split("/");
+    const result = await publishRelease({
+      serverUrl,
+      token,
+      owner,
+      repo,
+      sha,
+      version: plan.version,
+      body: plan.body,
+    });
+    console.log(
+      `Published ${plan.version} bump=${plan.bump} tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
+    );
+    return;
+  }
+  throw new Error(`Unknown command: ${command}`);
+}
+
+if (import.meta.main) {
+  await main(process.argv.slice(2));
+}

@@ -18,6 +18,9 @@ primary_tag="$1"
 shift
 extra_tags=("$@")
 
+VERSION="${VERSION:-dev}"
+REVISION="${REVISION:-${COMMIT_SHA:-unknown}}"
+
 export BUILDAH_ISOLATION="${BUILDAH_ISOLATION:-chroot}"
 export STORAGE_DRIVER="${STORAGE_DRIVER:-vfs}"
 
@@ -43,6 +46,8 @@ buildah bud \
   --build-arg "BUN_VERSION=${BUN_VERSION}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
   --build-arg "HELM_VERSION=${HELM_VERSION}" \
+  --build-arg "VERSION=${VERSION}" \
+  --build-arg "REVISION=${REVISION}" \
   -f Dockerfile \
   .
 

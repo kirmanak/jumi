@@ -1,3 +1,4 @@
+import { isJumiDockerBump } from "./gitops_notes.ts";
 import { formatLinkedIssuesXml, formatPrCommentsXml, type ReviewThread } from "./review_context.ts";
 import type { GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
@@ -14,6 +15,10 @@ export function touchesGitOpsApplyReview(files: GiteaPRFile[]): boolean {
       name.endsWith("/values.yaml")
     );
   });
+}
+
+export function shouldLoadGitOpsApplyReview(opts: { files: GiteaPRFile[]; title: string; body: string }): boolean {
+  return touchesGitOpsApplyReview(opts.files) || isJumiDockerBump(opts.title, opts.body);
 }
 
 /** Escape XML special characters in text content */
@@ -92,10 +97,12 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
     : "";
   const commentsXml = formatPrCommentsXml(thread?.comments ?? []);
   const linkedXml = formatLinkedIssuesXml(thread?.linkedIssues ?? []);
-  const gitOpsSkill = touchesGitOpsApplyReview(prFiles)
+  const helmGitOps = touchesGitOpsApplyReview(prFiles);
+  const imageBump = isJumiDockerBump(pr.title, pr.body ?? "");
+  const gitOpsSkill = shouldLoadGitOpsApplyReview({ files: prFiles, title: pr.title, body: pr.body ?? "" })
     ? `
 
-This pull request touches Helm/Kubernetes paths (\`k3s/\`, Chart.yaml, or values.yaml). Load the \`gitops-apply-review\` skill now. Do not wait to discover it. Do not read or \`git show\` \`charts/*.tgz\`. Never run \`helm upgrade\`, \`helm install\`, or \`kubectl apply\`.`
+This pull request ${helmGitOps ? "touches Helm/Kubernetes paths (`k3s/`, Chart.yaml, or values.yaml)" : "looks like a Renovate docker bump of `jumi-reviewer` / `jumi-worker`"}. Load the \`gitops-apply-review\` skill now. Do not wait to discover it. Do not read or \`git show\` \`charts/*.tgz\`. Never run \`helm upgrade\`, \`helm install\`, or \`kubectl apply\`.${imageBump ? " Parse the PR body `## GitOps` section." : ""}`
     : "";
 
   return `${PREAMBLE}

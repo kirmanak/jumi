@@ -1,6 +1,6 @@
 ---
 name: gitops-apply-review
-description: Use when the diff touches Helm, Kubernetes, k3s/, Chart.yaml, or values.yaml. Catch first-apply explosions visible in the diff: checksum/rollout, Service DNS host keys vs names, Velero vs generic-ephemeral, sibling memory limits, hook comm vs argv. Do not read charts/*.tgz.
+description: Use when the diff touches Helm, Kubernetes, k3s/, Chart.yaml, or values.yaml, or when the PR is a Renovate docker bump of jumi-reviewer / jumi-worker. Catch first-apply explosions visible in the diff: checksum/rollout, Service DNS host keys vs names, Velero vs generic-ephemeral, sibling memory limits, hook comm vs argv. Parse PR body ## GitOps notes on Jumi image bumps. Do not read charts/*.tgz.
 ---
 
 # gitops-apply-review
@@ -54,6 +54,14 @@ helm template <release> <chart-dir> -f <values>
 Use the directory of the **changed** chart. Chart dependencies are already vendored as `charts/*.tgz` next to that chart — pass the chart dir to helm; do not glob or read those archives.
 
 If the chart has a python unittest, run it with `python3`. Fail the review if that unittest fails. A checksum unittest would have caught the SOUL.md trim locally.
+
+## Jumi image bumps
+
+When the PR is a Renovate docker bump of `jumi-reviewer` / `jumi-worker` (title/body `depName` or image repo), parse the PR body `## GitOps` section. Do not treat commit status as notes.
+
+- Missing `## GitOps` → 🟡 risk: no GitOps notes; cannot tell if values need edits
+- Section is `none` and the diff is only tag/digest → no extra 🔴 from this rule
+- Non-empty GitOps bullets and `values.yaml` (or the chart) does not make those edits → 🔴 bug
 
 ## Do not
 

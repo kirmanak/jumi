@@ -46,6 +46,13 @@ COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 # and copy bun/opencode in.
 FROM debian:bookworm-slim AS runtime
 
+ARG VERSION=dev
+ARG REVISION=unknown
+
+LABEL org.opencontainers.image.source="https://gitea.kirmanak.stream/personal/jumi" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils libstdc++6 python3 \
   && rm -rf /var/lib/apt/lists/*
