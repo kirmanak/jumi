@@ -92,6 +92,7 @@ export interface ReviewOptions {
   gitRunner?: GitRunner;
   logger?: (message: string) => void;
   persistResult?: (result: PersistReviewResult) => Promise<void>;
+  abortSignal?: AbortSignal;
 }
 
 export type PersistReviewResult =
@@ -122,6 +123,17 @@ const encoder = new TextEncoder();
 
 function defaultLog(message: string) {
   console.log(`[review] ${message}`);
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return;
+  const err = new Error("cancelled");
+  err.name = "AbortError";
+  throw err;
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
 }
 
 export function reviewJobKey(job: ReviewJob): string {
@@ -392,6 +404,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
   const engine = resolveEngine(opts, openCodeEngine);
+  throwIfAborted(opts.abortSignal);
   const repoFullName = `${opts.owner}/${opts.repo}`;
   const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
   const reviewedHeadSha = opts.expectedHeadSha ?? pr.head.sha;
@@ -509,6 +522,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     });
 
     log(`Running OpenCode for ${repoFullName}#${pr.number}`);
+    throwIfAborted(opts.abortSignal);
     const output = await engine(prompt, {
       model: opts.model,
       workdir: opts.workspace,
@@ -519,6 +533,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       maxOutputBytes: opts.maxOutputBytes,
       reviewLabel,
       logger: log,
+      abortSignal: opts.abortSignal,
     });
 
     await logParentDiag(log, "post_opencode", {
@@ -586,6 +601,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
     }
   } catch (err) {
+    if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
     if (!persisted && !persistFailed) {
       const message = `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`;
       await opts.persistResult?.({ kind: "error", error: message });

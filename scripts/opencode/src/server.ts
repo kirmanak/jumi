@@ -65,6 +65,7 @@ export interface RunReviewJobExtras {
   openCodeRunner?: Engine;
   workspacePreparer?: WorkspacePreparer;
   gitRunner?: GitRunner;
+  abortSignal?: AbortSignal;
 }
 
 export async function runReviewJob(
@@ -99,6 +100,7 @@ export async function runReviewJob(
       engine: extras.engine ?? extras.openCodeRunner,
       workspacePreparer: extras.workspacePreparer,
       gitRunner: extras.gitRunner,
+      abortSignal: extras.abortSignal,
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;
@@ -130,13 +132,41 @@ export function createReviewQueue(
   api: ReviewApi = createGiteaForge(config.giteaUrl, config.giteaToken),
   logger: (message: string) => void = log
 ): ReviewQueue {
-  return new ReviewQueue(
+  const aborts = new Map<string, AbortController>();
+  const queue = new ReviewQueue(
     async (job: ReviewJob) => {
-      await runReviewJob(config, job, api, logger);
+      const key = reviewJobKey(job);
+      const abort = new AbortController();
+      aborts.set(key, abort);
+      try {
+        await runReviewJob(config, job, api, logger, { abortSignal: abort.signal });
+      } finally {
+        aborts.delete(key);
+      }
     },
     config.queueConcurrency,
     logger
   );
+  (queue as ReviewQueue & { aborts: Map<string, AbortController> }).aborts = aborts;
+  return queue;
+}
+
+function abortReviewQueue(queue: ReviewQueue): void {
+  const withAborts = queue as ReviewQueue & { aborts?: Map<string, AbortController> };
+  for (const abort of withAborts.aborts?.values() ?? []) abort.abort();
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
+}
+
+function bindAbort(signal: AbortSignal | undefined, fn: () => void): void {
+  if (!signal) return;
+  if (signal.aborted) {
+    fn();
+    return;
+  }
+  signal.addEventListener("abort", fn, { once: true });
 }
 
 export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps) {
@@ -324,8 +354,13 @@ export async function processEngineTick(
   extras: RunReviewJobExtras = {},
   logger: (message: string) => void = log
 ): Promise<"idle" | "processed"> {
+  if (extras.abortSignal?.aborted) return "idle";
   const row = await store.lease(leasedBy, config.leaseMs, undefined, [REVIEW_KIND]);
   if (!row) return "idle";
+  if (extras.abortSignal?.aborted) {
+    await store.releaseLease(row.id, leasedBy);
+    return "idle";
+  }
 
   let heartbeatStopped = false;
   const heartbeat = setInterval(() => {
@@ -358,7 +393,12 @@ export async function processEngineTick(
     await handoverFollowUp(store, api, config, row, result, logger);
     return "processed";
   } catch (err) {
-    logger(`engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+    const aborted = isAbortError(err) || Boolean(extras.abortSignal?.aborted);
+    logger(
+      aborted
+        ? `engine job ${row.jobKey} interrupted`
+        : `engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`
+    );
     stopHeartbeat();
     let published = false;
     try {
@@ -376,7 +416,16 @@ export async function processEngineTick(
     }
     if (!published) {
       try {
-        await store.expireLease(row.id, leasedBy);
+        if (aborted) {
+          const released = await store.releaseLease(row.id, leasedBy);
+          if (released) {
+            logger(`released ${row.jobKey} on shutdown`);
+          } else {
+            await store.expireLease(row.id, leasedBy);
+          }
+        } else {
+          await store.expireLease(row.id, leasedBy);
+        }
       } catch (expireErr) {
         logger(
           `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -467,12 +516,19 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
 
   if (config.role === "monolith") {
     const queue = createReviewQueue(config, api, logger);
-    return serveAndWait(
+    const started = await serveAndWait(
       config,
       createFetchHandler(config, { queue, logger, getPR: (owner, repo, index) => api.getPR(owner, repo, index) }),
       logger,
       deps
     );
+    const httpStop = started.stop;
+    started.stop = () => {
+      abortReviewQueue(queue);
+      httpStop();
+    };
+    bindAbort(deps.signal, () => started.stop());
+    return started;
   }
 
   const store = deps.store ?? (await createPgReviewJobStore(config.databaseUrl ?? ""));
@@ -509,12 +565,17 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         reclaim.abort();
         stop();
       };
-      deps.signal?.addEventListener("abort", () => started.stop(), { once: true });
+      bindAbort(deps.signal, () => started.stop());
     }
     return started;
   }
 
   const leasedBy = engineId();
+  const shutdown = new AbortController();
+  const stopEngine = () => {
+    if (!shutdown.signal.aborted) shutdown.abort();
+  };
+  bindAbort(deps.signal, stopEngine);
   const started = await serveAndWait(
     config,
     createFetchHandler(config, {
@@ -531,26 +592,45 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
   );
   if (deps.listen !== false) {
     const run = async () => {
-      while (!deps.signal?.aborted) {
+      while (!shutdown.signal.aborted) {
         try {
-          const result = await processEngineTick(store, config, api, leasedBy, deps.extras, logger);
-          if (result === "idle") await sleep(QUEUE_POLL_MS, deps.signal);
+          const result = await processEngineTick(
+            store,
+            config,
+            api,
+            leasedBy,
+            { ...deps.extras, abortSignal: shutdown.signal },
+            logger
+          );
+          if (result === "idle") await sleep(QUEUE_POLL_MS, shutdown.signal);
         } catch (err) {
-          if (deps.signal?.aborted) return;
+          if (shutdown.signal.aborted) return;
           logger(`engine tick failed: ${err instanceof Error ? err.message : String(err)}`);
-          await sleep(QUEUE_POLL_MS, deps.signal).catch(() => undefined);
+          await sleep(QUEUE_POLL_MS, shutdown.signal).catch(() => undefined);
         }
       }
     };
     void run();
   }
+  const httpStop = started.stop;
+  started.stop = () => {
+    stopEngine();
+    httpStop();
+  };
   return started;
 }
 
 async function main() {
   const config = loadConfig();
   scrubSecretEnv();
-  await startReviewer(config);
+  const shutdown = new AbortController();
+  const onSignal = (signal: string) => {
+    log(`received ${signal}, shutting down`);
+    shutdown.abort();
+  };
+  process.once("SIGTERM", () => onSignal("SIGTERM"));
+  process.once("SIGINT", () => onSignal("SIGINT"));
+  await startReviewer(config, { signal: shutdown.signal });
 }
 
 if (import.meta.main) {

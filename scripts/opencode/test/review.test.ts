@@ -657,6 +657,39 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("interrupt does not persist an error or post a sticky", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const persisted: PersistReviewResult[] = [];
+    const abort = new AbortController();
+    const err = new Error("cancelled");
+    err.name = "AbortError";
+    await expect(
+      reviewPullRequest({
+        ...skipOptions,
+        api: makeApi({
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+          createIssueComment: async () => {
+            throw new Error("should not post sticky");
+          },
+        }),
+        persistResult: async (value) => {
+          persisted.push(value);
+        },
+        abortSignal: abort.signal,
+        openCodeRunner: async () => {
+          abort.abort();
+          throw err;
+        },
+      })
+    ).rejects.toMatchObject({ name: "AbortError", message: "cancelled" });
+
+    expect(persisted).toEqual([]);
+    expect(statuses.map((status) => status.state)).toEqual(["pending"]);
+  });
+
   test("marks the commit status failed when the review crashes", async () => {
     const statuses: Array<{ state: string; description?: string }> = [];
     await expect(

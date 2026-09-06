@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReviewApi } from "../src/review.ts";
 import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY } from "../src/review_jobs.ts";
-import { processEngineTick, reclaimExpiredJobs } from "../src/server.ts";
+import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
 
@@ -43,6 +43,18 @@ function frozenGit(): GitRunner {
     if (args[0] === "status") return "?? JUMI_REVIEW.md";
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
+}
+
+function hangUntilAbort(signal: AbortSignal | undefined): Promise<string> {
+  return new Promise((_, reject) => {
+    const fail = () => {
+      const err = new Error("cancelled");
+      err.name = "AbortError";
+      reject(err);
+    };
+    if (signal?.aborted) fail();
+    else signal?.addEventListener("abort", fail, { once: true });
+  });
 }
 
 async function withWorkspace<T>(run: (workspace: string) => Promise<T>): Promise<T> {
@@ -425,6 +437,164 @@ describe("processEngineTick", () => {
       const reclaimed = await store.reclaimExpired(2);
       expect(reclaimed.requeued).toHaveLength(1);
       expect(reclaimed.requeued[0]?.state).toBe("queued");
+    });
+  });
+
+  test("already-aborted tick does not lease", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const abort = new AbortController();
+    abort.abort();
+    const result = await processEngineTick(store, makeConfig(), makeApi(), "engine-1", {
+      abortSignal: abort.signal,
+      openCodeRunner: async () => {
+        throw new Error("should not run");
+      },
+    });
+    expect(result).toBe("idle");
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+  });
+
+  test("engine stop aborts OpenCode and requeues the leased SHA", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const shutdown = new AbortController();
+      let started!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const reviewer = await startReviewer(makeConfig({ role: "engine", workdir: workspace, port: 0 }), {
+        store,
+        api: makeApi(),
+        signal: shutdown.signal,
+        ensureAuth: async () => undefined,
+        extras: {
+          gitRunner: frozenGit(),
+          workspacePreparer: async () => undefined,
+          openCodeRunner: async (_prompt, opts) => {
+            started();
+            return hangUntilAbort(opts.abortSignal);
+          },
+        },
+      });
+      try {
+        await gate;
+        shutdown.abort();
+        reviewer.stop();
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline && store.rows[0]?.state !== "queued") {
+          await Bun.sleep(10);
+        }
+        expect(store.rows[0]?.state).toBe("queued");
+        expect(store.rows[0]?.attempt).toBe(0);
+        expect(store.rows[0]?.leasedBy).toBeNull();
+      } finally {
+        reviewer.stop();
+        reviewer.server?.stop(true);
+      }
+    });
+  });
+
+  test("abort without a persisted result requeues the same SHA without consuming an attempt", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi();
+      const abort = new AbortController();
+      let started!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const tick = processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        abortSignal: abort.signal,
+        openCodeRunner: async (_prompt, opts) => {
+          started();
+          return hangUntilAbort(opts.abortSignal);
+        },
+      });
+      await gate;
+      abort.abort();
+      await tick;
+
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(store.rows[0]?.leasedBy).toBeNull();
+      expect(store.rows[0]?.leasedUntil).toBeNull();
+      expect(store.rows[0]?.error).toBeNull();
+      expect(store.rows[0]?.resultMarkdown).toBeNull();
+      expect(api.comments).toHaveLength(0);
+      expect(api.statuses.map((status) => status.state)).toEqual(["pending"]);
+      expect(api.statuses.some((status) => status.state === "failure")).toBe(false);
+
+      const abort2 = new AbortController();
+      let started2!: () => void;
+      const gate2 = new Promise<void>((resolve) => {
+        started2 = resolve;
+      });
+      const tick2 = processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-2", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        abortSignal: abort2.signal,
+        openCodeRunner: async (_prompt, opts) => {
+          started2();
+          return hangUntilAbort(opts.abortSignal);
+        },
+      });
+      await gate2;
+      abort2.abort();
+      await tick2;
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+
+      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-3", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (_prompt, opts) => {
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return "stdout";
+        },
+      });
+      expect(store.rows[0]?.state).toBe("succeeded");
+      expect(api.comments[0]).toContain("Looks good");
+    });
+  });
+
+  test("abort does not release a different engine's lease", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi();
+      const abort = new AbortController();
+      let started!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const originalRelease = store.releaseLease.bind(store);
+      const callers: string[] = [];
+      store.releaseLease = async (id, leasedBy) => {
+        callers.push(leasedBy);
+        store.rows[0]!.leasedBy = "engine-other";
+        return originalRelease(id, leasedBy);
+      };
+      const tick = processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        abortSignal: abort.signal,
+        openCodeRunner: async (_prompt, opts) => {
+          started();
+          return hangUntilAbort(opts.abortSignal);
+        },
+      });
+      await gate;
+      abort.abort();
+      await tick;
+      expect(callers).toEqual(["engine-1"]);
+      expect(store.rows[0]?.state).toBe("leased");
+      expect(store.rows[0]?.leasedBy).toBe("engine-other");
     });
   });
 

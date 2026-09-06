@@ -87,6 +87,7 @@ export interface ReviewJobStore {
   ): Promise<ReviewJobRecord | undefined>;
   heartbeat(id: number, leasedBy: string, leaseMs: number, now?: Date): Promise<boolean>;
   expireLease(id: number, leasedBy: string, now?: Date): Promise<boolean>;
+  releaseLease(id: number, leasedBy: string): Promise<boolean>;
   saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void>;
   markPublished(
     id: number,
@@ -448,6 +449,20 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const ts = now.getTime();
       row.leasedUntil = ts - 1;
       row.leasedBy = null;
+      row.updatedAt = ts;
+      return true;
+    });
+  }
+
+  releaseLease(id: number, leasedBy: string): Promise<boolean> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      if (row?.state !== "leased" || row.leasedBy !== leasedBy) return false;
+      if (hasPersistedResult(row)) return false;
+      const ts = Date.now();
+      row.state = "queued";
+      row.leasedBy = null;
+      row.leasedUntil = null;
       row.updatedAt = ts;
       return true;
     });
@@ -912,6 +927,20 @@ export class PgReviewJobStore implements ReviewJobStore {
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
          RETURNING id`,
         [id, leasedBy, new Date(now.getTime() - 1).toISOString()]
+      )
+    );
+    return rows.length > 0;
+  }
+
+  async releaseLease(id: number, leasedBy: string): Promise<boolean> {
+    const rows = asRows<{ id: unknown }>(
+      await this.sql.unsafe(
+        `UPDATE review_jobs
+         SET state = 'queued', leased_by = NULL, leased_until = NULL, updated_at = NOW()
+         WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+           AND result_markdown IS NULL AND result_reason IS NULL AND error IS NULL
+         RETURNING id`,
+        [id, leasedBy]
       )
     );
     return rows.length > 0;

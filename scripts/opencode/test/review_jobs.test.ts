@@ -212,6 +212,31 @@ describe("MemoryReviewJobStore", () => {
     expect(store.rows[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
   });
 
+  test("releaseLease requeues without attempt++ and rejects persist-ready or foreign leases", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000, new Date(1_000));
+    expect(leased?.attempt).toBe(0);
+    expect(await store.releaseLease(leased!.id, "engine-other")).toBe(false);
+    expect(store.rows[0]?.state).toBe("leased");
+    expect(await store.releaseLease(leased!.id, "engine-1")).toBe(true);
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.leasedBy).toBeNull();
+    expect(store.rows[0]?.leasedUntil).toBeNull();
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(await store.heartbeat(leased!.id, "engine-1", 60_000, new Date(3_000))).toBe(false);
+
+    const persistStore = new MemoryReviewJobStore();
+    await persistStore.enqueue(makeJob());
+    const persist = await persistStore.lease("engine-1", 60_000);
+    await persistStore.saveResult(persist!.id, "engine-1", {
+      kind: "markdown",
+      markdown: "Persisted review\n<!-- jumi-check: success -->",
+    });
+    expect(await persistStore.releaseLease(persist!.id, "engine-1")).toBe(false);
+    expect(persistStore.rows[0]?.state).toBe("leased");
+  });
+
   test("matching owner can expireLease; reclaim owner expire still lets the next tick retry", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
@@ -367,6 +392,46 @@ describe("PgReviewJobStore expireLease", () => {
     expect(leasedUntil).toBe(new Date(1_999).toISOString());
     expect(await store.heartbeat(1, "engine-1", 60_000, new Date(3_000))).toBe(false);
     expect(leasedUntil).toBe(new Date(1_999).toISOString());
+  });
+});
+
+describe("PgReviewJobStore releaseLease", () => {
+  test("requeues without a persisted result and no-ops persist-ready rows", async () => {
+    let state = "leased";
+    let leasedBy: string | null = "engine-1";
+    let leasedUntil: string | null = new Date(Date.now() + 60_000).toISOString();
+    let resultMarkdown: string | null = null;
+    const queries: string[] = [];
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        queries.push(query);
+        if (query.includes("state = 'queued'") && query.includes("leased_by = NULL")) {
+          if (leasedBy !== params?.[1] || resultMarkdown) return [];
+          state = "queued";
+          leasedBy = null;
+          leasedUntil = null;
+          return [{ id: 1 }];
+        }
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.releaseLease(1, "engine-1")).toBe(true);
+    expect(
+      queries.some((query) => query.includes("state = 'queued'") && query.includes("result_markdown IS NULL"))
+    ).toBe(true);
+    expect(state).toBe("queued");
+    expect(leasedBy).toBeNull();
+    expect(leasedUntil).toBeNull();
+
+    state = "leased";
+    leasedBy = "engine-1";
+    resultMarkdown = "Persisted review";
+    expect(await store.releaseLease(1, "engine-1")).toBe(false);
+    expect(state).toBe("leased");
   });
 });
 

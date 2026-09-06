@@ -137,7 +137,7 @@ Optional environment variables:
 | `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (webhook + PG enqueue/reclaim), or `engine` (lease + OpenCode). Unset is `monolith`. |
 | `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith`. Optional on the issue worker: when set, implement/follow-up/conflict use the shared `review_jobs` ledger; when unset, first-run assign stays on the in-memory queue |
 | `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
-| `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job |
+| `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine aborts OpenCode and requeues the same SHA without consuming an attempt. Crash/OOM still uses reclaim. |
 
 
 ## Review diagnostics (Loki)
