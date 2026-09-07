@@ -29,6 +29,7 @@ export interface RunWorkerJobExtras {
   followUp?: typeof implementFollowUp;
   conflict?: typeof implementConflict;
   heartbeatMs?: number;
+  abortSignal?: AbortSignal;
 }
 
 function log(message: string) {
@@ -96,6 +97,20 @@ export function createIssueQueue(
 export function abortIssueJob(queue: ReviewQueue<IssueJob>, key: string): void {
   const withAborts = queue as ReviewQueue<IssueJob> & { aborts?: Map<string, AbortController> };
   withAborts.aborts?.get(key)?.abort();
+}
+
+export function abortIssueQueue(queue: ReviewQueue<IssueJob>): void {
+  const withAborts = queue as ReviewQueue<IssueJob> & { aborts?: Map<string, AbortController> };
+  for (const abort of withAborts.aborts?.values() ?? []) abort.abort();
+}
+
+function bindAbort(signal: AbortSignal | undefined, fn: () => void): void {
+  if (!signal) return;
+  if (signal.aborted) {
+    fn();
+    return;
+  }
+  signal.addEventListener("abort", fn, { once: true });
 }
 
 function abortLocalJob(
@@ -231,6 +246,27 @@ export async function reclaimExpiredWorkerJobs(
   return { requeued: requeued.length, published: publish.length };
 }
 
+async function releaseWorkerLeaseOnShutdown(
+  store: ReviewJobStore,
+  id: number,
+  jobKey: string,
+  leasedBy: string,
+  logger: (message: string) => void
+): Promise<void> {
+  try {
+    const current = await store.get(id);
+    if (current && current.leasedBy !== leasedBy) return;
+    const released = await store.releaseLease(id, leasedBy);
+    if (released) {
+      logger(`released ${jobKey} on shutdown`);
+    } else {
+      await store.expireLease(id, leasedBy);
+    }
+  } catch (expireErr) {
+    logger(`worker expire failed ${jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`);
+  }
+}
+
 export async function processWorkerTick(
   store: ReviewJobStore,
   config: WorkerConfig,
@@ -241,12 +277,21 @@ export async function processWorkerTick(
   aborts?: Map<string, AbortController>,
   pids?: Map<string, number>
 ): Promise<"idle" | "processed"> {
+  if (extras.abortSignal?.aborted) return "idle";
   const row = await store.lease(leasedBy, config.leaseMs, undefined, WORKER_JOB_KINDS);
   if (!row) return "idle";
+  if (extras.abortSignal?.aborted) {
+    await store.releaseLease(row.id, leasedBy);
+    return "idle";
+  }
 
   const key = issueJobKey({ owner: row.owner, repo: row.repo, issueNumber: row.issueNumber ?? 0 });
   const abort = new AbortController();
   aborts?.set(key, abort);
+  bindAbort(extras.abortSignal, () => {
+    abort.abort();
+    abortLocalJob(aborts, pids, key);
+  });
 
   let heartbeatStopped = false;
   const loseLease = () => {
@@ -314,6 +359,10 @@ export async function processWorkerTick(
       logger(`${issueJobKey(job)} cancelled`);
       return "processed";
     }
+    if (result.status === "cancelled" && extras.abortSignal?.aborted) {
+      await releaseWorkerLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger);
+      return "processed";
+    }
     const reason =
       result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
     await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
@@ -321,6 +370,11 @@ export async function processWorkerTick(
     return "processed";
   } catch (err) {
     stopHeartbeat();
+    if (extras.abortSignal?.aborted) {
+      logger(`worker job ${row.jobKey} interrupted`);
+      await releaseWorkerLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger);
+      return "processed";
+    }
     if (abort.signal.aborted) {
       logger(`${row.jobKey} cancelled`);
       return "processed";

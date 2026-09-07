@@ -359,6 +359,233 @@ describe("processWorkerTick", () => {
     }
   });
 
+  test("already-aborted tick does not lease", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const abort = new AbortController();
+    abort.abort();
+    const result = await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      abortSignal: abort.signal,
+      implement: async () => {
+        throw new Error("should not run");
+      },
+    });
+    expect(result).toBe("idle");
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+  });
+
+  test("abort without a published result requeues the same job without consuming an attempt", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const api = makeApi();
+    const abort = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const tick = processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      api,
+      "worker-1",
+      {
+        abortSignal: abort.signal,
+        implement: async (opts) => {
+          started.resolve();
+          await waitUntilAborted(opts.abortSignal);
+          return { status: "cancelled" };
+        },
+      },
+      () => undefined
+    );
+    await started.promise;
+    abort.abort();
+    await tick;
+
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(store.rows[0]?.leasedBy).toBeNull();
+    expect(store.rows[0]?.leasedUntil).toBeNull();
+    expect(store.rows[0]?.error).toBeNull();
+    expect(api.comments).toEqual([]);
+
+    const abort2 = new AbortController();
+    const started2 = Promise.withResolvers<void>();
+    const tick2 = processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      api,
+      "worker-2",
+      {
+        abortSignal: abort2.signal,
+        implement: async (opts) => {
+          started2.resolve();
+          await waitUntilAborted(opts.abortSignal);
+          return { status: "cancelled" };
+        },
+      },
+      () => undefined
+    );
+    await started2.promise;
+    abort2.abort();
+    await tick2;
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+
+    await processWorkerTick(store, makeWorkerConfig(), api, "worker-3", {
+      implement: async () => ({
+        status: "pr",
+        prNumber: 1,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/1",
+      }),
+    });
+    expect(store.rows[0]?.state).toBe("succeeded");
+  });
+
+  test("abort does not release a different worker's lease", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const abort = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const originalRelease = store.releaseLease.bind(store);
+    const callers: string[] = [];
+    store.releaseLease = async (id, leasedBy) => {
+      callers.push(leasedBy);
+      store.rows[0]!.leasedBy = "worker-other";
+      return originalRelease(id, leasedBy);
+    };
+    const tick = processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi(),
+      "worker-1",
+      {
+        abortSignal: abort.signal,
+        implement: async (opts) => {
+          started.resolve();
+          await waitUntilAborted(opts.abortSignal);
+          return { status: "cancelled" };
+        },
+      },
+      () => undefined
+    );
+    await started.promise;
+    abort.abort();
+    await tick;
+    expect(callers).toEqual(["worker-1"]);
+    expect(store.rows[0]?.state).toBe("leased");
+    expect(store.rows[0]?.leasedBy).toBe("worker-other");
+  });
+
+  test("shutdown abort kills the OpenCode child and requeues", async () => {
+    const child = Bun.spawn(["sleep", "30"]);
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const aborts = new Map<string, AbortController>();
+    const pids = new Map<string, number>();
+    const abort = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const tick = processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi(),
+      "worker-1",
+      {
+        abortSignal: abort.signal,
+        implement: async (opts) => {
+          await opts.onPid?.(child.pid);
+          started.resolve();
+          await waitUntilAborted(opts.abortSignal);
+          return { status: "cancelled" };
+        },
+      },
+      () => undefined,
+      aborts,
+      pids
+    );
+    await started.promise;
+    abort.abort();
+    expect(await tick).toBe("processed");
+    await child.exited;
+    expect(child.exitCode === 0).toBe(false);
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(store.rows[0]?.leasedBy).toBeNull();
+  });
+
+  test("abort throw requeues without publishing", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const api = makeApi();
+    const abort = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const tick = processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      api,
+      "worker-1",
+      {
+        abortSignal: abort.signal,
+        implement: async (opts) => {
+          started.resolve();
+          await waitUntilAborted(opts.abortSignal);
+          const err = new Error("cancelled");
+          err.name = "AbortError";
+          throw err;
+        },
+      },
+      () => undefined
+    );
+    await started.promise;
+    abort.abort();
+    await tick;
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(store.rows[0]?.leasedBy).toBeNull();
+    expect(api.comments).toEqual([]);
+  });
+
+  test("follow-up shutdown abort requeues without consuming an attempt", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 127, headSha: "headsha" }));
+    const abort = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const tick = processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi(),
+      "worker-1",
+      {
+        abortSignal: abort.signal,
+        followUp: async (opts) => {
+          started.resolve();
+          await waitUntilAborted(opts.abortSignal);
+          return { status: "cancelled" };
+        },
+      },
+      () => undefined
+    );
+    await started.promise;
+    abort.abort();
+    await tick;
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(store.rows[0]?.leasedBy).toBeNull();
+  });
+
+  test("cancelled without shutdown abort publishes skipped so reopen can re-enqueue", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeIssueJob();
+    await store.enqueueIssue(job);
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      implement: async () => ({ status: "cancelled" }),
+    });
+    expect(store.rows[0]?.state).toBe("skipped");
+    expect(store.rows[0]?.leasedBy).toBeNull();
+    expect(await store.enqueueIssue(makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z" }))).toEqual({
+      key: "implement:kirmanak/demo#12",
+      queued: true,
+    });
+  });
+
   test("maps implement no-changes to skipped so an issue edit can re-enqueue", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeIssueJob();

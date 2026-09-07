@@ -18,6 +18,7 @@ import { renderTokenMetrics } from "./token_metrics.ts";
 import type { IssueJob } from "./types.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
 import {
+  abortIssueQueue,
   createIssueQueue,
   handleIssueCancel,
   issueJobKey,
@@ -268,6 +269,15 @@ function workerId(): string {
   return `worker-${hostname()}-${process.pid}-${crypto.randomUUID()}`;
 }
 
+function bindAbort(signal: AbortSignal | undefined, fn: () => void): void {
+  if (!signal) return;
+  if (signal.aborted) {
+    fn();
+    return;
+  }
+  signal.addEventListener("abort", fn, { once: true });
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -289,6 +299,13 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 async function main() {
   const config = loadWorkerConfig();
   scrubSecretEnv();
+  const shutdown = new AbortController();
+  const onSignal = (signal: string) => {
+    log(`received ${signal}, shutting down`);
+    if (!shutdown.signal.aborted) shutdown.abort();
+  };
+  process.once("SIGTERM", () => onSignal("SIGTERM"));
+  process.once("SIGINT", () => onSignal("SIGINT"));
   await ensureOpenCodeWellKnownAuth({
     home: config.home,
     url: config.opencodeWellKnownUrl,
@@ -322,18 +339,29 @@ async function main() {
   };
   scan();
   setInterval(scan, config.scanIntervalMs);
+  if (ramQueue) bindAbort(shutdown.signal, () => abortIssueQueue(ramQueue));
 
   if (store) {
     const leasedBy = workerId();
     const run = async () => {
-      while (true) {
+      while (!shutdown.signal.aborted) {
         try {
           await reclaimExpiredWorkerJobs(store, config.maxJobAttempts, log);
-          const result = await processWorkerTick(store, config, api, leasedBy, {}, log, aborts, pids);
-          if (result === "idle") await sleep(QUEUE_POLL_MS);
+          const result = await processWorkerTick(
+            store,
+            config,
+            api,
+            leasedBy,
+            { abortSignal: shutdown.signal },
+            log,
+            aborts,
+            pids
+          );
+          if (result === "idle") await sleep(QUEUE_POLL_MS, shutdown.signal);
         } catch (err) {
+          if (shutdown.signal.aborted) return;
           log(`worker tick failed: ${err instanceof Error ? err.message : String(err)}`);
-          await sleep(QUEUE_POLL_MS).catch(() => undefined);
+          await sleep(QUEUE_POLL_MS, shutdown.signal).catch(() => undefined);
         }
       }
     };
