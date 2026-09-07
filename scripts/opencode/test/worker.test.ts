@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, readClaim, writeClaim } from "../src/claim.ts";
+import { claimFilePath, isPidAlive, readClaim, writeClaim } from "../src/claim.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
@@ -15,6 +15,16 @@ import {
   makeRepo,
   makeWorkerConfig,
 } from "./fixtures.ts";
+
+function waitUntilAborted(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (!signal || signal.aborted) {
+      resolve();
+      return;
+    }
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
 
 function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: string[] } {
   const comments: string[] = [];
@@ -93,6 +103,45 @@ describe("handleIssueCancel", () => {
       const api = makeApi();
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12);
       expect(api.comments.at(-1)).toContain("stopped");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("ledger cancel does not kill an unrelated claim pid", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
+    try {
+      const child = Bun.spawn(["sleep", "30"]);
+      await writeClaim(claimFilePath(home, "kirmanak", "demo", 12), {
+        pid: child.pid,
+        startedAt: "2026-05-23T00:00:00Z",
+        heartbeatAt: "2026-05-23T00:00:00Z",
+        worktree: "/work/12",
+        branch: "jumi/issue-12-fix-the-thing",
+        issueUpdatedAt: "2026-05-23T00:00:00Z",
+        headShaAtStart: "abc",
+        terminal: false,
+      });
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      await store.lease("worker-other", 60_000, undefined, WORKER_JOB_KINDS);
+      const api = makeApi();
+      await handleIssueCancel(
+        makeWorkerConfig({ home }),
+        api,
+        "kirmanak",
+        "demo",
+        12,
+        undefined,
+        store,
+        new Map(),
+        new Map()
+      );
+      expect(store.rows[0]?.state).toBe("cancelled");
+      expect(isPidAlive(child.pid)).toBe(true);
+      expect(api.comments.at(-1)).toContain("stopped");
+      child.kill();
+      await child.exited;
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -186,6 +235,128 @@ describe("processWorkerTick", () => {
       }
     );
     expect(conflict).toEqual({ timeoutMs: 900_000, maxConflictRounds: 7 });
+  });
+
+  test("two workers cannot double-lease the same job", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    let running = 0;
+    let maxRunning = 0;
+    const implement = async () => {
+      running++;
+      maxRunning = Math.max(maxRunning, running);
+      await Bun.sleep(20);
+      running--;
+      return { status: "pr" as const, prNumber: 1, htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/1" };
+    };
+    const results = await Promise.all([
+      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-a", { implement }),
+      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", { implement }),
+    ]);
+    expect(maxRunning).toBe(1);
+    expect(results.sort()).toEqual(["idle", "processed"]);
+    expect(store.rows.filter((row) => row.kind === "implement")).toHaveLength(1);
+    expect(store.rows[0]?.state).toBe("succeeded");
+  });
+
+  test("two workers lease different jobs", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ issueNumber: 12 }));
+    await store.enqueueIssue(
+      makeIssueJob({ issueNumber: 13, htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/13" })
+    );
+    const seen: number[] = [];
+    const implement = async (opts: { job: { issueNumber: number } }) => {
+      seen.push(opts.job.issueNumber);
+      return { status: "pr" as const, prNumber: opts.job.issueNumber, htmlUrl: "https://example" };
+    };
+    const results = await Promise.all([
+      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-a", { implement }),
+      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", { implement }),
+    ]);
+    expect(results).toEqual(["processed", "processed"]);
+    expect(seen.sort((a, b) => a - b)).toEqual([12, 13]);
+    expect(store.rows.every((row) => row.state === "succeeded")).toBe(true);
+  });
+
+  test("same-replica unassign aborts the holder without waiting for heartbeat", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const aborts = new Map<string, AbortController>();
+      const started = Promise.withResolvers<void>();
+      const tick = processWorkerTick(
+        store,
+        makeWorkerConfig({ home }),
+        makeApi(),
+        "worker-1",
+        {
+          heartbeatMs: 60_000,
+          implement: async (opts) => {
+            started.resolve();
+            await waitUntilAborted(opts.abortSignal);
+            return { status: "cancelled" };
+          },
+        },
+        () => undefined,
+        aborts
+      );
+      await started.promise;
+      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store, aborts);
+      expect(await tick).toBe("processed");
+      expect(store.rows[0]?.state).toBe("cancelled");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("unassign on another replica aborts the holder via failed heartbeat", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
+    try {
+      const child = Bun.spawn(["sleep", "30"]);
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const holderAborts = new Map<string, AbortController>();
+      const holderPids = new Map<string, number>();
+      const started = Promise.withResolvers<void>();
+      const tick = processWorkerTick(
+        store,
+        makeWorkerConfig({ home }),
+        makeApi(),
+        "worker-holder",
+        {
+          heartbeatMs: 15,
+          implement: async (opts) => {
+            await opts.onPid?.(child.pid);
+            started.resolve();
+            await waitUntilAborted(opts.abortSignal);
+            return { status: "cancelled" };
+          },
+        },
+        () => undefined,
+        holderAborts,
+        holderPids
+      );
+      await started.promise;
+      await handleIssueCancel(
+        makeWorkerConfig({ home }),
+        makeApi(),
+        "kirmanak",
+        "demo",
+        12,
+        undefined,
+        store,
+        new Map(),
+        new Map()
+      );
+      expect(store.rows[0]?.state).toBe("cancelled");
+      expect(await tick).toBe("processed");
+      await child.exited;
+      expect(child.exitCode === 0).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   test("maps implement no-changes to skipped so an issue edit can re-enqueue", async () => {

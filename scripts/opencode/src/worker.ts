@@ -28,6 +28,7 @@ export interface RunWorkerJobExtras {
   implement?: typeof implementIssue;
   followUp?: typeof implementFollowUp;
   conflict?: typeof implementConflict;
+  heartbeatMs?: number;
 }
 
 function log(message: string) {
@@ -97,6 +98,22 @@ export function abortIssueJob(queue: ReviewQueue<IssueJob>, key: string): void {
   withAborts.aborts?.get(key)?.abort();
 }
 
+function abortLocalJob(
+  aborts: Map<string, AbortController> | undefined,
+  pids: Map<string, number> | undefined,
+  key: string
+): void {
+  aborts?.get(key)?.abort();
+  const pid = pids?.get(key);
+  if (pid && pid !== process.pid && isPidAlive(pid)) {
+    try {
+      process.kill(pid);
+    } catch {
+      // Child may have already exited.
+    }
+  }
+}
+
 export async function handleIssueCancel(
   config: WorkerConfig,
   api: IssueApi,
@@ -113,15 +130,7 @@ export async function handleIssueCancel(
     queue.drop(key);
     abortIssueJob(queue, key);
   }
-  aborts?.get(key)?.abort();
-  const pid = pids?.get(key);
-  if (pid && pid !== process.pid && isPidAlive(pid)) {
-    try {
-      process.kill(pid);
-    } catch {
-      // Child may have already exited.
-    }
-  }
+  abortLocalJob(aborts, pids, key);
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
   const claim = await readClaim(claimPath);
@@ -132,6 +141,7 @@ export async function handleIssueCancel(
     await deleteClaim(claimPath);
     return { key, cancelled: true };
   }
+  const skipClaimKill = store ? { killPid: () => undefined } : {};
   if (!claim) {
     if (cancelledQueued > 0) {
       await cancelIssueWork({
@@ -141,6 +151,7 @@ export async function handleIssueCancel(
         issueNumber,
         botUsername: config.botUsername,
         home: config.home,
+        ...skipClaimKill,
       });
     }
     return { key, cancelled: true };
@@ -152,6 +163,7 @@ export async function handleIssueCancel(
     issueNumber,
     botUsername: config.botUsername,
     home: config.home,
+    ...skipClaimKill,
   });
   return { key, cancelled: true };
 }
@@ -232,19 +244,29 @@ export async function processWorkerTick(
   const row = await store.lease(leasedBy, config.leaseMs, undefined, WORKER_JOB_KINDS);
   if (!row) return "idle";
 
+  const key = issueJobKey({ owner: row.owner, repo: row.repo, issueNumber: row.issueNumber ?? 0 });
+  const abort = new AbortController();
+  aborts?.set(key, abort);
+
   let heartbeatStopped = false;
+  const loseLease = () => {
+    if (heartbeatStopped) return;
+    abort.abort();
+    abortLocalJob(aborts, pids, key);
+  };
   const heartbeat = setInterval(() => {
     if (heartbeatStopped) return;
-    void store.heartbeat(row.id, leasedBy, config.leaseMs);
-  }, HEARTBEAT_MS);
+    void store.heartbeat(row.id, leasedBy, config.leaseMs).then(
+      (ok) => {
+        if (!ok) loseLease();
+      },
+      () => undefined
+    );
+  }, extras.heartbeatMs ?? HEARTBEAT_MS);
   const stopHeartbeat = () => {
     heartbeatStopped = true;
     clearInterval(heartbeat);
   };
-
-  const key = issueJobKey({ owner: row.owner, repo: row.repo, issueNumber: row.issueNumber ?? 0 });
-  const abort = new AbortController();
-  aborts?.set(key, abort);
 
   try {
     const job = issueJobFromRecord(row);
@@ -287,19 +309,23 @@ export async function processWorkerTick(
             })
           : await runImplement({ ...shared, timeoutMs: config.opencodeTimeoutMs });
     stopHeartbeat();
+    const current = await store.get(row.id);
+    if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
+      logger(`${issueJobKey(job)} cancelled`);
+      return "processed";
+    }
     const reason =
       result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
-    try {
-      await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
-    } catch (publishErr) {
-      const current = await store.get(row.id);
-      if (current?.state !== "cancelled") throw publishErr;
-    }
+    await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
     return "processed";
   } catch (err) {
-    logger(`worker job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
     stopHeartbeat();
+    if (abort.signal.aborted) {
+      logger(`${row.jobKey} cancelled`);
+      return "processed";
+    }
+    logger(`worker job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
     try {
       await store.expireLease(row.id, leasedBy);
     } catch (expireErr) {

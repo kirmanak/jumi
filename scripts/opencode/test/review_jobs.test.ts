@@ -7,7 +7,7 @@ import {
   RECLAIM_LEASED_BY,
   WORKER_JOB_KINDS,
 } from "../src/review_jobs.ts";
-import { makeJob } from "./fixtures.ts";
+import { makeIssueJob, makeJob } from "./fixtures.ts";
 
 describe("MemoryReviewJobStore", () => {
   test("dedupes in-flight job_key", async () => {
@@ -126,6 +126,19 @@ describe("MemoryReviewJobStore", () => {
     const leased = [a, b].filter(Boolean);
     expect(leased).toHaveLength(1);
     expect(leased[0]?.leasedBy === "e1" || leased[0]?.leasedBy === "e2").toBe(true);
+  });
+
+  test("two workers cannot double-lease the same implement row", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const [a, b] = await Promise.all([
+      store.lease("worker-a", 60_000, undefined, WORKER_JOB_KINDS),
+      store.lease("worker-b", 60_000, undefined, WORKER_JOB_KINDS),
+    ]);
+    const leased = [a, b].filter(Boolean);
+    expect(leased).toHaveLength(1);
+    expect(leased[0]?.kind).toBe("implement");
+    expect(leased[0]?.leasedBy === "worker-a" || leased[0]?.leasedBy === "worker-b").toBe(true);
   });
 
   test("lease expiry reclaim requeues with attempt++", async () => {
