@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isAssignedToBot } from "./assignee.ts";
+import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import type { ClaimRecord } from "./claim.ts";
 import {
   acquireClaim,
@@ -31,6 +32,7 @@ export const MAX_CONFLICT_ROUNDS = 3;
 const GENERATED_LOCKS = new Set(["Chart.lock", "requirements.lock"]);
 
 export const CONFLICT_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_CONFLICT.md (merge vs the default branch).
+If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head.
 Resolve only conflicted regions on the current branch.
 Keep both the issue intent and the default-branch changes when they are orthogonal.
 Do not drop either side to “win.” Do not reopen product decisions in JUMI_TASK.md.
@@ -82,6 +84,7 @@ export interface MergeDefaultIntoWorktreeOpts {
   logger?: (message: string) => void;
   abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;
+  ciMarkdown?: string;
 }
 
 function logDefault(message: string) {
@@ -429,6 +432,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
         conflicted: remaining,
       })
     );
+    if (opts.ciMarkdown) await writeFile(join(worktree, CI_LOG_FILE), opts.ciMarkdown);
     log(`Running OpenCode conflict resolution for ${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`);
     openCodeRan = true;
     await opts.openCodeRunner(CONFLICT_PROMPT, {
@@ -447,6 +451,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     });
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
+    await rm(join(worktree, CI_LOG_FILE), { force: true });
     await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
     await git(["add", "-A"], { cwd: worktree, env }).catch(() => undefined);
     remaining = await markerPaths(git, worktree, env);
@@ -675,6 +680,20 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       body: currentIssue.body ?? "",
       htmlUrl: currentIssue.html_url,
     };
+    let ciMarkdown: string | undefined;
+    try {
+      const ci = await inspectCi({
+        api: opts.api,
+        owner,
+        repo,
+        sha: pr.head.sha,
+        home: opts.home,
+        issueNumber,
+      });
+      if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
+    } catch (err) {
+      log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     const mergeResult = await mergeDefaultIntoWorktree({
       git: runConfiguredGit,
@@ -699,6 +718,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       helmRunner: opts.helmRunner,
       logger: log,
       abortSignal: opts.abortSignal,
+      ciMarkdown,
       onPid: async (pid) => {
         await opts.onPid?.(pid);
         await serializeClaim(async () => {

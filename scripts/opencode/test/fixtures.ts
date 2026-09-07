@@ -1,6 +1,8 @@
 import type { ServiceConfig } from "../src/config.ts";
 import type {
+  GiteaActionJob,
   GiteaComment,
+  GiteaCommitStatus,
   GiteaIssue,
   GiteaIssueCommentPayload,
   GiteaIssuePayload,
@@ -11,6 +13,7 @@ import type {
   GiteaPushPayload,
   GiteaRepo,
   GiteaUser,
+  GiteaWorkflowJobPayload,
   IssueJob,
   ReviewJob,
 } from "../src/types.ts";
@@ -160,6 +163,42 @@ export function makeIssuePayload(overrides: Partial<GiteaIssuePayload> = {}): Gi
     action: "assigned",
     number: issue.number,
     issue,
+    repository,
+    sender: makeUser({ login: "alice" }),
+    ...overrides,
+  };
+}
+
+export function emptyCiMethods(): {
+  listCommitStatuses: () => Promise<GiteaCommitStatus[]>;
+  listActionJobs: () => Promise<GiteaActionJob[]>;
+  getActionJobLogs: () => Promise<string>;
+} {
+  return {
+    listCommitStatuses: async () => [],
+    listActionJobs: async () => [],
+    getActionJobLogs: async () => "",
+  };
+}
+
+export function makeWorkflowJobPayload(
+  overrides: Partial<GiteaWorkflowJobPayload> & {
+    workflow_job?: GiteaWorkflowJobPayload["workflow_job"];
+  } = {}
+): GiteaWorkflowJobPayload {
+  const repository = overrides.repository ?? makeRepo();
+  return {
+    action: "completed",
+    workflow_job: {
+      id: 99,
+      name: "build",
+      status: "completed",
+      conclusion: "failure",
+      head_sha: "headsha",
+      head_branch: "jumi/issue-12-fix-the-thing",
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/actions/runs/1/jobs/99",
+      run_id: 1,
+    },
     repository,
     sender: makeUser({ login: "alice" }),
     ...overrides,

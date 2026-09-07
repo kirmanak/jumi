@@ -1,5 +1,7 @@
 import type {
+  GiteaActionJob,
   GiteaComment,
+  GiteaCommitStatus,
   GiteaCommitStatusPayload,
   GiteaIssue,
   GiteaPR,
@@ -51,6 +53,21 @@ export class GiteaAPI {
     // 204 No Content
     if (res.status === 204) return undefined as T;
     return res.json() as Promise<T>;
+  }
+
+  private async requestText(path: string, maxBytes = 1_048_576): Promise<string> {
+    const url = `${this.base}${path}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { ...this.headers(), Accept: "text/plain, */*" },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Gitea API GET ${url} → ${res.status}: ${text}`);
+    }
+    const buf = new Uint8Array(await res.arrayBuffer());
+    const slice = buf.byteLength > maxBytes ? buf.subarray(buf.byteLength - maxBytes) : buf;
+    return new TextDecoder().decode(slice);
   }
 
   private get<T>(path: string) {
@@ -216,5 +233,31 @@ export class GiteaAPI {
       `/repos/${this.repoPath(owner, repo)}/statuses/${encodeURIComponent(sha)}`,
       status
     );
+  }
+
+  async listCommitStatuses(owner: string, repo: string, sha: string): Promise<GiteaCommitStatus[]> {
+    return this.getAll<GiteaCommitStatus>(
+      `/repos/${this.repoPath(owner, repo)}/commits/${encodeURIComponent(sha)}/statuses`
+    );
+  }
+
+  async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<GiteaActionJob[]> {
+    const results: GiteaActionJob[] = [];
+    let page = 1;
+    const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
+    while (page <= 40) {
+      const body = await this.get<{ jobs?: GiteaActionJob[] }>(
+        `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}${statusQ}`
+      );
+      const batch = Array.isArray(body?.jobs) ? body.jobs : [];
+      results.push(...batch);
+      if (batch.length !== 50) break;
+      page += 1;
+    }
+    return results;
+  }
+
+  async getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string> {
+    return this.requestText(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/logs`);
   }
 }

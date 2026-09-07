@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isAssignedToBot } from "./assignee.ts";
+import { buildCiMarkdown, CI_LOG_FILE, type CiInspection, flakeComment, inspectCi, recordCiHandled } from "./ci.ts";
 import type { ClaimRecord } from "./claim.ts";
 import {
   acquireClaim,
@@ -36,6 +37,7 @@ export const MAX_FOLLOWUP_ROUNDS = 3;
 export const FEEDBACK_MAX_BYTES = 32 * 1024;
 
 export const FOLLOWUP_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
+If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too. Do not call tea, the forge API, or fetch Actions yourself.
 Address the feedback in this repository on the current branch.
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Do not force-push. Do not ask questions. Do not open a pull request.
@@ -538,22 +540,63 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   }
 
   const state = await readFollowUpState(statePath);
-  if (state.round >= maxFollowupRounds) {
-    await sticky("stuck: too many follow-up rounds", pr.number);
-    await forgetClaim();
-    return { status: "skipped", reason: "stuck: too many follow-up rounds" };
+  const pendingItems = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
+  let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
+  let ci: CiInspection = { sha: pr.head.sha, pending: false, failed: [], unhandled: [] };
+  try {
+    ci = await inspectCi({
+      api: opts.api,
+      owner,
+      repo,
+      sha: pr.head.sha,
+      home: opts.home,
+      issueNumber,
+    });
+  } catch (err) {
+    log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
   }
+  const ciWake = !ci.pending && ci.unhandled.length > 0;
   if (
     (opts.job.trigger?.commentId !== undefined && state.handledCommentIds.includes(opts.job.trigger.commentId)) ||
     (opts.job.trigger?.reviewId !== undefined && state.handledReviewIds.includes(opts.job.trigger.reviewId))
   ) {
-    await forgetClaim();
-    return { status: "skipped", reason: "comment already handled" };
+    if (!ciWake) {
+      await forgetClaim();
+      return { status: "skipped", reason: "comment already handled" };
+    }
   }
-  const pendingItems = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
-  if (!hasUnhandledFollowUpItems(pendingItems, state)) {
-    await forgetClaim();
-    return { status: "skipped", reason: "no unhandled feedback" };
+  if (hasFeedback && state.round >= maxFollowupRounds) {
+    if (!ciWake) {
+      await sticky("stuck: too many follow-up rounds", pr.number);
+      await forgetClaim();
+      return { status: "skipped", reason: "stuck: too many follow-up rounds" };
+    }
+    hasFeedback = false;
+  }
+  if (!hasFeedback) {
+    if (ci.pending) {
+      await forgetClaim();
+      return { status: "skipped", reason: "CI still pending" };
+    }
+    if (!ciWake) {
+      await forgetClaim();
+      return { status: "skipped", reason: "no unhandled feedback" };
+    }
+    if (ci.unhandled.every((check) => check.flake)) {
+      await sticky(flakeComment(ci.unhandled), pr.number);
+      await recordCiHandled({
+        home: opts.home,
+        owner,
+        repo,
+        issueNumber,
+        prNumber: pr.number,
+        sha: pr.head.sha,
+        checks: ci.unhandled,
+        now,
+      });
+      await forgetClaim();
+      return { status: "skipped", reason: "CI infra flake" };
+    }
   }
   const conflictPath = conflictStatePath(opts.home, owner, repo, issueNumber);
   const previousConflict = await readConflictState(conflictPath);
@@ -615,18 +658,34 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   if (opts.job.trigger?.commentId !== undefined) handledCommentIds.push(opts.job.trigger.commentId);
   if (opts.job.trigger?.reviewId !== undefined) handledReviewIds.push(opts.job.trigger.reviewId);
 
+  let followUpEngineRan = false;
+  const persistCi = async () => {
+    if (!followUpEngineRan || ci.failed.length === 0) return;
+    await recordCiHandled({
+      home: opts.home,
+      owner,
+      repo,
+      issueNumber,
+      prNumber: pr.number,
+      sha: pr.head.sha,
+      checks: ci.failed,
+      now,
+    });
+  };
+
   const recordAttempt = async (headSha: string) => {
     const uniqueComments = [...new Set(handledCommentIds)];
     const uniqueReviews = [...new Set(handledReviewIds)];
     await writeFollowUpState(statePath, {
       prNumber: pr.number,
-      round: state.round + 1,
+      round: hasFeedback ? state.round + 1 : state.round,
       lastHeadSha: headSha,
       handledCommentIds: uniqueComments,
       handledReviewIds: uniqueReviews,
       handledReviewFindings: uniqueReviewFindings(handledReviewFindings),
       updatedAt: now().toISOString(),
     });
+    await persistCi();
   };
 
   let attemptedHeadSha = "";
@@ -729,6 +788,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       helmRunner: opts.helmRunner,
       logger: log,
       abortSignal: opts.abortSignal,
+      ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
       onPid: async (pid) => {
         await opts.onPid?.(pid);
         await serializeClaim(async () => {
@@ -765,36 +825,46 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
     }
 
-    const items = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
-    const feedback = buildFeedbackMarkdown({
-      pr,
-      trigger: opts.job.trigger,
-      triggerBody: triggerBodyFromItems(opts.job.trigger, items),
-      comments: items.comments,
-      inlines: items.inlines,
-      reviews: items.reviews,
-    });
-    handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
-    handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
-    const findingById = new Map<number, HandledReviewFinding>();
-    for (const comment of items.comments) {
-      const finding = reviewFindingFromComment(comment);
-      if (finding) findingById.set(finding.id, finding);
-    }
-    handledCommentIds = handledCommentIds.filter((id) => {
-      const finding = findingById.get(id);
-      if (!finding) return true;
-      handledReviewFindings.push(finding);
-      return false;
-    });
-
     throwIfAborted(opts.abortSignal);
     await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
-    await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
-    await sticky("Jumi is addressing review comments.", pr.number);
+    if (hasFeedback) {
+      const items = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
+      const feedback = buildFeedbackMarkdown({
+        pr,
+        trigger: opts.job.trigger,
+        triggerBody: triggerBodyFromItems(opts.job.trigger, items),
+        comments: items.comments,
+        inlines: items.inlines,
+        reviews: items.reviews,
+      });
+      handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
+      handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
+      const findingById = new Map<number, HandledReviewFinding>();
+      for (const comment of items.comments) {
+        const finding = reviewFindingFromComment(comment);
+        if (finding) findingById.set(finding.id, finding);
+      }
+      handledCommentIds = handledCommentIds.filter((id) => {
+        const finding = findingById.get(id);
+        if (!finding) return true;
+        handledReviewFindings.push(finding);
+        return false;
+      });
+      await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
+    } else {
+      await writeFile(
+        join(worktree, "JUMI_FEEDBACK.md"),
+        "# Review feedback\n\nNo review comments this round. Address JUMI_CI.md.\n"
+      );
+    }
+    if (ci.failed.length) {
+      await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
+    }
+    await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
     throwIfAborted(opts.abortSignal);
     log(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
+    followUpEngineRan = true;
     await engine(FOLLOWUP_PROMPT, {
       model: opts.model,
       workdir: worktree,
@@ -827,6 +897,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     throwIfAborted(opts.abortSignal);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_FEEDBACK.md"), { force: true });
+    await rm(join(worktree, CI_LOG_FILE), { force: true });
     await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
     const porcelain = (await runConfiguredGit(["status", "--porcelain"], { cwd: worktree, env })).trim();
     if (!porcelain) {
@@ -895,13 +966,14 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     }
     await writeFollowUpState(statePath, {
       prNumber: pr.number,
-      round: state.round + 1,
+      round: hasFeedback ? state.round + 1 : state.round,
       lastHeadSha: pr.head.sha,
       handledCommentIds: state.handledCommentIds,
       handledReviewIds: state.handledReviewIds,
       handledReviewFindings: state.handledReviewFindings,
       updatedAt: now().toISOString(),
     }).catch(() => undefined);
+    await persistCi().catch(() => undefined);
     await stopHeartbeat();
     await serializeClaim(async () => {
       await forgetClaim();

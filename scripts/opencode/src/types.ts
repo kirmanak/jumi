@@ -211,3 +211,45 @@ export interface GiteaCommitStatusPayload {
   description?: string;
   context?: string;
 }
+
+export interface GiteaCommitStatus {
+  id?: number;
+  context?: string;
+  /** Create-status field. List API uses `status`. */
+  state?: GiteaCommitStatusState;
+  status?: GiteaCommitStatusState;
+  description?: string;
+  target_url?: string;
+  created_at?: string;
+  updated_at?: string;
+  url?: string;
+}
+
+export interface GiteaActionJob {
+  id: number;
+  name: string;
+  status?: string;
+  conclusion?: string;
+  head_sha?: string;
+  head_branch?: string;
+  html_url?: string;
+  run_id?: number;
+}
+
+export interface GiteaWorkflowJob {
+  id?: number;
+  name?: string;
+  status?: string;
+  conclusion?: string;
+  head_sha?: string;
+  head_branch?: string;
+  html_url?: string;
+  run_id?: number;
+}
+
+export interface GiteaWorkflowJobPayload {
+  action?: string;
+  workflow_job?: GiteaWorkflowJob;
+  repository: GiteaRepo;
+  sender?: GiteaUser;
+}

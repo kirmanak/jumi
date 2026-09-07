@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_webhook.ts";
 import { scrubSecretEnv } from "./config.ts";
 import {
   parseIssueCommentPayload,
@@ -66,11 +67,16 @@ export function isPushWebhookEvent(event: string | null, eventType: string | nul
   return event === "push" || eventType === "push";
 }
 
+export function isWorkflowJobWebhookEvent(event: string | null, eventType: string | null): boolean {
+  return event === "workflow_job" || eventType === "workflow_job";
+}
+
 export function isWorkerWebhookEvent(event: string | null, eventType: string | null): boolean {
   return (
     isIssuesWebhookEvent(event, eventType) ||
     isFollowUpWebhookEvent(event, eventType) ||
-    isPushWebhookEvent(event, eventType)
+    isPushWebhookEvent(event, eventType) ||
+    isWorkflowJobWebhookEvent(event, eventType)
   );
 }
 
@@ -148,6 +154,36 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       allowedRepos: config.allowedRepos,
       botUsername: config.botUsername,
     };
+
+    if (isWorkflowJobWebhookEvent(event, eventType)) {
+      if (!deps.api) return json(202, { skipped: "not an in-scope jumi pull request" });
+      let payload: ReturnType<typeof parseWorkflowJobPayload>;
+      try {
+        payload = parseWorkflowJobPayload(rawBody);
+      } catch {
+        return json(202, { skipped: "malformed workflow_job payload" });
+      }
+      try {
+        const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api);
+        if (decision.type === "skip") return json(202, { skipped: decision.reason });
+        const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+        const receivedAt = new Date().toISOString();
+        const keys: string[] = [];
+        for (const partial of decision.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const result: EnqueueResult = await deps.queue.enqueue(job);
+          keys.push(result.key);
+          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        }
+        return json(202, { queued: true, keys });
+      } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        return json(500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
 
     if (isPushWebhookEvent(event, eventType)) {
       if (!deps.api) return json(202, { skipped: "no managed jumi PRs" });

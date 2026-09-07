@@ -1,4 +1,12 @@
-import { claimFilePath, conflictStatePath, deleteClaim, followUpStatePath, isPidAlive, readClaim } from "./claim.ts";
+import {
+  ciStatePath,
+  claimFilePath,
+  conflictStatePath,
+  deleteClaim,
+  followUpStatePath,
+  isPidAlive,
+  readClaim,
+} from "./claim.ts";
 import { implementConflict } from "./conflict.ts";
 import { implementFollowUp } from "./followup.ts";
 import { createGiteaForge } from "./forge.ts";
@@ -119,6 +127,7 @@ export async function handleIssueCancel(
   const claim = await readClaim(claimPath);
   await deleteClaim(followUpStatePath(config.home, owner, repo, issueNumber));
   await deleteClaim(conflictStatePath(config.home, owner, repo, issueNumber));
+  await deleteClaim(ciStatePath(config.home, owner, repo, issueNumber));
   if (claim?.terminal) {
     await deleteClaim(claimPath);
     return { key, cancelled: true };

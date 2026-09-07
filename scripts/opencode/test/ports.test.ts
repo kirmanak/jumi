@@ -12,7 +12,16 @@ import { workerMarker } from "../src/gitea_issues.ts";
 import { implementIssue } from "../src/implement.ts";
 import { reviewPullRequest } from "../src/review.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeBranch, makeComment, makeFile, makeIssue, makeIssueJob, makePR, makeRepo } from "./fixtures.ts";
+import {
+  emptyCiMethods,
+  makeBranch,
+  makeComment,
+  makeFile,
+  makeIssue,
+  makeIssueJob,
+  makePR,
+  makeRepo,
+} from "./fixtures.ts";
 
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
@@ -65,6 +74,7 @@ function makeFakeForge(overrides: Partial<Forge> = {}): Forge & {
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    ...emptyCiMethods(),
     createCommitStatus: async (_owner, _repo, sha, status) => {
       statuses.push({ sha, state: status.state, context: status.context, description: status.description });
       return status;

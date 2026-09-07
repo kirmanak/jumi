@@ -8,7 +8,7 @@ import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo } from "./fixtures.ts";
+import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo } from "./fixtures.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -54,6 +54,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments, pulls };
 }

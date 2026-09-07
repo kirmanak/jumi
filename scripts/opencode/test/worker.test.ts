@@ -6,7 +6,15 @@ import { claimFilePath, readClaim, writeClaim } from "../src/claim.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
-import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
+import {
+  emptyCiMethods,
+  makeComment,
+  makeIssue,
+  makeIssueJob,
+  makePR,
+  makeRepo,
+  makeWorkerConfig,
+} from "./fixtures.ts";
 
 function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: string[] } {
   const comments: string[] = [];
@@ -28,6 +36,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments };
 }

@@ -6,7 +6,7 @@ import { claimFilePath, followUpStatePath, writeClaim } from "../src/claim.ts";
 import { writeFollowUpState } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { scanAssignedIssues } from "../src/scan.ts";
-import { makeComment, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { emptyCiMethods, makeComment, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
   const defaults: IssueApi = {
@@ -21,6 +21,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides };
 }
@@ -388,6 +389,82 @@ describe("scanAssignedIssues", () => {
                 repo_id: repo.id,
               },
             }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("jumi closer + red non-jumi check + no comments → enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+          listCommitStatuses: async () => [
+            { id: 1, context: "jumi/opencode-review", status: "success" },
+            { id: 2, context: "build", status: "failure" },
+          ],
+          getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+      expect(jobs[0]?.prNumber).toBe(127);
+      expect(jobs[0]?.headSha).toBe("headsha");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("jumi closer + pending non-jumi check → skip CI follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+          listCommitStatuses: async () => [
+            { id: 1, context: "build", status: "failure" },
+            { id: 2, context: "test", status: "pending" },
           ],
         }),
         home,

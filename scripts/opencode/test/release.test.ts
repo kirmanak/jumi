@@ -324,6 +324,7 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.imageTarget).toBe("worker");
     expect(parsed.reviewer.volumes).toEqual(["/data", "/work"]);
     expect(parsed.worker.volumes).toEqual(["/data", "/work"]);
+    expect(markdown).toContain("workflow_job");
   });
 
   test("loader env matches contract required and optional headings", async () => {

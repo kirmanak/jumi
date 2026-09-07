@@ -4,6 +4,7 @@ import { isAssignedToBot } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
 import {
   acquireClaim,
+  ciStatePath,
   claimFilePath,
   conflictStatePath,
   deleteClaim,
@@ -455,4 +456,5 @@ export async function cancelIssueWork(opts: {
   await deleteClaim(claimPath);
   await deleteClaim(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
   await deleteClaim(conflictStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
+  await deleteClaim(ciStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
 }

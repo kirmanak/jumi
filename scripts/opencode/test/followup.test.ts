@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, conflictStatePath, followUpStatePath, readClaim } from "../src/claim.ts";
+import { readCiState } from "../src/ci.ts";
+import { ciStatePath, claimFilePath, conflictStatePath, followUpStatePath, readClaim } from "../src/claim.ts";
 import { CONFLICT_PROMPT, readConflictState, writeConflictState } from "../src/conflict.ts";
 import {
   buildFeedbackMarkdown,
@@ -17,7 +18,7 @@ import {
 import type { IssueApi } from "../src/gitea_issues.ts";
 import type { GiteaPullReview } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -73,6 +74,7 @@ function makeApi(
     ],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments, pulls, commentIndexes };
 }
@@ -609,6 +611,61 @@ describe("implementFollowUp", () => {
       expect(result).toEqual({ status: "skipped", reason: "stuck: too many follow-up rounds" });
       expect(openCode).toBe(0);
       expect(api.comments.at(-1)).toContain("stuck: too many follow-up rounds");
+    });
+  });
+
+  test("exhausted review rounds still run CI-only follow-up", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi({
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          const ci = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
+          expect(ci).toContain("platforms;android-37");
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).not.toContain("please fix the tests");
+          expect(feedback).toContain("Address JUMI_CI.md");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("no-changes");
+      expect(openCode).toBe(1);
+      expect(api.comments.some((body) => body.includes("Jumi is addressing CI failure."))).toBe(true);
+      expect(api.comments.some((body) => body.includes("stuck: too many follow-up rounds"))).toBe(false);
+      const followState = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      expect(followState.round).toBe(3);
+      expect(followState.handledCommentIds).not.toContain(55);
     });
   });
 
@@ -1278,6 +1335,232 @@ describe("implementFollowUp", () => {
       const state = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
       expect(state.handledCommentIds).not.toContain(38022);
       expect(state.handledReviewFindings).toEqual([{ id: 38022, sha }]);
+    });
+  });
+
+  test("CI-only red check writes JUMI_CI.md and runs OpenCode without review comments", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+      });
+      let prompt = "";
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async (usedPrompt) => {
+          prompt = usedPrompt;
+          const ci = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
+          expect(ci).toContain("platforms;android-37");
+          expect(ci).toContain("Do not call tea");
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).not.toContain("please fix the tests");
+          expect(feedback).toContain("Address JUMI_CI.md");
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(prompt).toBe(FOLLOWUP_PROMPT);
+      expect(result.status).toBe("no-changes");
+      expect(api.comments.some((body) => body.includes("Jumi is addressing CI failure."))).toBe(true);
+      const followState = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      expect(followState.round).toBe(0);
+    });
+  });
+
+  test("clone/fetch failure before OpenCode does not record CI handled", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+      });
+      let openCode = 0;
+      await expect(
+        implementFollowUp({
+          api,
+          job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async (args) => {
+            const gitArgs = stripGitConfigArgs(args);
+            if (gitArgs[0] === "clone" || gitArgs[0] === "fetch") throw new Error("clone failed");
+            throw new Error("git should not run");
+          },
+          openCodeRunner: async () => {
+            openCode++;
+            return "done";
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("clone failed");
+      expect(openCode).toBe(0);
+      expect((await readCiState(ciStatePath(home, "kirmanak", "demo", 12))).handled).toEqual([]);
+    });
+  });
+
+  test("CI-only OpenCode failure still records handled CI", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+      });
+      await expect(
+        implementFollowUp({
+          api,
+          job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async (args) => {
+            const gitArgs = stripGitConfigArgs(args);
+            if (gitArgs[0] === "rev-parse") return "abc123";
+            if (gitArgs[0] === "status") return "";
+            if (gitArgs[0] === "rev-list") return "0";
+            return "";
+          },
+          openCodeRunner: async () => {
+            throw new Error("opencode exploded");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("opencode exploded");
+      const ciState = await readCiState(ciStatePath(home, "kirmanak", "demo", 12));
+      expect(ciState.handled).toHaveLength(1);
+      expect(ciState.handled[0]?.checkName).toBe("build");
+      expect(ciState.handled[0]?.sha).toBe("headsha");
+    });
+  });
+
+  test("CI still pending skips OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [
+          { id: 1, context: "build", status: "failure" },
+          { id: 2, context: "test", status: "pending" },
+        ],
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "CI still pending" });
+      expect(openCode).toBe(0);
+    });
+  });
+
+  test("known infra flake comments and does not run OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "CI infra flake" });
+      expect(openCode).toBe(0);
+      expect(api.comments.some((body) => body.includes("infra flake"))).toBe(true);
+    });
+  });
+
+  test("review follow-up still injects failed CI logs", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+      });
+      await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          const ci = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
+          expect(ci).toContain("platforms;android-37");
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).toContain("please fix the tests");
+          return "done";
+        },
+        logger: () => undefined,
+      });
     });
   });
 });

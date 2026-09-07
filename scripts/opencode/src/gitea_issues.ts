@@ -1,4 +1,13 @@
-import type { GiteaComment, GiteaIssue, GiteaPR, GiteaPullReview, GiteaPullReviewComment, GiteaRepo } from "./types.ts";
+import type {
+  GiteaActionJob,
+  GiteaComment,
+  GiteaCommitStatus,
+  GiteaIssue,
+  GiteaPR,
+  GiteaPullReview,
+  GiteaPullReviewComment,
+  GiteaRepo,
+} from "./types.ts";
 
 export interface IssueApi {
   getRepo(owner: string, repo: string): Promise<GiteaRepo>;
@@ -22,6 +31,9 @@ export interface IssueApi {
   listIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]>;
   listPullReviewComments(owner: string, repo: string, index: number): Promise<GiteaPullReviewComment[]>;
   listPullReviews(owner: string, repo: string, index: number): Promise<GiteaPullReview[]>;
+  listCommitStatuses(owner: string, repo: string, sha: string): Promise<GiteaCommitStatus[]>;
+  listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<GiteaActionJob[]>;
+  getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
 }
 
 export function workerMarker(owner: string, repo: string, issueNumber: number): string {

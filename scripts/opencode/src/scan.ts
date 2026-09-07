@@ -1,4 +1,5 @@
 import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
+import { needsCiFollowUp } from "./ci.ts";
 import { claimFilePath, isClaimLive, isPidAlive, readClaim } from "./claim.ts";
 import { needsConflict } from "./conflict.ts";
 import { needsFollowUp } from "./followup.ts";
@@ -83,6 +84,14 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
           home: opts.home,
           maxFollowupRounds: opts.maxFollowupRounds,
         });
+        const ci = await needsCiFollowUp({
+          api: opts.api,
+          owner,
+          repo,
+          sha: jumiPr.head.sha,
+          home: opts.home,
+          issueNumber: issue.number,
+        });
         const conflict = await needsConflict({
           pr: jumiPr,
           owner,
@@ -92,7 +101,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
           home: opts.home,
           maxConflictRounds: opts.maxConflictRounds,
         });
-        if (conflict && followUp) {
+        if (conflict && (followUp || ci)) {
           jobs.push({
             ...issueJobFrom(owner, repo, issue, repository, "scan"),
             mode: "follow-up",
@@ -110,7 +119,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
             delivery: `scan-${owner}-${repo}-${issue.number}`,
             receivedAt: new Date(nowMs).toISOString(),
           });
-        } else if (followUp) {
+        } else if (followUp || ci) {
           jobs.push({
             ...issueJobFrom(owner, repo, issue, repository, "scan"),
             mode: "follow-up",

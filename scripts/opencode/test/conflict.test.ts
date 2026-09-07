@@ -6,7 +6,7 @@ import { claimFilePath, conflictStatePath, readClaim, writeClaim } from "../src/
 import { CONFLICT_PROMPT, CONFLICT_TIMEOUT_MS, implementConflict, writeConflictState } from "../src/conflict.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -67,6 +67,7 @@ function makeApi(
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments, pulls, commentIndexes };
 }

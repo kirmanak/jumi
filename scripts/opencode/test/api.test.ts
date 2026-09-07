@@ -193,6 +193,32 @@ describe("GiteaAPI", () => {
     expect(comments.map((comment) => comment.body)).toEqual(["kept"]);
   });
 
+  test("lists commit statuses and action job logs", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.includes("/actions/jobs/9/logs")) return new Response("##[error]boom\n", { status: 200 });
+      if (href.includes("/actions/jobs")) return Response.json({ jobs: [{ id: 9, name: "build" }], total_count: 1 });
+      if (href.includes("/commits/") && href.includes("/statuses")) {
+        return Response.json([{ id: 1, context: "build", status: "failure" }]);
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listCommitStatuses("owner", "repo", "sha/1")).resolves.toEqual([
+      { id: 1, context: "build", status: "failure" },
+    ]);
+    await expect(api.listActionJobs("owner", "repo", { status: "failure" })).resolves.toEqual([
+      { id: 9, name: "build" },
+    ]);
+    await expect(api.getActionJobLogs("owner", "repo", 9)).resolves.toBe("##[error]boom\n");
+    expect(urls[0]).toContain("/commits/sha%2F1/statuses");
+    expect(urls[1]).toContain("/actions/jobs?limit=50&page=1&status=failure");
+    expect(urls[2]).toContain("/actions/jobs/9/logs");
+  });
+
   test("throws useful errors for non-2xx responses", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 

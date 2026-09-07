@@ -8,6 +8,7 @@ import { MemoryReviewJobStore, REVIEW_KIND, WORKER_JOB_KINDS, workerJobKey } fro
 import { processEngineTick } from "../src/server.ts";
 import { processWorkerTick } from "../src/worker.ts";
 import {
+  emptyCiMethods,
   makeComment,
   makeConfig,
   makeIssue,
@@ -59,6 +60,7 @@ function makeIssueApi(overrides: Partial<IssueApi> = {}): IssueApi {
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides };
 }

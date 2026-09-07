@@ -27,6 +27,10 @@ export function conflictStatePath(home: string, owner: string, repo: string, iss
   return join(home, "worker", "jobs", owner, repo, `${issueNumber}.conflict.json`);
 }
 
+export function ciStatePath(home: string, owner: string, repo: string, issueNumber: number): string {
+  return join(home, "worker", "jobs", owner, repo, `${issueNumber}.ci.json`);
+}
+
 export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
