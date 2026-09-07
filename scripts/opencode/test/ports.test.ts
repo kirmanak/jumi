@@ -90,7 +90,7 @@ describe("Engine and Forge ports", () => {
     const forge = createGiteaForge("https://gitea.example.test", "token-1");
     expect(forge).toBeInstanceOf(GiteaAPI);
     expect(FORGE_COMMITTER_NAME).toBe("jumi");
-    expect(FORGE_COMMITTER_EMAIL).toBe("jumi@noreply.kirmanak.stream");
+    expect(FORGE_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
   });
 
   test("resolveEngine prefers engine over openCodeRunner", async () => {

@@ -86,9 +86,9 @@ describe("review workspace", () => {
     expect(calls[0].env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
     expect(calls[0].env.GIT_LFS_SKIP_SMUDGE).toBe("1");
     expect(calls[0].env.GIT_AUTHOR_NAME).toBe("jumi");
-    expect(calls[0].env.GIT_AUTHOR_EMAIL).toBe("jumi@noreply.kirmanak.stream");
+    expect(calls[0].env.GIT_AUTHOR_EMAIL).toBe("jumi@kirmanak.stream");
     expect(calls[0].env.GIT_COMMITTER_NAME).toBe("jumi");
-    expect(calls[0].env.GIT_COMMITTER_EMAIL).toBe("jumi@noreply.kirmanak.stream");
+    expect(calls[0].env.GIT_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
     expect(calls[0].env.GIT_CONFIG_COUNT).toBeUndefined();
     expect(calls[0].env.GIT_AUTH_USERNAME).toBe("jumi");
     expect(calls[0].env.GIT_AUTH_TOKEN).toBe("bot-token");
