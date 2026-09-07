@@ -787,6 +787,79 @@ describe("scanAssignedIssues", () => {
     }
   });
 
+  test("closing jumi PR + current-head failure sticky at configured maxFollowupRounds skips", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 5,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr()],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky(),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+        maxFollowupRounds: 5,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("closing jumi PR + current-head failure sticky at round 3 still scans when cap is 5", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [jumiClosingPr()],
+          listIssueComments: async () => [
+            makeComment({
+              id: 38022,
+              body: failureSticky(),
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+        maxFollowupRounds: 5,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("closing jumi PR + current-head failure sticky at round 3 skips", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
     try {

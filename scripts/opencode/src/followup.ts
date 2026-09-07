@@ -13,6 +13,7 @@ import {
   writeClaim,
 } from "./claim.ts";
 import {
+  CONFLICT_TIMEOUT_MS,
   MAX_CONFLICT_ROUNDS,
   mergeDefaultIntoWorktree,
   readConflictState,
@@ -317,9 +318,10 @@ export async function needsFollowUp(opts: {
   issueNumber: number;
   botUsername: string;
   home: string;
+  maxFollowupRounds?: number;
 }): Promise<boolean> {
   const state = await readFollowUpState(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
-  if (state.round >= MAX_FOLLOWUP_ROUNDS) return false;
+  if (state.round >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return false;
   const items = await collectFollowUpItems(
     opts.api,
     opts.owner,
@@ -471,6 +473,10 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   const statePath = followUpStatePath(opts.home, owner, repo, issueNumber);
   const sanitizeEnv = opts.sanitizeOpenCodeEnv ?? true;
   const useClaim = opts.useClaim !== false;
+  const maxFollowupRounds = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
+  const maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
+  const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
+  const conflictTimeoutMs = opts.conflictTimeoutMs ?? CONFLICT_TIMEOUT_MS;
   const forgetClaim = async () => {
     if (useClaim) await deleteClaim(claimPath);
   };
@@ -532,7 +538,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   }
 
   const state = await readFollowUpState(statePath);
-  if (state.round >= MAX_FOLLOWUP_ROUNDS) {
+  if (state.round >= maxFollowupRounds) {
     await sticky("stuck: too many follow-up rounds", pr.number);
     await forgetClaim();
     return { status: "skipped", reason: "stuck: too many follow-up rounds" };
@@ -551,7 +557,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   }
   const conflictPath = conflictStatePath(opts.home, owner, repo, issueNumber);
   const previousConflict = await readConflictState(conflictPath);
-  if (previousConflict.round >= MAX_CONFLICT_ROUNDS) {
+  if (previousConflict.round >= maxConflictRounds) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
     await forgetClaim();
     return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
@@ -718,6 +724,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         token: opts.giteaToken,
       }),
       maxOutputBytes: opts.maxOutputBytes,
+      timeoutMs: conflictTimeoutMs,
       openCodeRunner: engine,
       helmRunner: opts.helmRunner,
       logger: log,
@@ -799,7 +806,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         username: opts.botUsername,
         token: opts.giteaToken,
       }),
-      timeoutMs: FOLLOWUP_TIMEOUT_MS,
+      timeoutMs,
       maxOutputBytes: opts.maxOutputBytes,
       reviewLabel: `${owner}/${repo}#${issueNumber}`,
       logger: log,

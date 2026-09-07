@@ -156,21 +156,6 @@ describe("version bump", () => {
     expect(body).toContain("## Breaking\nnone\n");
   });
 
-  test("additive optional env → minor with GitOps none", () => {
-    const next = addListItem(BASE_CONTRACT, "worker", "optional env", "MAX_FOLLOWUP_ROUNDS");
-    expect(classifyBump(BASE_CONTRACT, next)).toBe("minor");
-    expect(nextVersionFrom("v1.0.0", "minor")).toBe("v1.1.0");
-    const body = buildReleaseBody({
-      previousContract: BASE_CONTRACT,
-      currentContract: next,
-      changes: ["hhh8888 follow-up cap env"],
-    });
-    expect(body).toMatch(/^## GitOps\nnone\n/m);
-    expect(body).not.toContain("optional env");
-    expect(body).not.toContain("MAX_FOLLOWUP_ROUNDS");
-    expect(body).toContain("## Breaking\nnone\n");
-  });
-
   test("additive optional volume → minor", () => {
     const next = addListItem(BASE_CONTRACT, "worker", "volumes", "/var/cache");
     expect(classifyBump(BASE_CONTRACT, next)).toBe("minor");
@@ -181,6 +166,19 @@ describe("version bump", () => {
       changes: ["ddd4444 add cache volume"],
     });
     expect(body).toContain("### worker\n- **volume** `/var/cache` (new)\n");
+    expect(body).toContain("## Breaking\nnone\n");
+  });
+
+  test("additive optional env → minor with GitOps bullets", () => {
+    const next = addListItem(BASE_CONTRACT, "worker", "optional env", "MAX_FOLLOWUP_ROUNDS");
+    expect(classifyBump(BASE_CONTRACT, next)).toBe("minor");
+    expect(nextVersionFrom("v1.0.0", "minor")).toBe("v1.1.0");
+    const body = buildReleaseBody({
+      previousContract: BASE_CONTRACT,
+      currentContract: next,
+      changes: ["hhh8888 follow-up cap env"],
+    });
+    expect(body).toContain("### worker\n- **optional env** `MAX_FOLLOWUP_ROUNDS` (new)\n");
     expect(body).toContain("## Breaking\nnone\n");
   });
 
@@ -306,6 +304,10 @@ describe("deploy/contract.md", () => {
       "MAX_OUTPUT_BYTES",
       "MAX_WEBHOOK_BYTES",
       "OPENCODE_TIMEOUT_MS",
+      "FOLLOWUP_TIMEOUT_MS",
+      "CONFLICT_TIMEOUT_MS",
+      "MAX_FOLLOWUP_ROUNDS",
+      "MAX_CONFLICT_ROUNDS",
       "WORKER_SCAN_INTERVAL_MS",
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",

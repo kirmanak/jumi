@@ -437,6 +437,40 @@ describe("implementConflict", () => {
     });
   });
 
+  test("configured timeoutMs is passed to OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      let timeoutMs: number | undefined;
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") {
+          throw new Error("git merge failed with exit code 1");
+        }
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return "src/demo.ts";
+        return "";
+      });
+      await implementConflict({
+        api: makeApi(),
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        timeoutMs: 1_800_000,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (_prompt, opts) => {
+          timeoutMs = opts.timeoutMs;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(timeoutMs).toBe(1_800_000);
+    });
+  });
+
   test("child already committed merge → parent does not fail / does not poison SHA skip", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
@@ -524,6 +558,81 @@ describe("implementConflict", () => {
       });
       expect(extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
       expect(extraEnv?.GITEA_BOT_TOKEN).toBeUndefined();
+    });
+  });
+
+  test("configured maxConflictRounds cap sticks (round 5 of 5 stuck, round 3 of 5 runs)", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 5,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const stuck = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        maxConflictRounds: 5,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(stuck).toEqual({ status: "stuck" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts");
+    });
+
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "oldhead",
+        lastBaseSha: "oldbase",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      let openCode = 0;
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return openCode > 0 ? "" : "src/demo.ts";
+        return "";
+      });
+      const result = await implementConflict({
+        api: makeApi(),
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        maxConflictRounds: 5,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("stuck");
+      expect(openCode).toBe(1);
     });
   });
 

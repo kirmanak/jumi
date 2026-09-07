@@ -28,6 +28,57 @@ describe("loadWorkerConfig", () => {
     });
     expect(config.databaseUrl).toBe("postgres://jumi");
   });
+
+  test("follow-up and conflict caps fall back when env is unset or empty", () => {
+    const unset = loadWorkerConfig(required);
+    expect(unset.maxFollowupRounds).toBe(3);
+    expect(unset.maxConflictRounds).toBe(3);
+    expect(unset.followupTimeoutMs).toBe(3_600_000);
+    expect(unset.conflictTimeoutMs).toBe(3_600_000);
+
+    const empty = loadWorkerConfig({
+      ...required,
+      MAX_FOLLOWUP_ROUNDS: "",
+      MAX_CONFLICT_ROUNDS: "",
+      FOLLOWUP_TIMEOUT_MS: "",
+      CONFLICT_TIMEOUT_MS: "",
+    });
+    expect(empty.maxFollowupRounds).toBe(3);
+    expect(empty.maxConflictRounds).toBe(3);
+    expect(empty.followupTimeoutMs).toBe(3_600_000);
+    expect(empty.conflictTimeoutMs).toBe(3_600_000);
+  });
+
+  test("parses follow-up and conflict cap env", () => {
+    const config = loadWorkerConfig({
+      ...required,
+      MAX_FOLLOWUP_ROUNDS: "5",
+      MAX_CONFLICT_ROUNDS: "7",
+      FOLLOWUP_TIMEOUT_MS: "1800000",
+      CONFLICT_TIMEOUT_MS: "900000",
+    });
+    expect(config.maxFollowupRounds).toBe(5);
+    expect(config.maxConflictRounds).toBe(7);
+    expect(config.followupTimeoutMs).toBe(1_800_000);
+    expect(config.conflictTimeoutMs).toBe(900_000);
+  });
+
+  test("follow-up and conflict timeouts do not inherit OPENCODE_TIMEOUT_MS", () => {
+    const config = loadWorkerConfig({
+      ...required,
+      OPENCODE_TIMEOUT_MS: "14400000",
+    });
+    expect(config.opencodeTimeoutMs).toBe(14_400_000);
+    expect(config.followupTimeoutMs).toBe(3_600_000);
+    expect(config.conflictTimeoutMs).toBe(3_600_000);
+  });
+
+  test("rejects invalid follow-up and conflict cap env", () => {
+    expect(() => loadWorkerConfig({ ...required, MAX_FOLLOWUP_ROUNDS: "0" })).toThrow("Invalid positive integer");
+    expect(() => loadWorkerConfig({ ...required, MAX_CONFLICT_ROUNDS: "0" })).toThrow("Invalid positive integer");
+    expect(() => loadWorkerConfig({ ...required, FOLLOWUP_TIMEOUT_MS: "abc" })).toThrow("Invalid positive integer");
+    expect(() => loadWorkerConfig({ ...required, CONFLICT_TIMEOUT_MS: "-1" })).toThrow("Invalid positive integer");
+  });
 });
 
 describe("worker ReviewQueue", () => {

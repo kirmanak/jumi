@@ -22,6 +22,10 @@ export interface WorkerConfig {
   maxOutputBytes: number;
   maxWebhookBytes: number;
   opencodeTimeoutMs: number;
+  followupTimeoutMs: number;
+  conflictTimeoutMs: number;
+  maxFollowupRounds: number;
+  maxConflictRounds: number;
   scanIntervalMs: number;
   databaseUrl?: string;
   leaseMs: number;
@@ -106,6 +110,10 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
     opencodeTimeoutMs,
+    followupTimeoutMs: intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000),
+    conflictTimeoutMs: intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000),
+    maxFollowupRounds: intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3),
+    maxConflictRounds: intEnv(resolved, "MAX_CONFLICT_ROUNDS", 3),
     scanIntervalMs: intEnv(resolved, "WORKER_SCAN_INTERVAL_MS", 5 * 60 * 1000),
     databaseUrl: optionalEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),

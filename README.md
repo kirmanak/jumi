@@ -133,6 +133,10 @@ Optional environment variables:
 | `MAX_OUTPUT_BYTES` | `80000` | Max OpenCode stdout bytes and max `JUMI_REVIEW.md` bytes; oversized artifacts fail closed without a sticky |
 | `MAX_WEBHOOK_BYTES` | `1048576` | Max accepted webhook payload bytes |
 | `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout |
+| `FOLLOWUP_TIMEOUT_MS` | `3600000` | Follow-up OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
+| `CONFLICT_TIMEOUT_MS` | `3600000` | Conflict OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
+| `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per issue |
+| `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics` |
 | `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (webhook + PG enqueue/reclaim), or `engine` (lease + OpenCode). Unset is `monolith`. |
 | `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith`. GitOps must set it on the worker; process start stays fail-closed if unset (first-run assign uses the in-memory queue). When set, implement/follow-up/conflict use the shared `review_jobs` ledger |

@@ -76,6 +76,7 @@ export interface MergeDefaultIntoWorktreeOpts {
   sanitizeOpenCodeEnv?: boolean;
   extraEnv: Record<string, string>;
   maxOutputBytes?: number;
+  timeoutMs?: number;
   openCodeRunner: OpenCodeRunner;
   helmRunner?: HelmRunner;
   logger?: (message: string) => void;
@@ -159,11 +160,12 @@ export async function needsConflict(opts: {
   issueNumber: number;
   botUsername: string;
   home: string;
+  maxConflictRounds?: number;
 }): Promise<boolean> {
   if (!isInScopeJumiPR(opts.pr, opts.owner, opts.repo, opts.botUsername)) return false;
   if (opts.pr.mergeable !== false) return false;
   const state = await readConflictState(conflictStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
-  if (state.round >= MAX_CONFLICT_ROUNDS) return false;
+  if (state.round >= (opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS)) return false;
   if (
     state.lastHeadSha &&
     state.lastBaseSha &&
@@ -436,7 +438,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       home: opts.home,
       sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
       extraEnv: opts.extraEnv,
-      timeoutMs: CONFLICT_TIMEOUT_MS,
+      timeoutMs: opts.timeoutMs ?? CONFLICT_TIMEOUT_MS,
       maxOutputBytes: opts.maxOutputBytes,
       reviewLabel: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
       logger: log,
@@ -480,6 +482,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const statePath = conflictStatePath(opts.home, owner, repo, issueNumber);
   const sanitizeEnv = opts.sanitizeOpenCodeEnv ?? true;
   const useClaim = opts.useClaim !== false;
+  const maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
+  const timeoutMs = opts.timeoutMs ?? CONFLICT_TIMEOUT_MS;
   const forgetClaim = async () => {
     if (useClaim) await deleteClaim(claimPath);
   };
@@ -537,7 +541,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   }
 
   const state = await readConflictState(statePath);
-  if (state.round >= MAX_CONFLICT_ROUNDS) {
+  if (state.round >= maxConflictRounds) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
     await forgetClaim();
     return { status: "stuck" };
@@ -690,6 +694,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         token: opts.giteaToken,
       }),
       maxOutputBytes: opts.maxOutputBytes,
+      timeoutMs,
       openCodeRunner: engine,
       helmRunner: opts.helmRunner,
       logger: log,

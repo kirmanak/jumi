@@ -1,6 +1,6 @@
 import { claimFilePath, conflictStatePath, deleteClaim, followUpStatePath, isPidAlive, readClaim } from "./claim.ts";
-import { CONFLICT_TIMEOUT_MS, implementConflict } from "./conflict.ts";
-import { FOLLOWUP_TIMEOUT_MS, implementFollowUp } from "./followup.ts";
+import { implementConflict } from "./conflict.ts";
+import { implementFollowUp } from "./followup.ts";
 import { createGiteaForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
@@ -56,9 +56,19 @@ export function createIssueQueue(
         };
         const result =
           job.mode === "conflict"
-            ? await implementConflict({ ...shared, timeoutMs: CONFLICT_TIMEOUT_MS })
+            ? await implementConflict({
+                ...shared,
+                timeoutMs: config.conflictTimeoutMs,
+                maxConflictRounds: config.maxConflictRounds,
+              })
             : job.mode === "follow-up"
-              ? await implementFollowUp({ ...shared, timeoutMs: FOLLOWUP_TIMEOUT_MS })
+              ? await implementFollowUp({
+                  ...shared,
+                  timeoutMs: config.followupTimeoutMs,
+                  conflictTimeoutMs: config.conflictTimeoutMs,
+                  maxFollowupRounds: config.maxFollowupRounds,
+                  maxConflictRounds: config.maxConflictRounds,
+                })
               : await implementIssue({ ...shared, timeoutMs: config.opencodeTimeoutMs });
         logger(`${key} ${result.status}${result.status === "skipped" ? `: ${result.reason}` : ""}`);
       } finally {
@@ -153,6 +163,8 @@ export async function runAssignedIssueScan(
       allowedRepos: config.allowedRepos,
     },
     logger,
+    maxFollowupRounds: config.maxFollowupRounds,
+    maxConflictRounds: config.maxConflictRounds,
   });
   for (const job of jobs) {
     const result = await queue.enqueue(job);
@@ -251,9 +263,19 @@ export async function processWorkerTick(
     const runConflict = extras.conflict ?? implementConflict;
     const result =
       job.mode === "conflict"
-        ? await runConflict({ ...shared, timeoutMs: CONFLICT_TIMEOUT_MS })
+        ? await runConflict({
+            ...shared,
+            timeoutMs: config.conflictTimeoutMs,
+            maxConflictRounds: config.maxConflictRounds,
+          })
         : job.mode === "follow-up"
-          ? await runFollowUp({ ...shared, timeoutMs: FOLLOWUP_TIMEOUT_MS })
+          ? await runFollowUp({
+              ...shared,
+              timeoutMs: config.followupTimeoutMs,
+              conflictTimeoutMs: config.conflictTimeoutMs,
+              maxFollowupRounds: config.maxFollowupRounds,
+              maxConflictRounds: config.maxConflictRounds,
+            })
           : await runImplement({ ...shared, timeoutMs: config.opencodeTimeoutMs });
     stopHeartbeat();
     const reason =

@@ -44,6 +44,9 @@ export interface ImplementOptions {
   workdir: string;
   opencodeConfig?: string;
   timeoutMs?: number;
+  conflictTimeoutMs?: number;
+  maxFollowupRounds?: number;
+  maxConflictRounds?: number;
   maxOutputBytes?: number;
   sanitizeOpenCodeEnv?: boolean;
   heartbeatIntervalMs?: number;

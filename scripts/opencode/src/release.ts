@@ -341,6 +341,12 @@ function gitOpsBullets(image: ImageName, previous: ImageContract, current: Image
   if (previous.imageTarget !== current.imageTarget && (previous.imageTarget || current.imageTarget)) {
     bullets.push(`- **image target** \`${previous.imageTarget || "none"}\` → \`${current.imageTarget || "none"}\``);
   }
+  for (const key of addedItems(previous.optionalEnv, current.optionalEnv)) {
+    bullets.push(`- **optional env** \`${key}\` (new)`);
+  }
+  for (const key of removedItems(previous.optionalEnv, current.optionalEnv)) {
+    bullets.push(`- **removed optional env** \`${key}\``);
+  }
   for (const volume of addedItems(previous.volumes, current.volumes)) {
     bullets.push(`- **volume** \`${volume}\` (new)`);
   }

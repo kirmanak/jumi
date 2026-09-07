@@ -53,6 +53,7 @@ export async function enqueueFollowUpFromReview(opts: {
   botUsername: string;
   published: ReviewResult;
   markdown?: string | null;
+  maxFollowupRounds?: number;
 }): Promise<EnqueueResult | undefined> {
   if (!shouldHandoverFollowUp({ published: opts.published, markdown: opts.markdown })) return undefined;
 
@@ -69,7 +70,7 @@ export async function enqueueFollowUpFromReview(opts: {
   if (issue.state !== "open" || !isAssignedToBot(issue, opts.botUsername)) return undefined;
 
   const followUpSucceeded = await opts.store.countSucceeded("follow-up", opts.row.owner, opts.row.repo, issueNumber);
-  if (followUpSucceeded >= MAX_FOLLOWUP_ROUNDS) return undefined;
+  if (followUpSucceeded >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return undefined;
 
   return opts.store.enqueueIssue(
     followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `review-failure-${opts.row.id}`)

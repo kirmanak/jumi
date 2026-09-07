@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { enqueueFollowUpFromReview, shouldHandoverFollowUp } from "../src/handover.ts";
 import type { ReviewApi } from "../src/review.ts";
-import { MemoryReviewJobStore } from "../src/review_jobs.ts";
-import { makeComment, makeIssue, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { makeComment, makeIssue, makeIssueJob, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   const defaults: ReviewApi = {
@@ -120,6 +120,38 @@ describe("enqueueFollowUpFromReview", () => {
       markdown: "blocking\n<!-- jumi-check: failure -->",
     });
     expect(result).toBeUndefined();
+  });
+
+  test("follow-up cap sticks at configured maxFollowupRounds, not only 3", async () => {
+    const store = new MemoryReviewJobStore();
+    for (const sha of ["sha1", "sha2", "sha3"]) {
+      await store.enqueueIssue(
+        makeIssueJob({ mode: "follow-up", issueNumber: 12, prNumber: 7, headSha: sha, delivery: sha })
+      );
+      const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+      await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    }
+    await store.enqueue(makeJob());
+    const review = await store.lease("engine-1", 60_000);
+    const blocked = await enqueueFollowUpFromReview({
+      store,
+      api: makeApi(),
+      row: review!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+    });
+    expect(blocked).toBeUndefined();
+    const allowed = await enqueueFollowUpFromReview({
+      store,
+      api: makeApi(),
+      row: review!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+      maxFollowupRounds: 5,
+    });
+    expect(allowed).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
   });
 
   test("does not insert without a closing issue", async () => {

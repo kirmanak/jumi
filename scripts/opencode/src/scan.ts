@@ -17,6 +17,8 @@ export interface ScanOptions {
   nowMs?: number;
   pidAlive?: (pid: number) => boolean;
   logger?: (message: string) => void;
+  maxFollowupRounds?: number;
+  maxConflictRounds?: number;
 }
 
 function hasCloneInfo(repository: GiteaRepo | GiteaRepositoryMeta | undefined): repository is GiteaRepo {
@@ -79,6 +81,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
           issueNumber: issue.number,
           botUsername: opts.botUsername,
           home: opts.home,
+          maxFollowupRounds: opts.maxFollowupRounds,
         });
         const conflict = await needsConflict({
           pr: jumiPr,
@@ -87,6 +90,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
           issueNumber: issue.number,
           botUsername: opts.botUsername,
           home: opts.home,
+          maxConflictRounds: opts.maxConflictRounds,
         });
         if (conflict && followUp) {
           jobs.push({

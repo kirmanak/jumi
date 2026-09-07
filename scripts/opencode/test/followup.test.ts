@@ -495,6 +495,85 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("configured maxFollowupRounds cap sticks (round 5 of 5 stuck, round 3 of 5 runs)", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 5,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const stuck = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        maxFollowupRounds: 5,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(stuck).toEqual({ status: "skipped", reason: "stuck: too many follow-up rounds" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: too many follow-up rounds");
+    });
+
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        maxFollowupRounds: 5,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
+    });
+  });
+
   test("max 3 rounds → stuck, no OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
@@ -663,7 +742,7 @@ describe("implementFollowUp", () => {
     });
   });
 
-  test("timeout passed to OpenCode is 3600000", async () => {
+  test("timeout passed to OpenCode is 3600000 by default", async () => {
     await withDirs(async (home, workdir) => {
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -682,7 +761,6 @@ describe("implementFollowUp", () => {
         model: "openai/gpt-5.5",
         home,
         workdir,
-        timeoutMs: 14_400_000,
         heartbeatIntervalMs: 0,
         gitRunner,
         openCodeRunner: async (_prompt, opts) => {
@@ -693,6 +771,38 @@ describe("implementFollowUp", () => {
       });
       expect(timeoutMs).toBe(FOLLOWUP_TIMEOUT_MS);
       expect(timeoutMs).toBe(3_600_000);
+    });
+  });
+
+  test("configured timeoutMs is passed to OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      let timeoutMs: number | undefined;
+      await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        timeoutMs: 1_800_000,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (_prompt, opts) => {
+          timeoutMs = opts.timeoutMs;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(timeoutMs).toBe(1_800_000);
     });
   });
 
@@ -882,6 +992,46 @@ describe("implementFollowUp", () => {
       expect(conflict.lastBaseSha).toBe("basesha");
       const followup = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
       expect(followup.round).toBe(1);
+    });
+  });
+
+  test("follow-up honors configured maxConflictRounds, not only 3", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        maxConflictRounds: 5,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return "done";
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
     });
   });
 
@@ -1527,6 +1677,43 @@ describe("needsFollowUp", () => {
           issueNumber: 12,
           botUsername: "jumi",
           home,
+        })
+      ).toBe(true);
+    });
+  });
+
+  test("cap sticks at configured maxFollowupRounds, not only 3", async () => {
+    await withDirs(async (home) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      expect(
+        await needsFollowUp({
+          api: makeApi(),
+          owner: "kirmanak",
+          repo: "demo",
+          pr: jumiPr(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(false);
+      expect(
+        await needsFollowUp({
+          api: makeApi(),
+          owner: "kirmanak",
+          repo: "demo",
+          pr: jumiPr(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          maxFollowupRounds: 5,
         })
       ).toBe(true);
     });

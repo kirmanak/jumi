@@ -130,6 +130,55 @@ describe("reclaimExpiredWorkerJobs", () => {
 });
 
 describe("processWorkerTick", () => {
+  test("follow-up and conflict use configured timeouts, not OPENCODE_TIMEOUT_MS", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 127, headSha: "headsha" }));
+    let followUp: { timeoutMs?: number; maxFollowupRounds?: number; conflictTimeoutMs?: number } = {};
+    await processWorkerTick(
+      store,
+      makeWorkerConfig({
+        opencodeTimeoutMs: 14_400_000,
+        followupTimeoutMs: 1_800_000,
+        conflictTimeoutMs: 900_000,
+        maxFollowupRounds: 5,
+        maxConflictRounds: 7,
+      }),
+      makeApi(),
+      "worker-1",
+      {
+        followUp: async (opts) => {
+          followUp = {
+            timeoutMs: opts.timeoutMs,
+            maxFollowupRounds: opts.maxFollowupRounds,
+            conflictTimeoutMs: opts.conflictTimeoutMs,
+          };
+          return { status: "no-changes" };
+        },
+      }
+    );
+    expect(followUp).toEqual({ timeoutMs: 1_800_000, maxFollowupRounds: 5, conflictTimeoutMs: 900_000 });
+
+    await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 127, headSha: "headsha" }));
+    let conflict: { timeoutMs?: number; maxConflictRounds?: number } = {};
+    await processWorkerTick(
+      store,
+      makeWorkerConfig({
+        opencodeTimeoutMs: 14_400_000,
+        conflictTimeoutMs: 900_000,
+        maxConflictRounds: 7,
+      }),
+      makeApi(),
+      "worker-1",
+      {
+        conflict: async (opts) => {
+          conflict = { timeoutMs: opts.timeoutMs, maxConflictRounds: opts.maxConflictRounds };
+          return { status: "up-to-date" };
+        },
+      }
+    );
+    expect(conflict).toEqual({ timeoutMs: 900_000, maxConflictRounds: 7 });
+  });
+
   test("maps implement no-changes to skipped so an issue edit can re-enqueue", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeIssueJob();
