@@ -7,6 +7,8 @@ import {
   buildReleaseBody,
   classifyBump,
   computeRelease,
+  contractEnvIssues,
+  gitOpsLoaderEnv,
   nextVersionFrom,
   parseContract,
   parseSemVerTag,
@@ -16,71 +18,6 @@ import {
 } from "../src/release.ts";
 
 const repoRoot = join(process.cwd(), "../..");
-
-const REVIEWER_OPTIONAL_ENV = [
-  "HOST",
-  "PORT",
-  "GITEA_WEBHOOK_AUTH_TOKEN",
-  "GITEA_ALLOWED_ORGS",
-  "GITEA_ALLOWED_REPOS",
-  "BOT_USERNAME",
-  "OPENCODE_MODEL",
-  "OPENCODE_CONFIG",
-  "OPENCODE_WELLKNOWN_URL",
-  "OPENCODE_WELLKNOWN_KEY",
-  "OPENCODE_WELLKNOWN_TOKEN",
-  "HOME",
-  "WORKDIR",
-  "QUEUE_CONCURRENCY",
-  "MAX_FILES",
-  "MAX_PATCH_BYTES",
-  "MAX_OUTPUT_BYTES",
-  "MAX_WEBHOOK_BYTES",
-  "OPENCODE_TIMEOUT_MS",
-  "JUMI_ROLE",
-  "DATABASE_URL",
-  "LEASE_MS",
-  "MAX_JOB_ATTEMPTS",
-];
-
-const WORKER_OPTIONAL_ENV = [
-  "HOST",
-  "PORT",
-  "GITEA_WEBHOOK_AUTH_TOKEN",
-  "GITEA_ALLOWED_ORGS",
-  "GITEA_ALLOWED_REPOS",
-  "BOT_USERNAME",
-  "OPENCODE_MODEL",
-  "OPENCODE_CONFIG",
-  "OPENCODE_WELLKNOWN_URL",
-  "OPENCODE_WELLKNOWN_KEY",
-  "OPENCODE_WELLKNOWN_TOKEN",
-  "HOME",
-  "WORKDIR",
-  "QUEUE_CONCURRENCY",
-  "MAX_OUTPUT_BYTES",
-  "MAX_WEBHOOK_BYTES",
-  "OPENCODE_TIMEOUT_MS",
-  "WORKER_SCAN_INTERVAL_MS",
-  "LEASE_MS",
-  "MAX_JOB_ATTEMPTS",
-];
-
-function loaderEnvNames(source: string): string[] {
-  const names = new Set<string>();
-  for (const match of source.matchAll(/(?:requireEnv|optionalEnv|intEnv|csvEnv)\(\s*\w+\s*,\s*"([A-Z][A-Z0-9_]*)"/g)) {
-    names.add(match[1]);
-  }
-  for (const match of source.matchAll(/\b(?:resolved|env)\.([A-Z][A-Z0-9_]*)\b/g)) {
-    names.add(match[1]);
-  }
-  return [...names].sort();
-}
-
-function gitOpsRequiredEnv(source: string, optional: string[]): string[] {
-  const skip = new Set(optional);
-  return loaderEnvNames(source).filter((name) => !skip.has(name));
-}
 
 const BASE_CONTRACT = `# Deploy contract
 
@@ -92,6 +29,8 @@ const BASE_CONTRACT = `# Deploy contract
 - \`GITEA_URL\`
 - \`GITEA_BOT_TOKEN\`
 - \`GITEA_WEBHOOK_SECRET\`
+
+#### optional env
 
 #### ports
 - \`3000\`
@@ -118,6 +57,8 @@ const BASE_CONTRACT = `# Deploy contract
 - \`GITEA_URL\`
 - \`GITEA_BOT_TOKEN\`
 - \`GITEA_WEBHOOK_SECRET\`
+
+#### optional env
 
 #### ports
 - \`3000\`
@@ -215,6 +156,21 @@ describe("version bump", () => {
     expect(body).toContain("## Breaking\nnone\n");
   });
 
+  test("additive optional env → minor with GitOps none", () => {
+    const next = addListItem(BASE_CONTRACT, "worker", "optional env", "MAX_FOLLOWUP_ROUNDS");
+    expect(classifyBump(BASE_CONTRACT, next)).toBe("minor");
+    expect(nextVersionFrom("v1.0.0", "minor")).toBe("v1.1.0");
+    const body = buildReleaseBody({
+      previousContract: BASE_CONTRACT,
+      currentContract: next,
+      changes: ["hhh8888 follow-up cap env"],
+    });
+    expect(body).toMatch(/^## GitOps\nnone\n/m);
+    expect(body).not.toContain("optional env");
+    expect(body).not.toContain("MAX_FOLLOWUP_ROUNDS");
+    expect(body).toContain("## Breaking\nnone\n");
+  });
+
   test("additive optional volume → minor", () => {
     const next = addListItem(BASE_CONTRACT, "worker", "volumes", "/var/cache");
     expect(classifyBump(BASE_CONTRACT, next)).toBe("minor");
@@ -306,7 +262,54 @@ describe("deploy/contract.md", () => {
     const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
     const parsed = parseContract(markdown);
     expect(parsed.reviewer.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
+    expect(parsed.reviewer.optionalEnv).toEqual([
+      "HOST",
+      "PORT",
+      "GITEA_WEBHOOK_AUTH_TOKEN",
+      "GITEA_ALLOWED_ORGS",
+      "GITEA_ALLOWED_REPOS",
+      "BOT_USERNAME",
+      "OPENCODE_MODEL",
+      "OPENCODE_CONFIG",
+      "OPENCODE_WELLKNOWN_URL",
+      "OPENCODE_WELLKNOWN_KEY",
+      "OPENCODE_WELLKNOWN_TOKEN",
+      "HOME",
+      "WORKDIR",
+      "QUEUE_CONCURRENCY",
+      "MAX_FILES",
+      "MAX_PATCH_BYTES",
+      "MAX_OUTPUT_BYTES",
+      "MAX_WEBHOOK_BYTES",
+      "OPENCODE_TIMEOUT_MS",
+      "JUMI_ROLE",
+      "DATABASE_URL",
+      "LEASE_MS",
+      "MAX_JOB_ATTEMPTS",
+    ]);
     expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET", "DATABASE_URL"]);
+    expect(parsed.worker.optionalEnv).toEqual([
+      "HOST",
+      "PORT",
+      "GITEA_WEBHOOK_AUTH_TOKEN",
+      "GITEA_ALLOWED_ORGS",
+      "GITEA_ALLOWED_REPOS",
+      "BOT_USERNAME",
+      "OPENCODE_MODEL",
+      "OPENCODE_CONFIG",
+      "OPENCODE_WELLKNOWN_URL",
+      "OPENCODE_WELLKNOWN_KEY",
+      "OPENCODE_WELLKNOWN_TOKEN",
+      "HOME",
+      "WORKDIR",
+      "QUEUE_CONCURRENCY",
+      "MAX_OUTPUT_BYTES",
+      "MAX_WEBHOOK_BYTES",
+      "OPENCODE_TIMEOUT_MS",
+      "WORKER_SCAN_INTERVAL_MS",
+      "LEASE_MS",
+      "MAX_JOB_ATTEMPTS",
+    ]);
     expect(parsed.reviewer.ports).toEqual(["3000"]);
     expect(parsed.worker.ports).toEqual(["3000"]);
     expect(parsed.reviewer.runAs).toBe("10001:10001");
@@ -321,15 +324,73 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.volumes).toEqual(["/data", "/work"]);
   });
 
-  test("required env matches loader runtime minus GitOps-optional keys", async () => {
+  test("loader env matches contract required and optional headings", async () => {
     const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
     const parsed = parseContract(markdown);
     const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
     const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
-    expect([...parsed.reviewer.requiredEnv].sort()).toEqual(gitOpsRequiredEnv(reviewerSrc, REVIEWER_OPTIONAL_ENV));
-    expect([...parsed.worker.requiredEnv].sort()).toEqual(gitOpsRequiredEnv(workerSrc, WORKER_OPTIONAL_ENV));
+    const reviewer = gitOpsLoaderEnv("reviewer", reviewerSrc);
+    const worker = gitOpsLoaderEnv("worker", workerSrc);
+    expect([...parsed.reviewer.requiredEnv].sort()).toEqual(reviewer.required);
+    expect([...parsed.reviewer.optionalEnv].sort()).toEqual(reviewer.optional);
+    expect([...parsed.worker.requiredEnv].sort()).toEqual(worker.required);
+    expect([...parsed.worker.optionalEnv].sort()).toEqual(worker.optional);
+    expect(contractEnvIssues(parsed, reviewerSrc, workerSrc)).toEqual([]);
     expect(parsed.worker.requiredEnv).toContain("DATABASE_URL");
     expect(parsed.reviewer.requiredEnv).not.toContain("DATABASE_URL");
+    expect(parsed.reviewer.optionalEnv).toContain("DATABASE_URL");
+  });
+
+  test("CI fails when a loader env is missing or in the wrong heading", () => {
+    const reviewerSrc = `requireEnv(resolved, "GITEA_URL");
+optionalEnv(resolved, "HOST");
+intEnv(resolved, "PORT", 3000);
+`;
+    const workerSrc = `requireEnv(resolved, "GITEA_URL");
+optionalEnv(resolved, "DATABASE_URL");
+intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3);
+`;
+    const contract = parseContract(BASE_CONTRACT);
+    expect(contractEnvIssues(contract, reviewerSrc, workerSrc)).toEqual([
+      { image: "reviewer", name: "HOST", kind: "missing" },
+      { image: "reviewer", name: "PORT", kind: "missing" },
+      { image: "reviewer", name: "GITEA_BOT_TOKEN", kind: "extra" },
+      { image: "reviewer", name: "GITEA_WEBHOOK_SECRET", kind: "extra" },
+      { image: "worker", name: "DATABASE_URL", kind: "missing" },
+      { image: "worker", name: "MAX_FOLLOWUP_ROUNDS", kind: "missing" },
+      { image: "worker", name: "GITEA_BOT_TOKEN", kind: "extra" },
+      { image: "worker", name: "GITEA_WEBHOOK_SECRET", kind: "extra" },
+    ]);
+    const swapped = parseContract(`# Deploy contract
+
+## GitOps
+
+### reviewer
+
+#### required env
+- \`HOST\`
+
+#### optional env
+- \`GITEA_URL\`
+
+### worker
+
+#### required env
+- \`GITEA_URL\`
+
+#### optional env
+- \`GITEA_URL\`
+`);
+    const matchingReviewer = `requireEnv(resolved, "GITEA_URL");
+optionalEnv(resolved, "HOST");
+`;
+    const matchingWorker = `requireEnv(resolved, "GITEA_URL");
+`;
+    expect(contractEnvIssues(swapped, matchingReviewer, matchingWorker)).toEqual([
+      { image: "reviewer", name: "GITEA_URL", kind: "required_as_optional" },
+      { image: "reviewer", name: "HOST", kind: "optional_as_required" },
+      { image: "worker", name: "GITEA_URL", kind: "duplicate" },
+    ]);
   });
 });
 

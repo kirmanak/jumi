@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
-import { publishReviewResult, reviewPullRequest } from "../src/review.ts";
+import { applyContractEnvGate, publishReviewResult, reviewPullRequest } from "../src/review.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -937,6 +937,208 @@ describe("reviewPullRequest", () => {
       expect(prompt).toContain('author="jumi"');
       expect(prompt).toContain('author="alice"');
     });
+  });
+
+  const matchingContract = `# Deploy contract
+
+## GitOps
+
+### reviewer
+
+#### required env
+- \`GITEA_URL\`
+
+#### optional env
+- \`HOST\`
+
+### worker
+
+#### required env
+- \`GITEA_URL\`
+- \`DATABASE_URL\`
+
+#### optional env
+`;
+  const matchingReviewer = `requireEnv(resolved, "GITEA_URL");
+optionalEnv(resolved, "HOST");
+`;
+  const matchingWorker = `requireEnv(resolved, "GITEA_URL");
+optionalEnv(resolved, "DATABASE_URL");
+`;
+
+  async function writeContractTree(
+    workspace: string,
+    opts: { contract?: string; reviewer?: string; worker?: string } = {}
+  ) {
+    await mkdir(join(workspace, "deploy"), { recursive: true });
+    await mkdir(join(workspace, "scripts/opencode/src"), { recursive: true });
+    await writeFile(join(workspace, "deploy/contract.md"), opts.contract ?? matchingContract);
+    await writeFile(join(workspace, "scripts/opencode/src/config.ts"), opts.reviewer ?? matchingReviewer);
+    await writeFile(join(workspace, "scripts/opencode/src/worker_config.ts"), opts.worker ?? matchingWorker);
+  }
+
+  function personalJumiApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
+    const repo = makeRepo({ name: "jumi", owner: makeUser({ login: "personal" }), full_name: "personal/jumi" });
+    return makeApi({
+      getRepo: async () => repo,
+      getPR: async () =>
+        makePR({
+          html_url: "https://gitea.kirmanak.stream/personal/jumi/pulls/7",
+          head: makeBranch({ sha: REVIEW_SHA, repo }),
+          base: makeBranch({ repo }),
+        }),
+      ...overrides,
+    });
+  }
+
+  test("personal/jumi parent fail-closes a success sticky when loader env drifts from the contract", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeContractTree(workspace, {
+        worker: `${matchingWorker}intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3);\n`,
+      });
+      let createdBody = "";
+      const persisted: PersistReviewResult[] = [];
+      let ranOpenCode = false;
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        owner: "personal",
+        repo: "jumi",
+        api: personalJumiApi({
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            createdBody = body;
+            return makeComment({ id: 123, body });
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        persistResult: async (value) => {
+          persisted.push(value);
+        },
+        openCodeRunner: async () => {
+          ranOpenCode = true;
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return "I'll inspect…";
+        },
+      });
+      expect(ranOpenCode).toBe(true);
+      expect(result).toEqual({ status: "posted", commentId: 123 });
+      expect(createdBody).toContain("Looks good");
+      expect(createdBody).toContain("🟡 risk:");
+      expect(createdBody).toContain("MAX_FOLLOWUP_ROUNDS");
+      expect(createdBody).not.toContain("💡");
+      expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: failure; contract env drift -->");
+      expect(persisted).toEqual([
+        {
+          kind: "markdown",
+          markdown: expect.stringContaining("<!-- jumi-check: failure; contract env drift -->"),
+        },
+      ]);
+      expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "contract env drift" });
+    });
+  });
+
+  test("personal/jumi matching contract keeps OpenCode success", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeContractTree(workspace);
+      const statuses: Array<{ state: string; description?: string }> = [];
+      let createdBody = "";
+      await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        owner: "personal",
+        repo: "jumi",
+        api: personalJumiApi({
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            createdBody = body;
+            return makeComment({ id: 1, body });
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => {
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return "";
+        },
+      });
+      expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: success -->");
+      expect(createdBody).not.toContain("🟡");
+      expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    });
+  });
+
+  test("personal/jumi parse errors fail closed after OpenCode", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeContractTree(workspace, { contract: "# not a contract\n" });
+      let createdBody = "";
+      let ranOpenCode = false;
+      const statuses: Array<{ state: string; description?: string }> = [];
+      await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        owner: "personal",
+        repo: "jumi",
+        api: personalJumiApi({
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            createdBody = body;
+            return makeComment({ id: 1, body });
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => {
+          ranOpenCode = true;
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return "";
+        },
+      });
+      expect(ranOpenCode).toBe(true);
+      expect(createdBody).toContain("Looks good");
+      expect(createdBody).toContain("🟡 risk:");
+      expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: failure; contract env drift -->");
+      expect(statuses.at(-1)?.state).toBe("failure");
+    });
+  });
+
+  test("other repos are not gated even if the tree is drifted", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeContractTree(workspace, {
+        worker: `${matchingWorker}intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3);\n`,
+      });
+      let createdBody = "";
+      await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            createdBody = body;
+            return makeComment({ id: 1, body });
+          },
+        }),
+        openCodeRunner: async () => {
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return "";
+        },
+      });
+      expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: success -->");
+      expect(createdBody).not.toContain("MAX_FOLLOWUP_ROUNDS");
+    });
+  });
+});
+
+describe("applyContractEnvGate", () => {
+  test("keeps OpenCode findings and forces a failure trailer", () => {
+    const gated = applyContractEnvGate("L12: 🔴 bug: null deref. Guard it.\n<!-- jumi-check: failure; 1 blocking -->", [
+      "worker loader env `MAX_FOLLOWUP_ROUNDS` is missing from deploy/contract.md required/optional env",
+    ]);
+    expect(gated).toContain("L12: 🔴 bug: null deref. Guard it.");
+    expect(gated).toContain("deploy/contract.md:1: 🟡 risk: worker loader env `MAX_FOLLOWUP_ROUNDS`");
+    expect(gated).not.toContain("💡");
+    expect(lastNonEmptyLine(gated)).toBe("<!-- jumi-check: failure; contract env drift -->");
   });
 });
 

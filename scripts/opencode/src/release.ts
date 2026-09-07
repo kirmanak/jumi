@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const CONTRACT_PATH = "deploy/contract.md";
+export const REVIEWER_LOADER_PATH = "scripts/opencode/src/config.ts";
+export const WORKER_LOADER_PATH = "scripts/opencode/src/worker_config.ts";
 const SEMVER_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
+const LOADER_ENV_HELPER_RE = /(?:requireEnv|optionalEnv|intEnv|csvEnv)\(\s*\w+\s*,\s*"([A-Z][A-Z0-9_]*)"/g;
+const LOADER_ENV_PROP_RE = /\b(?:resolved|env)\.([A-Z][A-Z0-9_]*)\b/g;
+const REQUIRE_ENV_RE = /requireEnv\(\s*\w+\s*,\s*"([A-Z][A-Z0-9_]*)"/g;
 
 export type BumpKind = "major" | "minor" | "patch" | "initial";
 export type VersionDecision = BumpKind | "reuse";
@@ -17,12 +22,21 @@ export interface SemVer {
 
 export interface ImageContract {
   requiredEnv: string[];
+  optionalEnv: string[];
   ports: string[];
   runAs: string;
   probes: string[];
   command: string;
   imageTarget: string;
   volumes: string[];
+}
+
+export type ContractEnvIssueKind = "missing" | "extra" | "required_as_optional" | "optional_as_required" | "duplicate";
+
+export interface ContractEnvIssue {
+  image: ImageName;
+  name: string;
+  kind: ContractEnvIssueKind;
 }
 
 export interface DeployContract {
@@ -53,6 +67,7 @@ export function compareSemVer(a: SemVer, b: SemVer): number {
 function emptyImage(): ImageContract {
   return {
     requiredEnv: [],
+    optionalEnv: [],
     ports: [],
     runAs: "",
     probes: [],
@@ -92,6 +107,7 @@ function firstValue(values: string[]): string {
 function parseImage(section: string): ImageContract {
   return {
     requiredEnv: listValues(headingSection(section, 4, "required env")),
+    optionalEnv: listValues(headingSection(section, 4, "optional env")),
     ports: listValues(headingSection(section, 4, "ports")),
     runAs: firstValue(listValues(headingSection(section, 4, "runAs"))),
     probes: listValues(headingSection(section, 4, "probes")),
@@ -99,6 +115,89 @@ function parseImage(section: string): ImageContract {
     imageTarget: firstValue(listValues(headingSection(section, 4, "image target"))),
     volumes: listValues(headingSection(section, 4, "volumes")),
   };
+}
+
+export function loaderEnvNames(source: string): string[] {
+  const names = new Set<string>();
+  for (const match of source.matchAll(LOADER_ENV_HELPER_RE)) {
+    names.add(match[1]);
+  }
+  for (const match of source.matchAll(LOADER_ENV_PROP_RE)) {
+    names.add(match[1]);
+  }
+  return [...names].sort();
+}
+
+function requireEnvNames(source: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of source.matchAll(REQUIRE_ENV_RE)) {
+    names.add(match[1]);
+  }
+  return names;
+}
+
+export function gitOpsLoaderEnv(image: ImageName, source: string): { required: string[]; optional: string[] } {
+  const names = loaderEnvNames(source);
+  const requiredSet = requireEnvNames(source);
+  if (image === "worker") requiredSet.add("DATABASE_URL");
+  if (image === "reviewer") requiredSet.delete("DATABASE_URL");
+  return {
+    required: names.filter((name) => requiredSet.has(name)).sort(),
+    optional: names.filter((name) => !requiredSet.has(name)).sort(),
+  };
+}
+
+export function formatContractEnvIssue(issue: ContractEnvIssue): string {
+  if (issue.kind === "missing") {
+    return `${issue.image} loader env \`${issue.name}\` is missing from deploy/contract.md required/optional env`;
+  }
+  if (issue.kind === "extra") {
+    return `${issue.image} contract env \`${issue.name}\` is not read by the loader`;
+  }
+  if (issue.kind === "required_as_optional") {
+    return `${issue.image} env \`${issue.name}\` is required GitOps but listed as optional`;
+  }
+  if (issue.kind === "optional_as_required") {
+    return `${issue.image} env \`${issue.name}\` is optional but listed as required`;
+  }
+  return `${issue.image} env \`${issue.name}\` is listed as both required and optional`;
+}
+
+export function contractEnvIssues(
+  contract: DeployContract,
+  reviewerSrc: string,
+  workerSrc: string
+): ContractEnvIssue[] {
+  const issues: ContractEnvIssue[] = [];
+  for (const image of ["reviewer", "worker"] as const) {
+    const expected = gitOpsLoaderEnv(image, image === "reviewer" ? reviewerSrc : workerSrc);
+    const listedRequired = contract[image].requiredEnv;
+    const listedOptional = contract[image].optionalEnv;
+    const requiredSet = new Set(listedRequired);
+    const optionalSet = new Set(listedOptional);
+    const listed = new Set([...listedRequired, ...listedOptional]);
+    const expectedNames = new Set([...expected.required, ...expected.optional]);
+    for (const name of listedRequired) {
+      if (optionalSet.has(name)) issues.push({ image, name, kind: "duplicate" });
+    }
+    for (const name of expectedNames) {
+      if (!listed.has(name)) issues.push({ image, name, kind: "missing" });
+    }
+    for (const name of listed) {
+      if (!expectedNames.has(name)) issues.push({ image, name, kind: "extra" });
+    }
+    for (const name of expected.required) {
+      if (optionalSet.has(name) && !requiredSet.has(name)) {
+        issues.push({ image, name, kind: "required_as_optional" });
+      }
+    }
+    for (const name of expected.optional) {
+      if (requiredSet.has(name) && !optionalSet.has(name)) {
+        issues.push({ image, name, kind: "optional_as_required" });
+      }
+    }
+  }
+  return issues;
 }
 
 export function parseContract(markdown: string): DeployContract {
@@ -170,6 +269,8 @@ function hasRequiredGitOpsChange(previous: ImageContract, current: ImageContract
 
 function hasOptionalGitOpsChange(previous: ImageContract, current: ImageContract): boolean {
   return (
+    addedItems(previous.optionalEnv, current.optionalEnv).length > 0 ||
+    removedItems(previous.optionalEnv, current.optionalEnv).length > 0 ||
     addedItems(previous.volumes, current.volumes).length > 0 ||
     removedItems(previous.volumes, current.volumes).length > 0
   );

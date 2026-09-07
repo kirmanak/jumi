@@ -5,6 +5,14 @@ import { type Engine, resolveEngine } from "./engine.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
+import {
+  CONTRACT_PATH,
+  contractEnvIssues,
+  formatContractEnvIssue,
+  parseContract,
+  REVIEWER_LOADER_PATH,
+  WORKER_LOADER_PATH,
+} from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import type {
   GiteaComment,
@@ -254,6 +262,39 @@ function statusForResult(
   }
 
   return verdict ?? parseReviewOutput("").verdict;
+}
+
+export function isPersonalJumiRepo(owner: string, repo: string): boolean {
+  return owner === "personal" && repo === "jumi";
+}
+
+export function applyContractEnvGate(markdown: string, findings: string[]): string {
+  if (findings.length === 0) return markdown;
+  const parsed = parseReviewOutput(markdown);
+  const lines = findings.map((finding) => `deploy/contract.md:1: 🟡 risk: ${finding}.`);
+  const comment = [parsed.comment.trim(), lines.join("\n")].filter(Boolean).join("\n\n");
+  return `${comment}\n<!-- jumi-check: failure; contract env drift -->\n`;
+}
+
+async function gatePersonalJumiContractEnv(
+  owner: string,
+  repo: string,
+  workspace: string,
+  markdown: string
+): Promise<string> {
+  if (!isPersonalJumiRepo(owner, repo)) return markdown;
+  try {
+    const [contractMd, reviewerSrc, workerSrc] = await Promise.all([
+      readFile(join(workspace, CONTRACT_PATH), "utf8"),
+      readFile(join(workspace, REVIEWER_LOADER_PATH), "utf8"),
+      readFile(join(workspace, WORKER_LOADER_PATH), "utf8"),
+    ]);
+    const issues = contractEnvIssues(parseContract(contractMd), reviewerSrc, workerSrc);
+    return applyContractEnvGate(markdown, issues.map(formatContractEnvIssue));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return applyContractEnvGate(markdown, [`failed to parse loader env against deploy/contract.md: ${message}`]);
+  }
 }
 
 function skipReasonForPR(pr: GiteaPR): string | undefined {
@@ -586,7 +627,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         return await persistSkipAndStatus("Incomplete review: no output", currentPR.html_url);
       }
 
-      await persistOutcome({ kind: "markdown", markdown: artifact.content });
+      const markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
+      await persistOutcome({ kind: "markdown", markdown });
       return await publishReviewResult({
         api: opts.api,
         owner: opts.owner,
@@ -594,7 +636,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         prNumber: opts.prNumber,
         expectedHeadSha: reviewedHeadSha,
         botUsername: opts.botUsername,
-        resultMarkdown: artifact.content,
+        resultMarkdown: markdown,
         logger: log,
       });
     } finally {
