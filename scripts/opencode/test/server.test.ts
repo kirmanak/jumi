@@ -242,7 +242,7 @@ describe("startReviewer", () => {
       extras: {
         openCodeRunner: async () => {
           ran++;
-          return "stdout";
+          return { status: "ok" };
         },
       },
     });

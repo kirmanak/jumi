@@ -38,7 +38,8 @@ describe("runOpenCode", () => {
 printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s ARGS=%s\\033[0m\n' "$HOME" "$OPENCODE_MODEL" "$OPENCODE_CONFIG" "$OPENCODE_DISABLE_PROJECT_CONFIG" "$XDG_CONFIG_HOME" "$GITEA_BOT_TOKEN" "$*"
 `,
       async (_binDir, workdir) => {
-        const output = await runOpenCode("prompt", {
+        const result = await runOpenCode({
+          prompt: "prompt",
           model: "openai/gpt-5.5",
           workdir,
           configPath: "/config.json",
@@ -46,15 +47,16 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
           sanitizeEnv: true,
         });
 
-        expect(output).toContain("HOME=/data");
-        expect(output).toContain("MODEL=openai/gpt-5.5");
-        expect(output).toContain("CONFIG=/config.json");
-        expect(output).toContain("DISABLE=1");
-        expect(output).toContain(`XDG_CONFIG=${workdir}/.jumi-tmp/xdg-config`);
-        expect(output).toContain("SECRET=");
-        expect(output).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
-        expect(output).not.toContain("--print-logs");
-        expect(output).not.toContain("\u001b[");
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("HOME=/data");
+        expect(result.stdout).toContain("MODEL=openai/gpt-5.5");
+        expect(result.stdout).toContain("CONFIG=/config.json");
+        expect(result.stdout).toContain("DISABLE=1");
+        expect(result.stdout).toContain(`XDG_CONFIG=${workdir}/.jumi-tmp/xdg-config`);
+        expect(result.stdout).toContain("SECRET=");
+        expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
+        expect(result.stdout).not.toContain("--print-logs");
+        expect(result.stdout).not.toContain("\u001b[");
       }
     );
   });
@@ -65,14 +67,16 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
 printf 'abcdefghijklmnopqrstuvwxyz'
 `,
       async (_binDir, workdir) => {
-        const output = await runOpenCode("prompt", {
+        const result = await runOpenCode({
+          prompt: "prompt",
           model: "model",
           workdir,
           maxOutputBytes: 5,
           sanitizeEnv: true,
         });
 
-        expect(output).toBe("abcde\n\n[opencode output truncated at 5 bytes]");
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toBe("abcde\n\n[opencode output truncated at 5 bytes]");
       }
     );
   });
@@ -84,9 +88,10 @@ printf 'bad things' >&2
 exit 7
 `,
       async (_binDir, workdir) => {
-        await expect(runOpenCode("prompt", { model: "model", workdir, sanitizeEnv: true })).rejects.toThrow(
-          "opencode exited with code 7:\nbad things"
-        );
+        const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.exitCode).toBe(7);
+        expect(result.message).toContain("opencode exited with code 7:\nbad things");
       }
     );
   });
@@ -117,9 +122,9 @@ PY
 exit 7
 `,
       async (_binDir, workdir) => {
-        await expect(runOpenCode("prompt", { model: "model", workdir, sanitizeEnv: true })).rejects.toThrow(
-          "opencode exited with code 7"
-        );
+        const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.message).toContain("opencode exited with code 7");
         const text = renderTokenMetrics();
         expect(text).toContain(
           'ai_tokens_total{agent_instance="jumi",source="opencode",profile="default",model="xai/grok-4.6",token_type="input"} 42'
@@ -138,7 +143,8 @@ exec sleep 30
 `,
       async (_binDir, workdir) => {
         const abort = new AbortController();
-        const run = runOpenCode("prompt", {
+        const run = runOpenCode({
+          prompt: "prompt",
           model: "model",
           workdir,
           sanitizeEnv: true,
@@ -160,9 +166,52 @@ PY
 exit 7
 `,
       async (_binDir, workdir) => {
-        await expect(runOpenCode("prompt", { model: "model", workdir, sanitizeEnv: true })).rejects.toThrow(
-          "[opencode stderr truncated at"
-        );
+        const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.message).toContain("[opencode stderr truncated at");
+      }
+    );
+  });
+
+  test("returns timeout when the child is killed by timeoutMs", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          timeoutMs: 100,
+        });
+        expect(result.status).toBe("timeout");
+        expect(result.message).toContain("opencode exited with code");
+      }
+    );
+  });
+
+  test("returns timeout when the child traps TERM and exits 0", async () => {
+    await withFakeOpenCode(
+      `#!/usr/bin/env python3
+import signal
+import sys
+import time
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+time.sleep(30)
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          timeoutMs: 100,
+        });
+        expect(result.status).toBe("timeout");
+        expect(result.exitCode).toBe(0);
+        expect(result.message).toContain("opencode exited with code");
       }
     );
   });

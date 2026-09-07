@@ -144,9 +144,9 @@ describe("review failure handover to worker lease", () => {
           throw new Error(`unexpected git ${args.join(" ")}`);
         },
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Please fix tests\n<!-- jumi-check: failure -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(store.rows.find((row) => row.kind === "review")?.state).toBe("succeeded");
@@ -193,9 +193,9 @@ describe("review failure handover to worker lease", () => {
           throw new Error(`unexpected git ${args.join(" ")}`);
         },
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);

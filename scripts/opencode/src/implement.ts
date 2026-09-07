@@ -13,7 +13,7 @@ import {
   readClaim,
   writeClaim,
 } from "./claim.ts";
-import { type Engine, resolveEngine } from "./engine.ts";
+import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import { closesIssuePattern, findOpenClosingPullRequest, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
@@ -321,34 +321,37 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
 
     throwIfAborted(opts.abortSignal);
     log(`Running OpenCode for ${owner}/${repo}#${issueNumber}`);
-    await engine(IMPLEMENT_PROMPT, {
-      model: opts.model,
-      workdir: worktree,
-      configPath: opts.opencodeConfig,
-      home: opts.home,
-      sanitizeEnv,
-      extraEnv: gitOpenCodeChildEnv({
-        giteaUrl: opts.giteaUrl,
-        username: opts.botUsername,
-        token: opts.giteaToken,
-      }),
-      timeoutMs: opts.timeoutMs,
-      maxOutputBytes: opts.maxOutputBytes,
-      reviewLabel: `${owner}/${repo}#${issueNumber}`,
-      logger: log,
-      abortSignal: opts.abortSignal,
-      onPid: async (pid) => {
-        await opts.onPid?.(pid);
-        await serializeClaim(async () => {
-          if (heartbeatStopped || !useClaim) return;
-          const current = await readClaim(claimPath);
-          if (heartbeatStopped || !current || current.terminal) return;
-          current.pid = pid;
-          current.heartbeatAt = now().toISOString();
-          await writeClaim(claimPath, current);
-        });
-      },
-    });
+    throwIfEngineFailed(
+      await engine({
+        prompt: IMPLEMENT_PROMPT,
+        model: opts.model,
+        workdir: worktree,
+        configPath: opts.opencodeConfig,
+        home: opts.home,
+        sanitizeEnv,
+        extraEnv: gitOpenCodeChildEnv({
+          giteaUrl: opts.giteaUrl,
+          username: opts.botUsername,
+          token: opts.giteaToken,
+        }),
+        timeoutMs: opts.timeoutMs,
+        maxOutputBytes: opts.maxOutputBytes,
+        reviewLabel: `${owner}/${repo}#${issueNumber}`,
+        logger: log,
+        abortSignal: opts.abortSignal,
+        onPid: async (pid) => {
+          await opts.onPid?.(pid);
+          await serializeClaim(async () => {
+            if (heartbeatStopped || !useClaim) return;
+            const current = await readClaim(claimPath);
+            if (heartbeatStopped || !current || current.terminal) return;
+            current.pid = pid;
+            current.heartbeatAt = now().toISOString();
+            await writeClaim(claimPath, current);
+          });
+        },
+      })
+    );
 
     throwIfAborted(opts.abortSignal);
     const prFileContents = await readPullRequestDescription(worktree);

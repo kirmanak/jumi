@@ -45,7 +45,7 @@ function frozenGit(): GitRunner {
   };
 }
 
-function hangUntilAbort(signal: AbortSignal | undefined): Promise<string> {
+function hangUntilAbort(signal: AbortSignal | undefined): Promise<never> {
   return new Promise((_, reject) => {
     const fail = () => {
       const err = new Error("cancelled");
@@ -76,10 +76,10 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "I'll inspect the Valkey bump…";
+          return { status: "ok" };
         },
       });
 
@@ -105,7 +105,7 @@ describe("processEngineTick", () => {
         workspacePreparer: async () => undefined,
         openCodeRunner: async () => {
           ran++;
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
 
@@ -273,10 +273,10 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Retry\n<!-- jumi-check: success -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(ran).toBe(1);
@@ -300,9 +300,9 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(commentCalls).toBe(2);
@@ -325,9 +325,9 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(store.rows[0]?.error).toBeNull();
@@ -345,9 +345,9 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
@@ -369,7 +369,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async () => "I'll inspect…",
+        openCodeRunner: async () => ({ status: "ok" }),
       });
       expect(store.rows[0]?.error).toBeNull();
       expect(store.rows[0]?.resultReason).toBeNull();
@@ -408,9 +408,9 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(commentCalls).toBe(1);
@@ -473,7 +473,7 @@ describe("processEngineTick", () => {
         extras: {
           gitRunner: frozenGit(),
           workspacePreparer: async () => undefined,
-          openCodeRunner: async (_prompt, opts) => {
+          openCodeRunner: async (opts) => {
             started();
             return hangUntilAbort(opts.abortSignal);
           },
@@ -511,7 +511,7 @@ describe("processEngineTick", () => {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         abortSignal: abort.signal,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           started();
           return hangUntilAbort(opts.abortSignal);
         },
@@ -539,7 +539,7 @@ describe("processEngineTick", () => {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         abortSignal: abort2.signal,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           started2();
           return hangUntilAbort(opts.abortSignal);
         },
@@ -553,9 +553,9 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-3", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "stdout";
+          return { status: "ok" };
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
@@ -584,7 +584,7 @@ describe("processEngineTick", () => {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         abortSignal: abort.signal,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           started();
           return hangUntilAbort(opts.abortSignal);
         },

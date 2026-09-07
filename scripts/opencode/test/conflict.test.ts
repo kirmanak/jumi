@@ -232,7 +232,7 @@ describe("implementConflict", () => {
         gitRunner,
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -378,7 +378,7 @@ describe("implementConflict", () => {
         gitRunner,
         openCodeRunner: async () => {
           openCodeRan = true;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -419,14 +419,14 @@ describe("implementConflict", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (usedPrompt, opts) => {
-          prompt = usedPrompt;
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
           timeoutMs = opts.timeoutMs;
           const conflict = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CONFLICT.md"), "utf8");
           expect(conflict).toContain("pulls/127");
           expect(conflict).toContain("jumi/issue-12-fix-the-thing");
           expect(conflict).toContain("src/demo.ts");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -462,9 +462,9 @@ describe("implementConflict", () => {
         timeoutMs: 1_800_000,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           timeoutMs = opts.timeoutMs;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -510,7 +510,7 @@ describe("implementConflict", () => {
         gitRunner,
         openCodeRunner: async () => {
           openCodeRan = true;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -551,9 +551,9 @@ describe("implementConflict", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           extraEnv = opts.extraEnv;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -589,7 +589,7 @@ describe("implementConflict", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -628,7 +628,7 @@ describe("implementConflict", () => {
         gitRunner,
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -663,7 +663,7 @@ describe("implementConflict", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -701,7 +701,7 @@ describe("implementConflict", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });

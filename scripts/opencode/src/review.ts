@@ -1,7 +1,7 @@
 import { lstat, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
-import { type Engine, resolveEngine } from "./engine.ts";
+import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
@@ -564,7 +564,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
     log(`Running OpenCode for ${repoFullName}#${pr.number}`);
     throwIfAborted(opts.abortSignal);
-    const output = await engine(prompt, {
+    const engineResult = await engine({
+      prompt,
       model: opts.model,
       workdir: opts.workspace,
       configPath: opts.opencodeConfig,
@@ -576,11 +577,12 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       logger: log,
       abortSignal: opts.abortSignal,
     });
+    throwIfEngineFailed(engineResult);
 
     await logParentDiag(log, "post_opencode", {
       review: reviewLabel,
-      output_bytes: byteLength(output),
-      output_bytes_h: formatBytes(byteLength(output)),
+      output_bytes: byteLength(engineResult.stdout ?? ""),
+      output_bytes_h: formatBytes(byteLength(engineResult.stdout ?? "")),
     });
 
     await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);

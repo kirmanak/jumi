@@ -147,7 +147,7 @@ describe("reviewPullRequest", () => {
         },
         openCodeRunner: async () => {
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return "I'll inspect the Valkey bump…";
+          return { status: "ok" };
         },
       });
 
@@ -193,7 +193,7 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "Updated review\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
 
@@ -225,7 +225,7 @@ describe("reviewPullRequest", () => {
           persistResult: async (value) => {
             persisted.push(value);
           },
-          openCodeRunner: async () => "I'll inspect the Valkey bump…",
+          openCodeRunner: async () => ({ status: "ok" }),
         })
       ).resolves.toEqual({ status: "skipped", reason: "Incomplete review: no output" });
       expect(created).toBe(false);
@@ -255,7 +255,7 @@ describe("reviewPullRequest", () => {
               return status;
             },
           }),
-          openCodeRunner: async () => "I'll inspect…",
+          openCodeRunner: async () => ({ status: "ok" }),
         })
       ).resolves.toEqual({ status: "skipped", reason: "Incomplete review: no output" });
       expect(created).toBe(false);
@@ -280,7 +280,7 @@ describe("reviewPullRequest", () => {
         openCodeRunner: async () => {
           await writeFile(join(workspace, "secret.md"), "Looks good\n<!-- jumi-check: success -->");
           await symlink(join(workspace, "secret.md"), join(workspace, "JUMI_REVIEW.md"));
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
@@ -302,7 +302,7 @@ describe("reviewPullRequest", () => {
         openCodeRunner: async () => {
           await mkdir(join(workspace, "JUMI_REVIEW.md"), { recursive: true });
           await writeFile(join(workspace, "JUMI_REVIEW.md", "nested.md"), "Looks good\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
@@ -330,7 +330,7 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, `${"x".repeat(80_001)}\n<!-- jumi-check: success -->`);
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: output too large" });
@@ -358,7 +358,7 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "  \n");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
@@ -389,7 +389,7 @@ describe("reviewPullRequest", () => {
             workspace,
             "L12: 🔴 bug: null deref. Guard it.\nL40: 🟡 risk: swallowed error. Fail closed.\n<!-- jumi-check: failure; 2 blocking -->"
           );
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
 
@@ -422,7 +422,7 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "No correctness bugs found.");
-          return "I'll inspect the PR and check for correctness issues.";
+          return { status: "ok" };
         },
       });
 
@@ -465,7 +465,7 @@ describe("reviewPullRequest", () => {
             workspace,
             "No correctness bugs.\n❓ q: is the timeout intentional?\n<!-- jumi-check: success -->"
           );
-          return "";
+          return { status: "ok" };
         },
       });
       expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
@@ -490,7 +490,7 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: HEAD moved" });
@@ -517,7 +517,7 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: dirty tree" });
@@ -543,7 +543,7 @@ describe("reviewPullRequest", () => {
           }),
           openCodeRunner: async () => {
             await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-            return "I'll inspect…";
+            return { status: "ok" };
           },
         })
       ).rejects.toThrow("sticky write failed");
@@ -573,7 +573,7 @@ describe("reviewPullRequest", () => {
           },
           openCodeRunner: async () => {
             await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-            return "I'll inspect…";
+            return { status: "ok" };
           },
         })
       ).rejects.toThrow("sticky write failed");
@@ -602,7 +602,7 @@ describe("reviewPullRequest", () => {
           },
           openCodeRunner: async () => {
             await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-            return "I'll inspect…";
+            return { status: "ok" };
           },
         })
       ).rejects.toThrow("cannot save result");
@@ -628,7 +628,7 @@ describe("reviewPullRequest", () => {
             persisted.push(value);
             throw new Error("cannot save result");
           },
-          openCodeRunner: async () => "I'll inspect…",
+          openCodeRunner: async () => ({ status: "ok" }),
         })
       ).rejects.toThrow("cannot save result");
       expect(persisted).toEqual([{ kind: "skip", reason: "Incomplete review: no output" }]);
@@ -649,7 +649,7 @@ describe("reviewPullRequest", () => {
               return status;
             },
           }),
-          openCodeRunner: async () => "I'll inspect…",
+          openCodeRunner: async () => ({ status: "ok" }),
         })
       ).rejects.toThrow("status write failed");
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure", "failure"]);
@@ -770,7 +770,7 @@ describe("reviewPullRequest", () => {
         },
       }),
       expectedHeadSha: "oldsha",
-      openCodeRunner: async () => "stale review",
+      openCodeRunner: async () => ({ status: "ok" }),
     });
 
     expect(result).toEqual({ status: "skipped", reason: "PR head changed from oldsha to newsha" });
@@ -800,11 +800,11 @@ describe("reviewPullRequest", () => {
             token: opts.token,
           };
         },
-        openCodeRunner: async (value, opts) => {
-          prompt = value;
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
           runnerWorkdir = opts.workdir;
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
 
@@ -841,10 +841,10 @@ describe("reviewPullRequest", () => {
         }),
         maxFiles: 1,
         maxPatchBytes: 3,
-        openCodeRunner: async (value) => {
-          prompt = value;
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
 
@@ -872,7 +872,7 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
     });
@@ -893,10 +893,10 @@ describe("reviewPullRequest", () => {
             throw new Error("Gitea API GET https://gitea.example/issues/12 → 404: not found");
           },
         }),
-        openCodeRunner: async (value) => {
-          prompt = value;
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
 
@@ -925,10 +925,10 @@ describe("reviewPullRequest", () => {
             }),
           ],
         }),
-        openCodeRunner: async (value) => {
-          prompt = value;
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
 
@@ -1020,7 +1020,7 @@ optionalEnv(resolved, "DATABASE_URL");
         openCodeRunner: async () => {
           ranOpenCode = true;
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return "I'll inspect…";
+          return { status: "ok" };
         },
       });
       expect(ranOpenCode).toBe(true);
@@ -1061,7 +1061,7 @@ optionalEnv(resolved, "DATABASE_URL");
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return "";
+          return { status: "ok" };
         },
       });
       expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: success -->");
@@ -1093,7 +1093,7 @@ optionalEnv(resolved, "DATABASE_URL");
         openCodeRunner: async () => {
           ranOpenCode = true;
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return "";
+          return { status: "ok" };
         },
       });
       expect(ranOpenCode).toBe(true);
@@ -1121,7 +1121,7 @@ optionalEnv(resolved, "DATABASE_URL");
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return "";
+          return { status: "ok" };
         },
       });
       expect(lastNonEmptyLine(createdBody)).toBe("<!-- jumi-check: success -->");

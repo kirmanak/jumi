@@ -11,7 +11,7 @@ import {
   sampleMemory,
   trackMemoryPeak,
 } from "./diagnostics.ts";
-import type { Engine, EngineRunOptions } from "./engine.ts";
+import type { Engine, EngineResult, EngineRunOptions } from "./engine.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -23,13 +23,13 @@ function stripAnsi(str: string): string {
 }
 
 /**
- * Run `opencode run` with a prompt string and return the stdout as a string.
- * ANSI escape codes are stripped.
+ * OpenCode Engine impl #0: run to completion in `opts.workdir`.
+ * Stdout is logs (ANSI stripped), not the deliverable. Timeout and non-zero
+ * exit are returned for the parent to fail closed. Abort still throws.
  *
- * The prompt is written to a temp file and fed to the process via stdin to
+ * The prompt is written to a temp file and fed to `opencode run` via stdin to
  * avoid OS ARG_MAX limits for large PR diffs. Both stdout and stderr are
  * consumed concurrently to prevent pipe-buffer deadlocks (64KB on Linux).
- * A non-zero exit code is surfaced as a thrown Error.
  */
 export type OpenCodeRunOptions = EngineRunOptions;
 
@@ -125,8 +125,13 @@ function countToolishLines(stderr: string): number {
   return n;
 }
 
-export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Promise<string> {
+function engineExitMessage(exitCode: number | null, stderr: string): string {
+  return `opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`;
+}
+
+export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
+  const prompt = opts.prompt;
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
 
@@ -202,7 +207,14 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
       });
     });
     trackerStartedAt = tracker.startedAtMs;
-    const timeout = opts.timeoutMs && opts.timeoutMs > 0 ? setTimeout(() => proc.kill(), opts.timeoutMs) : undefined;
+    let timedOut = false;
+    const timeout =
+      opts.timeoutMs && opts.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            proc.kill();
+          }, opts.timeoutMs)
+        : undefined;
 
     // Consume stdout, stderr, and the exit code concurrently.
     // Reading stderr in parallel is required to prevent a deadlock when the
@@ -273,23 +285,26 @@ export async function runOpenCode(prompt: string, opts: OpenCodeRunOptions): Pro
 
     if (runError) throw runError;
 
-    if (exitCode !== 0) {
-      throw new Error(`opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`);
+    if (timedOut) {
+      return { status: "timeout", exitCode, stdout, message: engineExitMessage(exitCode, stderr) };
     }
 
-    // Do not dump full OpenCode tool transcripts into the parent log stream —
-    // permission-denial payloads alone can be multi‑KB of repeated JSON and the
-    // post-OOM trail showed parent RSS climbing after opencode_end.
-    if (stderr) {
-      const logBytes = byteLength(stderr);
-      const preview =
-        logBytes <= OPENCODE_STDERR_LOG_MAX_BYTES
-          ? stderr
-          : `${stderr.slice(0, OPENCODE_STDERR_LOG_MAX_BYTES)}\n…[stderr log capped at ${OPENCODE_STDERR_LOG_MAX_BYTES} bytes; total ${logBytes}]`;
-      log(`[opencode stderr] ${preview}`);
+    if (exitCode === 0) {
+      // Do not dump full OpenCode tool transcripts into the parent log stream —
+      // permission-denial payloads alone can be multi‑KB of repeated JSON and the
+      // post-OOM trail showed parent RSS climbing after opencode_end.
+      if (stderr) {
+        const logBytes = byteLength(stderr);
+        const preview =
+          logBytes <= OPENCODE_STDERR_LOG_MAX_BYTES
+            ? stderr
+            : `${stderr.slice(0, OPENCODE_STDERR_LOG_MAX_BYTES)}\n…[stderr log capped at ${OPENCODE_STDERR_LOG_MAX_BYTES} bytes; total ${logBytes}]`;
+        log(`[opencode stderr] ${preview}`);
+      }
+      return { status: "ok", exitCode: 0, stdout };
     }
 
-    return stdout;
+    return { status: "exit", exitCode, stdout, message: engineExitMessage(exitCode, stderr) };
   } finally {
     tracker?.stop();
     await rm(tmpDir, { recursive: true, force: true });

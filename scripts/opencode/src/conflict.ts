@@ -12,7 +12,7 @@ import {
   readClaim,
   writeClaim,
 } from "./claim.ts";
-import { resolveEngine } from "./engine.ts";
+import { resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import { findOpenJumiClosingPullRequest, isInScopeJumiPR, upsertWorkerComment } from "./gitea_issues.ts";
@@ -435,20 +435,23 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     if (opts.ciMarkdown) await writeFile(join(worktree, CI_LOG_FILE), opts.ciMarkdown);
     log(`Running OpenCode conflict resolution for ${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`);
     openCodeRan = true;
-    await opts.openCodeRunner(CONFLICT_PROMPT, {
-      model: opts.model,
-      workdir: worktree,
-      configPath: opts.opencodeConfig,
-      home: opts.home,
-      sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
-      extraEnv: opts.extraEnv,
-      timeoutMs: opts.timeoutMs ?? CONFLICT_TIMEOUT_MS,
-      maxOutputBytes: opts.maxOutputBytes,
-      reviewLabel: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
-      logger: log,
-      abortSignal: opts.abortSignal,
-      onPid: opts.onPid,
-    });
+    throwIfEngineFailed(
+      await opts.openCodeRunner({
+        prompt: CONFLICT_PROMPT,
+        model: opts.model,
+        workdir: worktree,
+        configPath: opts.opencodeConfig,
+        home: opts.home,
+        sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
+        extraEnv: opts.extraEnv,
+        timeoutMs: opts.timeoutMs ?? CONFLICT_TIMEOUT_MS,
+        maxOutputBytes: opts.maxOutputBytes,
+        reviewLabel: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
+        logger: log,
+        abortSignal: opts.abortSignal,
+        onPid: opts.onPid,
+      })
+    );
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
     await rm(join(worktree, CI_LOG_FILE), { force: true });

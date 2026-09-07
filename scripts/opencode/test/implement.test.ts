@@ -188,12 +188,12 @@ describe("implementIssue", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           openCodeOpts = opts;
           const task = await readFile(join(workdir, "kirmanak/demo/12/JUMI_TASK.md"), "utf8");
           expect(task).toContain("Fix the thing");
           expect(task).toContain("Please implement this.");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -234,7 +234,7 @@ describe("implementIssue", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
 
@@ -285,7 +285,7 @@ describe("implementIssue", () => {
         heartbeatIntervalMs: 0,
         abortSignal: abort.signal,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "cancelled" });
@@ -316,7 +316,7 @@ describe("implementIssue", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result.status).toBe("pr");
@@ -358,7 +358,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(join(worktree, ".jumi-tmp"), { recursive: true });
           await writeFile(join(worktree, ".jumi-tmp", "opencode-session.db"), "db");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -390,7 +390,7 @@ describe("implementIssue", () => {
         gitRunner,
         openCodeRunner: async () => {
           await new Promise((resolve) => setTimeout(resolve, 45));
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -431,7 +431,7 @@ describe("implementIssue", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "no-changes" });
@@ -468,7 +468,7 @@ describe("implementIssue", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result.status).toBe("pr");
@@ -574,7 +574,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(worktree, { recursive: true });
           await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -609,7 +609,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(worktree, { recursive: true });
           await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.\n\nFixes #12");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -641,7 +641,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(worktree, { recursive: true });
           await writeFile(join(worktree, "JUMI_PR.md"), "");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -681,7 +681,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(worktree, { recursive: true });
           await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -717,7 +717,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(worktree, { recursive: true });
           await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -753,7 +753,7 @@ describe("implementIssue", () => {
           await mkdir(worktree, { recursive: true });
           await writeFile(join(worktree, "secret.md"), "Should not appear.");
           await symlink(join(worktree, "secret.md"), join(worktree, "JUMI_PR.md"));
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -794,7 +794,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(join(worktree, "JUMI_PR.md"), { recursive: true });
           await writeFile(join(worktree, "JUMI_PR.md", "nested.md"), "Should not appear.");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });

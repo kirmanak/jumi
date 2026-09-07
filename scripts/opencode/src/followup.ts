@@ -21,7 +21,7 @@ import {
   shouldIncrementRound,
   writeConflictState,
 } from "./conflict.ts";
-import { resolveEngine } from "./engine.ts";
+import { resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { isJumiInternalBody, isJumiWorkerBody } from "./followup_webhook.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
@@ -865,34 +865,37 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     throwIfAborted(opts.abortSignal);
     log(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
     followUpEngineRan = true;
-    await engine(FOLLOWUP_PROMPT, {
-      model: opts.model,
-      workdir: worktree,
-      configPath: opts.opencodeConfig,
-      home: opts.home,
-      sanitizeEnv,
-      extraEnv: gitOpenCodeChildEnv({
-        giteaUrl: opts.giteaUrl,
-        username: opts.botUsername,
-        token: opts.giteaToken,
-      }),
-      timeoutMs,
-      maxOutputBytes: opts.maxOutputBytes,
-      reviewLabel: `${owner}/${repo}#${issueNumber}`,
-      logger: log,
-      abortSignal: opts.abortSignal,
-      onPid: async (pid) => {
-        await opts.onPid?.(pid);
-        await serializeClaim(async () => {
-          if (heartbeatStopped || !useClaim) return;
-          const current = await readClaim(claimPath);
-          if (heartbeatStopped || !current || current.terminal) return;
-          current.pid = pid;
-          current.heartbeatAt = now().toISOString();
-          await writeClaim(claimPath, current);
-        });
-      },
-    });
+    throwIfEngineFailed(
+      await engine({
+        prompt: FOLLOWUP_PROMPT,
+        model: opts.model,
+        workdir: worktree,
+        configPath: opts.opencodeConfig,
+        home: opts.home,
+        sanitizeEnv,
+        extraEnv: gitOpenCodeChildEnv({
+          giteaUrl: opts.giteaUrl,
+          username: opts.botUsername,
+          token: opts.giteaToken,
+        }),
+        timeoutMs,
+        maxOutputBytes: opts.maxOutputBytes,
+        reviewLabel: `${owner}/${repo}#${issueNumber}`,
+        logger: log,
+        abortSignal: opts.abortSignal,
+        onPid: async (pid) => {
+          await opts.onPid?.(pid);
+          await serializeClaim(async () => {
+            if (heartbeatStopped || !useClaim) return;
+            const current = await readClaim(claimPath);
+            if (heartbeatStopped || !current || current.terminal) return;
+            current.pid = pid;
+            current.heartbeatAt = now().toISOString();
+            await writeClaim(claimPath, current);
+          });
+        },
+      })
+    );
 
     throwIfAborted(opts.abortSignal);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });

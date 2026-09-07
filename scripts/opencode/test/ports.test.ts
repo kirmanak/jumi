@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GiteaAPI } from "../src/api.ts";
-import type { Engine } from "../src/engine.ts";
-import { resolveEngine } from "../src/engine.ts";
+import type { Engine, EngineRunOptions } from "../src/engine.ts";
+import { resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
 import type { Forge } from "../src/forge.ts";
 import { createGiteaForge, FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "../src/forge.ts";
 import { openCodeEngine, runOpenCode } from "../src/git.ts";
@@ -103,13 +103,24 @@ describe("Engine and Forge ports", () => {
     expect(FORGE_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
   });
 
-  test("resolveEngine prefers engine over openCodeRunner", async () => {
-    const engine: Engine = async () => "engine";
-    const openCodeRunner: Engine = async () => "opencode";
-    const fallback: Engine = async () => "fallback";
-    expect(await resolveEngine({ engine, openCodeRunner }, fallback)("p", { model: "m", workdir: "/" })).toBe("engine");
-    expect(await resolveEngine({ openCodeRunner }, fallback)("p", { model: "m", workdir: "/" })).toBe("opencode");
-    expect(await resolveEngine({}, fallback)("p", { model: "m", workdir: "/" })).toBe("fallback");
+  test("resolveEngine prefers engine over openCodeRunner", () => {
+    const engine: Engine = async () => ({ status: "ok", stdout: "engine" });
+    const openCodeRunner: Engine = async () => ({ status: "ok", stdout: "opencode" });
+    const fallback: Engine = async () => ({ status: "ok", stdout: "fallback" });
+    expect(resolveEngine({ engine, openCodeRunner }, fallback)).toBe(engine);
+    expect(resolveEngine({ openCodeRunner }, fallback)).toBe(openCodeRunner);
+    expect(resolveEngine({}, fallback)).toBe(fallback);
+  });
+
+  test("throwIfEngineFailed fail-closes timeout, exit, and stuck", () => {
+    throwIfEngineFailed({ status: "ok" });
+    expect(() => throwIfEngineFailed({ status: "timeout", message: "opencode timed out" })).toThrow(
+      "opencode timed out"
+    );
+    expect(() => throwIfEngineFailed({ status: "exit", exitCode: 7, message: "opencode exited with code 7" })).toThrow(
+      "opencode exited with code 7"
+    );
+    expect(() => throwIfEngineFailed({ status: "stuck" })).toThrow("engine stuck");
   });
 
   test("implement produces a PR via the parent with a fake engine and fake forge", async () => {
@@ -124,14 +135,14 @@ describe("Engine and Forge ports", () => {
         if (gitArgs[0] === "status") return " M src/demo.ts";
         return "";
       };
-      let engineOpts: Parameters<Engine>[1] | undefined;
-      const engine: Engine = async (_prompt, opts) => {
+      let engineOpts: EngineRunOptions | undefined;
+      const engine: Engine = async (opts) => {
         engineOpts = opts;
         const task = await readFile(join(worktree, "JUMI_TASK.md"), "utf8");
         expect(task).toContain("Fix the thing");
         await mkdir(worktree, { recursive: true });
         await writeFile(join(worktree, "JUMI_PR.md"), "Caches categories.");
-        return "I'll inspect the issue and open a PR myself…";
+        return { status: "ok" };
       };
 
       const result = await implementIssue({
@@ -188,7 +199,7 @@ describe("Engine and Forge ports", () => {
       };
       const engine: Engine = async () => {
         await writeFile(join(workspace, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
-        return "I'll inspect the Valkey bump…";
+        return { status: "ok" };
       };
 
       const result = await reviewPullRequest({
@@ -218,6 +229,76 @@ describe("Engine and Forge ports", () => {
         { state: "pending", context: "jumi/opencode-review" },
         { state: "success", context: "jumi/opencode-review" },
       ]);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("implement fail-closes on engine timeout and does not open a PR", async () => {
+    await withDirs(async (home, workdir) => {
+      const forge = makeFakeForge();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      await expect(
+        implementIssue({
+          api: forge,
+          engine: async () => ({ status: "timeout", message: "opencode exited with code 143" }),
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("opencode exited with code 143");
+      expect(forge.pulls).toHaveLength(0);
+      expect(forge.comments.at(-1)).toContain("Jumi failed: opencode exited with code 143");
+    });
+  });
+
+  test("review fail-closes on engine exit and does not treat stdout as success", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-ports-review-exit-"));
+    try {
+      const sha = "d90b7289701097dae3ffa3dc0ccdc348be552697";
+      const forge = makeFakeForge({
+        getPR: async () => makePR({ head: makeBranch({ sha }) }),
+      });
+      await expect(
+        reviewPullRequest({
+          api: forge,
+          engine: async () => ({
+            status: "exit",
+            exitCode: 7,
+            stdout: "Looks good\n<!-- jumi-check: success -->",
+            message: "opencode exited with code 7",
+          }),
+          owner: "kirmanak",
+          repo: "demo",
+          prNumber: 7,
+          expectedHeadSha: sha,
+          model: "openai/gpt-5.5",
+          workspace,
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          workspacePreparer: async () => undefined,
+          gitRunner: async () => {
+            throw new Error("git should not run after engine exit");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("opencode exited with code 7");
+      expect(forge.comments).toHaveLength(0);
+      expect(forge.statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(forge.statuses.at(-1)?.description).toContain("opencode exited with code 7");
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }

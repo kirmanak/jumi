@@ -160,7 +160,7 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       const slugged = "jumi/issue-12-completely-retitled-issue";
@@ -214,7 +214,7 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(
@@ -263,7 +263,7 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "add")).toBe(false);
@@ -301,13 +301,13 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (usedPrompt) => {
-          prompt = usedPrompt;
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
           const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
           expect(feedback).toContain("please fix the tests");
           expect(feedback).toContain("pulls/127");
           expect(feedback).toContain("jumi/issue-12-fix-the-thing");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -347,7 +347,7 @@ describe("implementFollowUp", () => {
         openCodeRunner: async () => {
           const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
           expect(feedback).toContain("please rename");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -376,7 +376,7 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({
@@ -420,7 +420,7 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "no-changes" });
@@ -455,9 +455,9 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           extraEnv = opts.extraEnv;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -489,7 +489,7 @@ describe("implementFollowUp", () => {
         heartbeatIntervalMs: 0,
         abortSignal: abort.signal,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "cancelled" });
@@ -526,7 +526,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -567,7 +567,7 @@ describe("implementFollowUp", () => {
         gitRunner,
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -604,7 +604,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -655,7 +655,7 @@ describe("implementFollowUp", () => {
           const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
           expect(feedback).not.toContain("please fix the tests");
           expect(feedback).toContain("Address JUMI_CI.md");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -696,7 +696,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -731,7 +731,7 @@ describe("implementFollowUp", () => {
           ...shared,
           job: followUpJob(),
           gitRunner,
-          openCodeRunner: async () => "done",
+          openCodeRunner: async () => ({ status: "ok" }),
         })
       ).toEqual({ status: "no-changes" });
 
@@ -746,7 +746,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "no unhandled feedback" });
@@ -790,7 +790,7 @@ describe("implementFollowUp", () => {
         gitRunner,
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -820,9 +820,9 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           timeoutMs = opts.timeoutMs;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -853,9 +853,9 @@ describe("implementFollowUp", () => {
         timeoutMs: 1_800_000,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (_prompt, opts) => {
+        openCodeRunner: async (opts) => {
           timeoutMs = opts.timeoutMs;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -919,9 +919,9 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (prompt) => {
-          events.push(prompt === FOLLOWUP_PROMPT ? "feedback" : "other");
-          return "done";
+        openCodeRunner: async (opts) => {
+          events.push(opts.prompt === FOLLOWUP_PROMPT ? "feedback" : "other");
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -955,9 +955,9 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (prompt) => {
-          prompts.push(prompt);
-          return "done";
+        openCodeRunner: async (opts) => {
+          prompts.push(opts.prompt);
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1000,7 +1000,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1036,8 +1036,8 @@ describe("implementFollowUp", () => {
           workdir,
           heartbeatIntervalMs: 0,
           gitRunner,
-          openCodeRunner: async (prompt) => {
-            if (prompt === CONFLICT_PROMPT) throw new Error("opencode crashed");
+          openCodeRunner: async (opts) => {
+            if (opts.prompt === CONFLICT_PROMPT) throw new Error("opencode crashed");
             throw new Error("feedback should not run");
           },
           logger: () => undefined,
@@ -1083,7 +1083,7 @@ describe("implementFollowUp", () => {
         gitRunner,
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1118,7 +1118,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1156,9 +1156,9 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async (prompt) => {
-          if (prompt === CONFLICT_PROMPT) conflictDone = true;
-          return "done";
+        openCodeRunner: async (opts) => {
+          if (opts.prompt === CONFLICT_PROMPT) conflictDone = true;
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1198,10 +1198,10 @@ describe("implementFollowUp", () => {
           workdir,
           heartbeatIntervalMs: 0,
           gitRunner,
-          openCodeRunner: async (prompt) => {
-            if (prompt === CONFLICT_PROMPT) {
+          openCodeRunner: async (opts) => {
+            if (opts.prompt === CONFLICT_PROMPT) {
               conflictDone = true;
-              return "done";
+              return { status: "ok" };
             }
             throw new Error("feedback exploded");
           },
@@ -1235,7 +1235,7 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
@@ -1279,7 +1279,7 @@ describe("implementFollowUp", () => {
         ...shared,
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
       });
       expect(result.status).not.toBe("skipped");
@@ -1328,7 +1328,7 @@ describe("implementFollowUp", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => "done",
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "no-changes" });
@@ -1364,15 +1364,15 @@ describe("implementFollowUp", () => {
           if (gitArgs[0] === "rev-list") return "0";
           return "";
         },
-        openCodeRunner: async (usedPrompt) => {
-          prompt = usedPrompt;
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
           const ci = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
           expect(ci).toContain("platforms;android-37");
           expect(ci).toContain("Do not call tea");
           const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
           expect(feedback).not.toContain("please fix the tests");
           expect(feedback).toContain("Address JUMI_CI.md");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1411,7 +1411,7 @@ describe("implementFollowUp", () => {
           },
           openCodeRunner: async () => {
             openCode++;
-            return "done";
+            return { status: "ok" };
           },
           logger: () => undefined,
         })
@@ -1485,7 +1485,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1518,7 +1518,7 @@ describe("implementFollowUp", () => {
         },
         openCodeRunner: async () => {
           openCode++;
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
@@ -1557,7 +1557,7 @@ describe("implementFollowUp", () => {
           expect(ci).toContain("platforms;android-37");
           const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
           expect(feedback).toContain("please fix the tests");
-          return "done";
+          return { status: "ok" };
         },
         logger: () => undefined,
       });
