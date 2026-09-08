@@ -4,7 +4,10 @@ import {
   extractClosingIssueNumbers,
   findOpenClosingPullRequest,
   findOpenJumiClosingPullRequest,
+  isAssignedForeignPR,
+  isEligibleWorkerPR,
   pullRequestClosesIssue,
+  resolveWorkerPullRequest,
 } from "../src/gitea_issues.ts";
 import { makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -161,5 +164,75 @@ describe("findOpenJumiClosingPullRequest", () => {
     const api = { listOpenPulls: async () => [pr] };
     expect((await findOpenJumiClosingPullRequest(api, "kirmanak", "demo", 12, "jumi"))?.number).toBe(8);
     expect(await findOpenJumiClosingPullRequest(api, "kirmanak", "demo", 13, "jumi")).toBeUndefined();
+  });
+});
+
+describe("isEligibleWorkerPR", () => {
+  test("rejects draft, WIP, closed, merged, and forks", () => {
+    const repo = makeRepo();
+    const base = makePR({
+      head: { label: "kirmanak:feature", ref: "feature", sha: "abc", repo, repo_id: repo.id },
+    });
+    expect(isEligibleWorkerPR(base, "kirmanak", "demo")).toBe(true);
+    expect(isEligibleWorkerPR({ ...base, draft: true }, "kirmanak", "demo")).toBe(false);
+    expect(isEligibleWorkerPR({ ...base, title: "WIP: x" }, "kirmanak", "demo")).toBe(false);
+    expect(isEligibleWorkerPR({ ...base, state: "closed" }, "kirmanak", "demo")).toBe(false);
+    expect(isEligibleWorkerPR({ ...base, merged: true }, "kirmanak", "demo")).toBe(false);
+    expect(
+      isEligibleWorkerPR(
+        {
+          ...base,
+          head: {
+            label: "alice:feature",
+            ref: "feature",
+            sha: "abc",
+            repo: makeRepo({ full_name: "alice/demo" }),
+            repo_id: 99,
+          },
+        },
+        "kirmanak",
+        "demo"
+      )
+    ).toBe(false);
+  });
+});
+
+describe("isAssignedForeignPR", () => {
+  test("matches an assigned non-jumi PR and ignores jumi closers", () => {
+    const repo = makeRepo();
+    const foreign = makePR({
+      user: makeUser({ login: "renovate" }),
+      assignee: makeUser({ login: "jumi" }),
+      assignees: [makeUser({ login: "jumi" })],
+      head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "abc", repo, repo_id: repo.id },
+    });
+    expect(isAssignedForeignPR(foreign, "kirmanak", "demo", "jumi")).toBe(true);
+    const closer = makePR({
+      user: makeUser({ login: "jumi" }),
+      body: "Fixes #12",
+      assignee: makeUser({ login: "jumi" }),
+      assignees: [makeUser({ login: "jumi" })],
+      head: {
+        label: "kirmanak:jumi/issue-12-x",
+        ref: "jumi/issue-12-x",
+        sha: "abc",
+        repo,
+        repo_id: repo.id,
+      },
+    });
+    expect(isAssignedForeignPR(closer, "kirmanak", "demo", "jumi")).toBe(false);
+  });
+});
+
+describe("resolveWorkerPullRequest", () => {
+  test("prefers the job prNumber even when the author is not jumi", async () => {
+    const repo = makeRepo();
+    const foreign = makePR({
+      number: 50,
+      user: makeUser({ login: "renovate" }),
+      head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "abc", repo, repo_id: repo.id },
+    });
+    const api = { listOpenPulls: async () => [foreign] };
+    expect((await resolveWorkerPullRequest(api, "kirmanak", "demo", 50, "jumi", 50))?.number).toBe(50);
   });
 });

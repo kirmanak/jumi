@@ -138,6 +138,69 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("follows up on an assigned foreign PR head ref", async () => {
+    await withDirs(async (home, workdir) => {
+      const repo = makeRepo();
+      const foreign = makePR({
+        number: 50,
+        title: "chore(deps)",
+        body: "",
+        user: makeUser({ login: "renovate" }),
+        html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+        head: {
+          label: "kirmanak:renovate/all-digest",
+          ref: "renovate/all-digest",
+          sha: "headsha",
+          repo,
+          repo_id: repo.id,
+        },
+      });
+      const api = makeApi({
+        getIssue: async () =>
+          makeIssue({
+            number: 50,
+            title: "chore(deps)",
+            body: "",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+            user: makeUser({ login: "renovate" }),
+            pull_request: { merged_at: null },
+          }),
+        listOpenPulls: async () => [foreign],
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      await implementFollowUp({
+        api,
+        job: followUpJob({
+          issueNumber: 50,
+          prNumber: 50,
+          title: "chore(deps)",
+          body: "",
+          htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+        }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(gitCalls.some((args) => args.includes("renovate/all-digest"))).toBe(true);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
+      expect(api.pulls).toHaveLength(0);
+    });
+  });
+
   test("checks out pr.head.ref, not a freshly slugged branch from a retitled issue", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();

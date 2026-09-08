@@ -1,3 +1,4 @@
+import { isAssignedToBot } from "./assignee.ts";
 import type {
   GiteaActionJob,
   GiteaComment,
@@ -126,12 +127,23 @@ export function isWipOrDraft(pr: { title: string; draft?: boolean }): boolean {
   return pr.title.trim().toLowerCase().startsWith("wip:");
 }
 
-export function isInScopeJumiPR(pr: GiteaPR, owner: string, repo: string, botUsername: string): boolean {
+export function isEligibleWorkerPR(pr: GiteaPR, owner: string, repo: string): boolean {
   if (pr.state !== "open" || pr.merged) return false;
   if (isWipOrDraft(pr)) return false;
-  if (!isJumiPrIdentity(pr, botUsername)) return false;
   if (!pr.head?.repo || pr.head.repo.full_name !== `${owner}/${repo}`) return false;
+  return true;
+}
+
+export function isInScopeJumiPR(pr: GiteaPR, owner: string, repo: string, botUsername: string): boolean {
+  if (!isEligibleWorkerPR(pr, owner, repo)) return false;
+  if (!isJumiPrIdentity(pr, botUsername)) return false;
   return extractClosingIssueNumber(pr) !== undefined;
+}
+
+export function isAssignedForeignPR(pr: GiteaPR, owner: string, repo: string, botUsername: string): boolean {
+  if (!isEligibleWorkerPR(pr, owner, repo)) return false;
+  if (isInScopeJumiPR(pr, owner, repo, botUsername)) return false;
+  return isAssignedToBot(pr, botUsername);
 }
 
 export async function findOpenClosingPullRequest(
@@ -157,6 +169,24 @@ export async function findOpenJumiClosingPullRequest(
   botUsername: string
 ): Promise<GiteaPR | undefined> {
   const pulls = await api.listOpenPulls(owner, repo);
+  return pulls.find(
+    (pr) => isInScopeJumiPR(pr, owner, repo, botUsername) && extractClosingIssueNumber(pr) === issueNumber
+  );
+}
+
+export async function resolveWorkerPullRequest(
+  api: Pick<IssueApi, "listOpenPulls">,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  botUsername: string,
+  prNumber?: number
+): Promise<GiteaPR | undefined> {
+  const pulls = await api.listOpenPulls(owner, repo);
+  if (prNumber !== undefined) {
+    const byNumber = pulls.find((pr) => pr.number === prNumber);
+    if (byNumber) return byNumber;
+  }
   return pulls.find(
     (pr) => isInScopeJumiPR(pr, owner, repo, botUsername) && extractClosingIssueNumber(pr) === issueNumber
   );

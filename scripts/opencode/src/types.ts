@@ -57,6 +57,8 @@ export interface GiteaPR {
   html_url: string;
   draft?: boolean;
   mergeable?: boolean | null;
+  assignee?: GiteaUser | null;
+  assignees?: GiteaUser[] | null;
 }
 
 export interface GiteaPRFile {

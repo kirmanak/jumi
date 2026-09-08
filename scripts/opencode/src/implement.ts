@@ -16,7 +16,13 @@ import {
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
-import { closesIssuePattern, findOpenClosingPullRequest, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
+import {
+  closesIssuePattern,
+  type IssueApi,
+  isAssignedForeignPR,
+  pullRequestClosesIssue,
+  upsertWorkerComment,
+} from "./gitea_issues.ts";
 import type { IssueJob } from "./types.ts";
 import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
 
@@ -180,12 +186,17 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
     if (useClaim) await deleteClaim(claimPath);
   };
 
-  const existingPr = await findOpenClosingPullRequest(opts.api, owner, repo, issueNumber);
+  const pulls = await opts.api.listOpenPulls(owner, repo);
+  const existingPr = pulls.find((pr) => pullRequestClosesIssue(pr, issueNumber));
   if (existingPr) {
     // Scan already skips open Fixes/Closes PRs. Do not persist terminal: closing
     // that PR unmerged often leaves issueUpdatedAt unchanged, which would trap acquireClaim.
     await forgetClaim();
     return { status: "skipped", reason: `open PR already closes #${issueNumber}` };
+  }
+  if (pulls.some((pr) => isAssignedForeignPR(pr, owner, repo, opts.botUsername))) {
+    await forgetClaim();
+    return { status: "skipped", reason: "assigned PR is the job for this repo" };
   }
 
   try {

@@ -1,5 +1,5 @@
 import { isAssignedToBot } from "./assignee.ts";
-import { extractClosingIssueNumber, type IssueApi, isInScopeJumiPR } from "./gitea_issues.ts";
+import { extractClosingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
 import type { GiteaWorkflowJobPayload, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
@@ -73,8 +73,27 @@ export async function shouldEnqueueWorkflowJobFollowUp(
   const sender = workflowJobSender(payload);
 
   for (const pr of pulls) {
-    if (!isInScopeJumiPR(pr, owner, repo, policy.botUsername)) continue;
     if (!jobHeadMatches(pr.head.sha, pr.head.ref, job)) continue;
+    if (isAssignedForeignPR(pr, owner, repo, policy.botUsername)) {
+      jobs.push({
+        owner,
+        repo,
+        issueNumber: pr.number,
+        action: payload.action || "completed",
+        title: pr.title,
+        body: pr.body ?? "",
+        htmlUrl: pr.html_url,
+        issueUpdatedAt: pr.updated_at,
+        defaultBranch: payload.repository.default_branch,
+        cloneUrl: payload.repository.clone_url,
+        mode: "follow-up",
+        prNumber: pr.number,
+        headSha: pr.head.sha,
+        trigger: { event: "workflow_job", sender },
+      });
+      continue;
+    }
+    if (!isInScopeJumiPR(pr, owner, repo, policy.botUsername)) continue;
     const issueNumber = extractClosingIssueNumber(pr);
     if (issueNumber === undefined) continue;
     try {

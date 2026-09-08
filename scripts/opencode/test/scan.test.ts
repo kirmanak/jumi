@@ -989,4 +989,207 @@ describe("scanAssignedIssues", () => {
       await rm(home, { recursive: true, force: true });
     }
   });
+
+  function assignedForeignPr(overrides: Parameters<typeof makePR>[0] = {}) {
+    return makePR({
+      number: 50,
+      title: "chore(deps): lock file maintenance",
+      body: "",
+      user: makeUser({ login: "renovate" }),
+      assignee: makeUser({ login: "jumi" }),
+      assignees: [makeUser({ login: "jumi" })],
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+      head: {
+        label: "kirmanak:renovate/all-digest",
+        ref: "renovate/all-digest",
+        sha: "headsha",
+        repo,
+        repo_id: repo.id,
+      },
+      ...overrides,
+    });
+  }
+
+  function assignedPrIssue(overrides: Parameters<typeof makeIssue>[0] = {}) {
+    return makeIssue({
+      number: 50,
+      title: "chore(deps): lock file maintenance",
+      body: "",
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+      user: makeUser({ login: "renovate" }),
+      pull_request: { merged_at: null, html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50" },
+      repository: repo,
+      ...overrides,
+    });
+  }
+
+  test("assigned foreign PR + human comment enqueues follow-up keyed by PR number", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [assignedPrIssue()],
+          listOpenPulls: async () => [assignedForeignPr()],
+          listIssueComments: async () => [
+            makeComment({ id: 55, body: "please bump the assertion", user: makeUser({ login: "alice" }) }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+      expect(jobs[0]?.issueNumber).toBe(50);
+      expect(jobs[0]?.prNumber).toBe(50);
+      expect(jobs[0]?.headSha).toBe("headsha");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("assigned foreign PR already green is a no-op", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [assignedPrIssue()],
+          listOpenPulls: async () => [assignedForeignPr({ mergeable: true })],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("assigned foreign PR + mergeable false enqueues conflict", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [assignedPrIssue()],
+          listOpenPulls: async () => [assignedForeignPr({ mergeable: false })],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("conflict");
+      expect(jobs[0]?.issueNumber).toBe(50);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("assigned foreign PR + red non-jumi check enqueues follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [assignedPrIssue()],
+          listOpenPulls: async () => [assignedForeignPr()],
+          listCommitStatuses: async () => [
+            { id: 1, context: "jumi/opencode-review", status: "success" },
+            { id: 2, context: "build", status: "failure" },
+          ],
+          getActionJobLogs: async () => "##[error]lockstep\n",
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.mode).toBe("follow-up");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("assigned foreign PR blocks first-run of another assigned issue in the same repo", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo }), assignedPrIssue()],
+          listOpenPulls: async () => [assignedForeignPr({ mergeable: true })],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("assigned draft or WIP foreign PR is skipped", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const draft = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [assignedPrIssue()],
+          listOpenPulls: async () => [assignedForeignPr({ draft: true })],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(draft).toHaveLength(0);
+      const wip = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [assignedPrIssue({ title: "WIP: chore" })],
+          listOpenPulls: async () => [assignedForeignPr({ title: "WIP: chore" })],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(wip).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("assigned fork PR is skipped", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const forkRepo = makeRepo({ full_name: "alice/demo", html_url: "https://gitea.kirmanak.stream/alice/demo" });
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [assignedPrIssue()],
+          listOpenPulls: async () => [
+            assignedForeignPr({
+              head: {
+                label: "alice:renovate/all-digest",
+                ref: "renovate/all-digest",
+                sha: "headsha",
+                repo: forkRepo,
+                repo_id: forkRepo.id,
+              },
+            }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });

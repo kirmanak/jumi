@@ -8,7 +8,7 @@ import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo } from "./fixtures.ts";
+import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -129,6 +129,43 @@ describe("implementIssue", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "skipped", reason: "open PR already closes #12" });
+      const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
+      expect(claim).toBeUndefined();
+    });
+  });
+
+  test("skips first-run implement when an assigned foreign PR is the job for this repo", async () => {
+    await withDirs(async (home, workdir) => {
+      const repo = makeRepo();
+      const api = makeApi({
+        listOpenPulls: async () => [
+          makePR({
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "abc", repo, repo_id: repo.id },
+          }),
+        ],
+      });
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "assigned PR is the job for this repo" });
       const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
       expect(claim).toBeUndefined();
     });

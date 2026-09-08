@@ -30,5 +30,6 @@ describe("isPullRequestIssue", () => {
     expect(isPullRequestIssue(makeIssue())).toBe(false);
     expect(isPullRequestIssue(makeIssue({ pull_request: null }))).toBe(false);
     expect(isPullRequestIssue(makeIssue({ pull_request: { merged_at: null } }))).toBe(true);
+    expect(isPullRequestIssue(makeIssue({ is_pull: true }))).toBe(true);
   });
 });

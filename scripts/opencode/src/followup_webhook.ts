@@ -1,5 +1,11 @@
 import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
-import { extractClosingIssueNumber, isInScopeJumiPR, isJumiPrIdentity, isWipOrDraft } from "./gitea_issues.ts";
+import {
+  extractClosingIssueNumber,
+  isEligibleWorkerPR,
+  isInScopeJumiPR,
+  isJumiPrIdentity,
+  isWipOrDraft,
+} from "./gitea_issues.ts";
 import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, GiteaRepo, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
@@ -9,6 +15,10 @@ export type FollowUpWebhookPolicy = WebhookPolicy & { botUsername: string };
 export type FollowUpWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
   | { type: "skip"; reason: string };
+
+export type PullAssignWebhookDecision =
+  | FollowUpWebhookDecision
+  | { type: "cancel"; owner: string; repo: string; issueNumber: number };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -88,6 +98,8 @@ export function prFromCommentIssue(issue: GiteaIssue, repository: GiteaRepo): Gi
     body: issue.body ?? "",
     state: issue.state,
     user: issue.user,
+    assignee: issue.assignee,
+    assignees: issue.assignees,
     head: {
       label: "",
       ref: "",
@@ -110,6 +122,20 @@ export function prFromCommentIssue(issue: GiteaIssue, repository: GiteaRepo): Gi
   };
 }
 
+export function followUpIssueNumber(
+  pr: GiteaPR,
+  issue: GiteaIssue | undefined,
+  botUsername: string
+): number | undefined {
+  if (isJumiPrIdentity(pr, botUsername)) {
+    const closer = extractClosingIssueNumber(pr);
+    if (closer !== undefined) return closer;
+  }
+  if (issue && isAssignedToBot(issue, botUsername)) return pr.number;
+  if (isAssignedToBot(pr, botUsername)) return pr.number;
+  return undefined;
+}
+
 export function followUpSkipReason(
   pr: GiteaPR,
   issue: GiteaIssue | undefined,
@@ -119,17 +145,30 @@ export function followUpSkipReason(
 ): string | undefined {
   if (pr.state !== "open" || pr.merged) return "pull request not open";
   if (isWipOrDraft(pr)) return "draft or WIP pull request";
-  if (!isJumiPrIdentity(pr, botUsername)) return "not a jumi pull request";
   if (pr.head?.repo && pr.head.repo.full_name !== `${owner}/${repo}`) return "fork pull request";
-  const issueNumber = extractClosingIssueNumber(pr);
-  if (issueNumber === undefined) return "no closing issue";
-  if (issue) {
-    if (issue.number !== issueNumber) return "closing issue mismatch";
-    if (issue.state !== "open") return "issue not open";
-    if (!isAssignedToBot(issue, botUsername)) return "not assigned to bot";
+
+  const closer = isJumiPrIdentity(pr, botUsername) ? extractClosingIssueNumber(pr) : undefined;
+  if (closer !== undefined) {
+    if (issue) {
+      if (issue.number !== closer) return "closing issue mismatch";
+      if (issue.state !== "open") return "issue not open";
+      if (!isAssignedToBot(issue, botUsername)) return "not assigned to bot";
+    }
+    if (pr.head?.repo && !isInScopeJumiPR(pr, owner, repo, botUsername) && pr.head.ref) {
+      return "not an in-scope jumi pull request";
+    }
+    return undefined;
   }
-  if (pr.head?.repo && !isInScopeJumiPR(pr, owner, repo, botUsername) && pr.head.ref) {
-    return "not an in-scope jumi pull request";
+
+  const assignedOnIssue = Boolean(issue && isAssignedToBot(issue, botUsername) && issue.number === pr.number);
+  const assignedOnPr = isAssignedToBot(pr, botUsername);
+  if (!assignedOnIssue && !assignedOnPr) {
+    if (!isJumiPrIdentity(pr, botUsername)) return "not a jumi pull request";
+    return "no closing issue";
+  }
+  if (issue && issue.state !== "open") return "issue not open";
+  if (pr.head?.ref && !isEligibleWorkerPR(pr, owner, repo) && pr.head.repo) {
+    return "fork pull request";
   }
   return undefined;
 }
@@ -188,10 +227,17 @@ export function shouldEnqueueIssueCommentFollowUp(
     embedded && typeof embedded.head?.ref === "string" && embedded.head.ref
       ? embedded
       : prFromCommentIssue(payload.issue, payload.repository);
-  const issueNumber = extractClosingIssueNumber(pr);
-  if (issueNumber === undefined) return { type: "skip", reason: "no closing issue" };
+  const issueNumber = followUpIssueNumber(pr, closingIssue ?? payload.issue, policy.botUsername);
+  if (issueNumber === undefined) {
+    if (!isJumiPrIdentity(pr, policy.botUsername)) return { type: "skip", reason: "not a jumi pull request" };
+    return { type: "skip", reason: "no closing issue" };
+  }
 
-  const skip = followUpSkipReason(pr, closingIssue, owner, repo, policy.botUsername);
+  const skipIssue =
+    isJumiPrIdentity(pr, policy.botUsername) && extractClosingIssueNumber(pr) !== undefined
+      ? closingIssue
+      : (closingIssue ?? payload.issue);
+  const skip = followUpSkipReason(pr, skipIssue, owner, repo, policy.botUsername);
   if (skip) return { type: "skip", reason: skip };
 
   return {
@@ -208,7 +254,7 @@ export function shouldEnqueueIssueCommentFollowUp(
         commentId: payload.comment.id,
         sender: payload.sender.login,
       },
-      closingIssue
+      closingIssue ?? (issueNumber === pr.number ? payload.issue : undefined)
     ),
   };
 }
@@ -226,8 +272,11 @@ export function shouldEnqueuePullRejectedFollowUp(
   }
 
   const pr = payload.pull_request;
-  const issueNumber = extractClosingIssueNumber(pr);
-  if (issueNumber === undefined) return { type: "skip", reason: "no closing issue" };
+  const issueNumber = followUpIssueNumber(pr, closingIssue, policy.botUsername);
+  if (issueNumber === undefined) {
+    if (!isJumiPrIdentity(pr, policy.botUsername)) return { type: "skip", reason: "not a jumi pull request" };
+    return { type: "skip", reason: "no closing issue" };
+  }
 
   const skip = followUpSkipReason(pr, closingIssue, owner, repo, policy.botUsername);
   if (skip) return { type: "skip", reason: skip };
@@ -249,5 +298,39 @@ export function shouldEnqueuePullRejectedFollowUp(
       },
       closingIssue
     ),
+  };
+}
+
+export function shouldEnqueuePullAssign(
+  payload: GiteaPRPayload,
+  policy: FollowUpWebhookPolicy
+): PullAssignWebhookDecision {
+  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
+  const pr = payload.pull_request;
+
+  if (payload.action === "unassigned") {
+    if (!isAssignedToBot(pr, policy.botUsername)) {
+      return { type: "cancel", owner, repo, issueNumber: pr.number };
+    }
+    return { type: "skip", reason: "bot still assigned" };
+  }
+
+  if (payload.action !== "assigned") {
+    return { type: "skip", reason: `unsupported action ${payload.action}` };
+  }
+
+  if (!isAssignedToBot(pr, policy.botUsername)) {
+    return { type: "skip", reason: "not assigned to bot" };
+  }
+
+  const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername);
+  if (skip) return { type: "skip", reason: skip };
+
+  return {
+    type: "enqueue",
+    job: followUpJob(owner, repo, pr.number, pr, payload.repository, payload.action, {
+      event: "pull_request_assign",
+      sender: payload.sender.login,
+    }),
   };
 }

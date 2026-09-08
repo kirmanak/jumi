@@ -5,6 +5,7 @@ import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
   shouldEnqueueIssueCommentFollowUp,
+  shouldEnqueuePullAssign,
   shouldEnqueuePullRejectedFollowUp,
 } from "./followup_webhook.ts";
 import { createGiteaForge } from "./forge.ts";
@@ -16,7 +17,7 @@ import type { EnqueueResult, ReviewQueue } from "./queue.ts";
 import { createPgReviewJobStore, isQueueUnavailable, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
 import { renderTokenMetrics } from "./token_metrics.ts";
 import type { IssueJob } from "./types.ts";
-import { verifyGiteaSignature } from "./webhook.ts";
+import { parsePullRequestPayload, verifyGiteaSignature } from "./webhook.ts";
 import {
   abortIssueQueue,
   createIssueQueue,
@@ -72,12 +73,17 @@ export function isWorkflowJobWebhookEvent(event: string | null, eventType: strin
   return event === "workflow_job" || eventType === "workflow_job";
 }
 
+export function isPullAssignWebhookEvent(event: string | null, eventType: string | null): boolean {
+  return event === "pull_request" || event === "pull_request_assign" || eventType === "pull_request_assign";
+}
+
 export function isWorkerWebhookEvent(event: string | null, eventType: string | null): boolean {
   return (
     isIssuesWebhookEvent(event, eventType) ||
     isFollowUpWebhookEvent(event, eventType) ||
     isPushWebhookEvent(event, eventType) ||
-    isWorkflowJobWebhookEvent(event, eventType)
+    isWorkflowJobWebhookEvent(event, eventType) ||
+    isPullAssignWebhookEvent(event, eventType)
   );
 }
 
@@ -140,8 +146,62 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
     const event = request.headers.get("x-gitea-event");
     const eventType = request.headers.get("x-gitea-event-type");
     if (event === "ping" || eventType === "ping") return json(200, { ok: true });
-    if (event === "pull_request") {
-      return json(202, { skipped: `unsupported event ${event}` });
+    // Gitea 1.27: PR assignment is pull_request_assign; X-Gitea-Event is still pull_request.
+    // Handle only assigned/unassigned. Any other pull_request action skips 202, never 400.
+    if (isPullAssignWebhookEvent(event, eventType)) {
+      const policy = {
+        giteaUrl: config.giteaUrl,
+        allowedOrgs: config.allowedOrgs,
+        allowedRepos: config.allowedRepos,
+        botUsername: config.botUsername,
+      };
+      let action: string | undefined;
+      try {
+        const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          "action" in parsed &&
+          typeof (parsed as { action: unknown }).action === "string"
+        ) {
+          action = (parsed as { action: string }).action;
+        }
+      } catch {
+        return json(202, { skipped: `unsupported event ${event ?? eventType ?? "pull_request"}` });
+      }
+      if (action !== "assigned" && action !== "unassigned") {
+        return json(202, {
+          skipped: action
+            ? `unsupported action ${action}`
+            : `unsupported event ${event ?? eventType ?? "pull_request"}`,
+        });
+      }
+      try {
+        const decision = shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy);
+        if (decision.type === "skip") return json(202, { skipped: decision.reason });
+        if (decision.type === "cancel") {
+          const result = deps.cancel
+            ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)
+            : { key: issueJobKey(decision), cancelled: true as const };
+          logger(`cancelled ${result.key}`);
+          return json(202, result);
+        }
+        const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+        const job: IssueJob = {
+          ...decision.job,
+          delivery,
+          receivedAt: new Date().toISOString(),
+        };
+        const result: EnqueueResult = await deps.queue.enqueue(job);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        return json(202, result);
+      } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        return json(400, { error: err instanceof Error ? err.message : String(err) });
+      }
     }
     // Gitea 1.27: assignment uses X-Gitea-Event=issues and X-Gitea-Event-Type=issue_assign.
     // Accept either header so a proxy that copies Event-Type into Event still works.

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   followUpSkipReason,
   shouldEnqueueIssueCommentFollowUp,
+  shouldEnqueuePullAssign,
   shouldEnqueuePullRejectedFollowUp,
 } from "../src/followup_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
@@ -226,6 +227,83 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
     }
   });
 
+  test("enqueues a comment on an assigned foreign PR keyed by the PR number", () => {
+    const repository = makeRepo();
+    const decision = shouldEnqueueIssueCommentFollowUp(
+      makeIssueCommentPayload({
+        repository,
+        issue: makeIssue({
+          number: 50,
+          title: "chore(deps)",
+          body: "",
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+          user: makeUser({ login: "renovate" }),
+          pull_request: { merged_at: null },
+        }),
+        pull_request: makePR({
+          number: 50,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+      }),
+      policy,
+      "issue_comment"
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.mode).toBe("follow-up");
+      expect(decision.job.issueNumber).toBe(50);
+      expect(decision.job.prNumber).toBe(50);
+    }
+  });
+
+  test("skips a comment on an unassigned foreign PR", () => {
+    const repository = makeRepo();
+    const decision = shouldEnqueueIssueCommentFollowUp(
+      makeIssueCommentPayload({
+        repository,
+        issue: makeIssue({
+          number: 50,
+          title: "chore(deps)",
+          body: "",
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "alice" }),
+          assignees: [makeUser({ login: "alice" })],
+          pull_request: { merged_at: null },
+        }),
+        pull_request: makePR({
+          number: 50,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "alice" }),
+          assignees: [makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+      }),
+      policy,
+      "issue_comment"
+    );
+    expect(decision).toEqual({ type: "skip", reason: "not a jumi pull request" });
+  });
+
   test("skips when issue no longer assigned", () => {
     const payload = makeIssueCommentPayload();
     const pr = {
@@ -319,6 +397,104 @@ describe("shouldEnqueuePullRejectedFollowUp", () => {
       expect(decision.job.trigger?.body).toBe("please rename");
     }
   });
+
+  test("enqueues pull_request_rejected for an assigned foreign PR", () => {
+    const repository = makeRepo();
+    const decision = shouldEnqueuePullRejectedFollowUp(
+      makePayload({
+        action: "reviewed",
+        pull_request: makePR({
+          number: 50,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+        review: { id: 9, body: "please change this" },
+      }),
+      policy,
+      "pull_request_rejected"
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(50);
+      expect(decision.job.prNumber).toBe(50);
+    }
+  });
+});
+
+describe("shouldEnqueuePullAssign", () => {
+  test("enqueues follow-up when the bot is assigned", () => {
+    const repository = makeRepo();
+    const decision = shouldEnqueuePullAssign(
+      makePayload({
+        action: "assigned",
+        pull_request: makePR({
+          number: 50,
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+      }),
+      policy
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.mode).toBe("follow-up");
+      expect(decision.job.issueNumber).toBe(50);
+      expect(decision.job.prNumber).toBe(50);
+    }
+  });
+
+  test("cancels when the bot is unassigned", () => {
+    const repository = makeRepo();
+    const decision = shouldEnqueuePullAssign(
+      makePayload({
+        action: "unassigned",
+        pull_request: makePR({
+          number: 50,
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "alice" }),
+          assignees: [makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+      }),
+      policy
+    );
+    expect(decision).toEqual({ type: "cancel", owner: "kirmanak", repo: "demo", issueNumber: 50 });
+  });
+
+  test("skips opened and synchronize", () => {
+    expect(shouldEnqueuePullAssign(makePayload({ action: "opened" }), policy)).toEqual({
+      type: "skip",
+      reason: "unsupported action opened",
+    });
+    expect(shouldEnqueuePullAssign(makePayload({ action: "synchronize" }), policy)).toEqual({
+      type: "skip",
+      reason: "unsupported action synchronize",
+    });
+  });
 });
 
 describe("createWorkerFetchHandler follow-up events", () => {
@@ -359,12 +535,12 @@ describe("createWorkerFetchHandler follow-up events", () => {
     expect(queue.jobs[0]?.mode).toBe("follow-up");
   });
 
-  test("skips X-Gitea-Event: pull_request", async () => {
+  test("skips X-Gitea-Event: pull_request opened", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
     const response = await handler(await signedRequest(makePayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "unsupported event pull_request" });
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action opened" });
     expect(queue.jobs).toHaveLength(0);
   });
 

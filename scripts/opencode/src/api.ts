@@ -140,7 +140,11 @@ export class GiteaAPI {
   }
 
   async searchAssignedIssues(): Promise<GiteaIssue[]> {
-    return this.getAll<GiteaIssue>("/repos/issues/search?type=issues&state=open&assigned=true");
+    const [issues, pulls] = await Promise.all([
+      this.getAll<GiteaIssue>("/repos/issues/search?type=issues&state=open&assigned=true"),
+      this.getAll<GiteaIssue>("/repos/issues/search?type=pulls&state=open&assigned=true"),
+    ]);
+    return [...issues, ...pulls];
   }
 
   async getPRFiles(owner: string, repo: string, index: number): Promise<GiteaPRFile[]> {

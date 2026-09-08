@@ -19,6 +19,6 @@ export function isAssignedToBot(issue: IssueAssignees, botUsername: string): boo
   return (issue.assignees ?? []).some((assignee) => loginOf(assignee) === bot);
 }
 
-export function isPullRequestIssue(issue: { pull_request?: unknown }): boolean {
-  return issue.pull_request != null;
+export function isPullRequestIssue(issue: { pull_request?: unknown; is_pull?: boolean }): boolean {
+  return issue.pull_request != null || issue.is_pull === true;
 }

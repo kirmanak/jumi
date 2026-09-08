@@ -145,6 +145,36 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     expect(decision).toEqual({ type: "skip", reason: "not an in-scope jumi pull request" });
   });
 
+  test("enqueues follow-up for an assigned foreign PR matching head sha", async () => {
+    const foreign = makePR({
+      number: 50,
+      title: "chore(deps)",
+      body: "",
+      user: makeUser({ login: "renovate" }),
+      assignee: makeUser({ login: "jumi" }),
+      assignees: [makeUser({ login: "jumi" })],
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+      head: {
+        label: "kirmanak:renovate/all-digest",
+        ref: "renovate/all-digest",
+        sha: "headsha",
+        repo,
+        repo_id: repo.id,
+      },
+    });
+    const decision = await shouldEnqueueWorkflowJobFollowUp(
+      makeWorkflowJobPayload({
+        workflow_job: { id: 99, name: "build", head_sha: "headsha", head_branch: "renovate/all-digest" },
+      }),
+      policy,
+      makeApi({ listOpenPulls: async () => [foreign] })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs[0]?.issueNumber).toBe(50);
+    expect(decision.jobs[0]?.prNumber).toBe(50);
+  });
+
   test("skips when head does not match any open PR", async () => {
     const decision = await shouldEnqueueWorkflowJobFollowUp(
       makeWorkflowJobPayload({

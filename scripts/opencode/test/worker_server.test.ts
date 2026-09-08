@@ -7,6 +7,8 @@ import {
   encodeJson,
   makeIssue,
   makeIssuePayload,
+  makePayload,
+  makePR,
   makeUser,
   makeWorkerConfig,
   responseJson,
@@ -84,11 +86,101 @@ describe("createWorkerFetchHandler", () => {
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
   });
 
-  test("skips X-Gitea-Event: pull_request", async () => {
+  test("skips X-Gitea-Event: pull_request opened", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest(makeIssuePayload(), { event: "pull_request" }));
+    const response = await handler(await signedRequest(makePayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "unsupported event pull_request" });
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action opened" });
+  });
+
+  test("skips pull_request synchronize 202 never 400", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const response = await handler(
+      await signedRequest(makePayload({ action: "synchronize" }), { event: "pull_request" })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action synchronize" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("skips malformed non-assign pull_request 202 never 400", async () => {
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
+    const response = await handler(await signedRequest({ action: "opened" }, { event: "pull_request" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action opened" });
+  });
+
+  test("enqueues follow-up when a foreign PR is assigned to the bot", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const repository = makePayload().repository;
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "assigned",
+          pull_request: makePR({
+            number: 50,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#50", queued: true });
+    expect(queue.jobs).toHaveLength(1);
+    expect(queue.jobs[0]?.mode).toBe("follow-up");
+    expect(queue.jobs[0]?.issueNumber).toBe(50);
+    expect(queue.jobs[0]?.prNumber).toBe(50);
+  });
+
+  test("cancels when a foreign PR is unassigned from the bot", async () => {
+    const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue: makeQueue(),
+      cancel: async (owner, repo, issueNumber) => {
+        cancelled.push({ owner, repo, issueNumber });
+        return { key: `${owner}/${repo}#${issueNumber}`, cancelled: true };
+      },
+    });
+    const repository = makePayload().repository;
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "unassigned",
+          pull_request: makePR({
+            number: 50,
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#50", cancelled: true });
+    expect(cancelled).toEqual([{ owner: "kirmanak", repo: "demo", issueNumber: 50 }]);
   });
 
   test("enqueues Gitea issue_assign deliveries (Event=issues, Event-Type=issue_assign)", async () => {

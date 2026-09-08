@@ -26,7 +26,7 @@ import { isJumiInternalBody, isJumiWorkerBody } from "./followup_webhook.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
-import { findOpenJumiClosingPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
+import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
 import type { GiteaComment, GiteaPR, GiteaPullReview, GiteaPullReviewComment, IssueJob } from "./types.ts";
 import { parseCheckLine } from "./verdict.ts";
@@ -522,8 +522,8 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  const pr = await findOpenJumiClosingPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername);
-  if (!pr) {
+  const pr = await resolveWorkerPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername, opts.job.prNumber);
+  if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
   }

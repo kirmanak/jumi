@@ -15,7 +15,7 @@ import {
 import { resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
-import { findOpenJumiClosingPullRequest, isInScopeJumiPR, upsertWorkerComment } from "./gitea_issues.ts";
+import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   buildTaskMarkdown,
   HEARTBEAT_INTERVAL_MS,
@@ -165,7 +165,7 @@ export async function needsConflict(opts: {
   home: string;
   maxConflictRounds?: number;
 }): Promise<boolean> {
-  if (!isInScopeJumiPR(opts.pr, opts.owner, opts.repo, opts.botUsername)) return false;
+  if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
   const state = await readConflictState(conflictStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
   if (state.round >= (opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS)) return false;
@@ -535,8 +535,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
   }
 
-  const pr = await findOpenJumiClosingPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername);
-  if (!pr) {
+  const pr = await resolveWorkerPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername, opts.job.prNumber);
+  if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
   }

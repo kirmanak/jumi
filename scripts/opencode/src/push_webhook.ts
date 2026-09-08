@@ -1,5 +1,5 @@
 import { isAssignedToBot } from "./assignee.ts";
-import { extractClosingIssueNumber, type IssueApi, isInScopeJumiPR } from "./gitea_issues.ts";
+import { extractClosingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
 import type { GiteaPushPayload, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
@@ -69,6 +69,25 @@ export async function shouldEnqueuePushConflicts(
   const sender = pushSender(payload);
 
   for (const pr of pulls) {
+    if (isAssignedForeignPR(pr, owner, repo, policy.botUsername)) {
+      jobs.push({
+        owner,
+        repo,
+        issueNumber: pr.number,
+        action: "push",
+        title: pr.title,
+        body: pr.body ?? "",
+        htmlUrl: pr.html_url,
+        issueUpdatedAt: pr.updated_at,
+        defaultBranch: payload.repository.default_branch,
+        cloneUrl: payload.repository.clone_url,
+        mode: "conflict",
+        prNumber: pr.number,
+        headSha: pr.head.sha,
+        trigger: { event: "push", sender },
+      });
+      continue;
+    }
     if (!isInScopeJumiPR(pr, owner, repo, policy.botUsername)) continue;
     const issueNumber = extractClosingIssueNumber(pr);
     if (issueNumber === undefined) continue;

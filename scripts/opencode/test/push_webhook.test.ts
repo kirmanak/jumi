@@ -123,6 +123,35 @@ describe("shouldEnqueuePushConflicts", () => {
     expect(decision).toEqual({ type: "skip", reason: "deleted ref" });
   });
 
+  test("enqueues conflict for an assigned foreign PR", async () => {
+    const foreign = makePR({
+      number: 50,
+      title: "chore(deps)",
+      body: "",
+      user: makeUser({ login: "renovate" }),
+      assignee: makeUser({ login: "jumi" }),
+      assignees: [makeUser({ login: "jumi" })],
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+      head: {
+        label: "kirmanak:renovate/all-digest",
+        ref: "renovate/all-digest",
+        sha: "headsha",
+        repo,
+        repo_id: repo.id,
+      },
+    });
+    const decision = await shouldEnqueuePushConflicts(
+      makePushPayload(),
+      policy,
+      makeApi({ listOpenPulls: async () => [foreign] })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs[0]?.mode).toBe("conflict");
+    expect(decision.jobs[0]?.issueNumber).toBe(50);
+    expect(decision.jobs[0]?.prNumber).toBe(50);
+  });
+
   test("skips when listOpenPulls has no managed jumi PR", async () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload(),
