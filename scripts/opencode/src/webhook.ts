@@ -9,6 +9,27 @@ export interface WebhookPolicy {
 const REVIEW_ACTIONS = new Set(["opened", "reopened", "synchronized", "synchronize"]);
 const encoder = new TextEncoder();
 
+export function isReviewWebhookAction(action: string | undefined): boolean {
+  return typeof action === "string" && REVIEW_ACTIONS.has(action);
+}
+
+export function peekWebhookAction(rawBody: Uint8Array): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "action" in parsed &&
+      typeof (parsed as { action: unknown }).action === "string"
+    ) {
+      return (parsed as { action: string }).action;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

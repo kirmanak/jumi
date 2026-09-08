@@ -29,11 +29,11 @@ The trailer is kept as the last non-empty line of the sticky comment so the work
 
 The service intentionally does not checkout or execute PR-head code. It reviews Gitea's PR metadata and file patches from the trusted Gitea API.
 
-`JUMI_ROLE` (default `monolith`) keeps that in-process path so existing images stay live until GitOps flips. The same reviewer image can run `JUMI_ROLE=router` (HMAC webhook, persist `review_jobs` in Postgres, reclaim expired leases, queue metrics; no OpenCode) or `JUMI_ROLE=engine` (lease a row, run OpenCode, persist `JUMI_REVIEW.md` before workspace teardown, publish sticky/status). Both need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is required on `router` and `monolith` only. Reviewer and worker share one `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `conflict`). The reviewer engine leases `review` only. After it publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned `jumi`, persist inserts a `follow-up` row. That is the primary wake; scan is a backstop. The worker is not `JUMI_ROLE=router`.
+`JUMI_ROLE` (default `monolith`) keeps that in-process path so existing images stay live until GitOps flips. The same reviewer image can run `JUMI_ROLE=router` (org-hook mailbox: HMAC-verify, persist `review_jobs` in Postgres, reclaim expired leases, queue metrics; no OpenCode, no HOME, no auth seed) or `JUMI_ROLE=engine` (lease a row, run OpenCode, persist `JUMI_REVIEW.md` before workspace teardown, publish sticky/status). Both need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is required on `router` and `monolith` only. Reviewer and worker share one `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `conflict`). The router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). The reviewer engine leases `review` only. After it publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned `jumi`, persist inserts a `follow-up` row. That is the primary wake; scan is a backstop. The worker is not `JUMI_ROLE=router`.
 
 ## Worker Service
 
-`jumi-worker` is a sibling HTTP service in the same Bun package. Gitea sends **Issues** webhooks, follow-up review events, **workflow_job** (Actions) events, **push** events on the default branch, and (if routed here) **pull_request** assign/unassign to `POST /webhooks/gitea`. The worker verifies `X-Gitea-Signature` the same way as the reviewer, then enqueues work only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`, default `jumi`). Pull-request issues (`issue.pull_request` present / non-null) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead. Org-hook checkboxes and GitOps IngressRoutes are not configured in this repo. When `DATABASE_URL` is set, webhooks only enqueue (202) into the shared Postgres envelope and the worker leases `implement` / `follow-up` / `conflict` with `FOR UPDATE SKIP LOCKED` (distinct owner per process; never the same row twice). First-run keeps that job row after the PR opens. Either replica may receive the hook or scan; enqueue stays idempotent. When `DATABASE_URL` is unset, today's in-memory queue and HOME JSON claims still handle first-run assign (fail closed for the Postgres graph: do not 202 those jobs into RAM).
+`jumi-worker` is a sibling service in the same Bun package. The org hook hits the **reviewer router** mailbox; worker pods do not need a public webhook path. The router HMAC-verifies and writes the shared ledger. The worker only **leases** `implement` / `follow-up` / `conflict` and runs OpenCode. Worker HTTP (`POST /webhooks/gitea`) still exists for local/dev and healthz/metrics, but it is unused for correctness once GitOps points the org hook at the router. Work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`, default `jumi`). Pull-request issues (`issue.pull_request` present / non-null) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead. Org-hook checkboxes and GitOps IngressRoutes are not configured in this repo. When `DATABASE_URL` is set, webhooks only enqueue (202) into the shared Postgres envelope and the worker leases with `FOR UPDATE SKIP LOCKED` (distinct owner per process; never the same row twice). First-run keeps that job row after the PR opens. Either replica may lease or scan; enqueue stays idempotent. Unassign is the kill switch via the ledger (queued and leased worker rows become cancelled); the running worker aborts when its lease is gone. The router does not kill processes. When `DATABASE_URL` is unset, today's in-memory queue and HOME JSON claims still handle first-run assign (fail closed for the Postgres graph: do not 202 those jobs into RAM).
 
 Gitea 1.27 delivers assignment as a grouped issue event, not a GitHub-style top-level `assignee` field:
 
@@ -139,7 +139,7 @@ Optional environment variables:
 | `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per issue |
 | `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics` |
-| `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (webhook + PG enqueue/reclaim), or `engine` (lease + OpenCode). Unset is `monolith`. |
+| `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (org-hook mailbox + PG enqueue/reclaim; no OpenCode), or `engine` (lease + OpenCode). Unset is `monolith`. |
 | `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith`. GitOps must set it on the worker; process start stays fail-closed if unset (first-run assign uses the in-memory queue). When set, implement/follow-up/conflict use the shared `review_jobs` ledger |
 | `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
 | `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine or implementing worker aborts OpenCode and requeues the same job without consuming an attempt. Crash/OOM still uses reclaim. |
@@ -201,7 +201,7 @@ Create a Gitea webhook that can reach the repos you want reviewed. For one org, 
 | Trigger On | Pull request events |
 | Active | Checked |
 
-The service processes `opened`, `reopened`, and new-commit synchronization actions only; PR description edits are acknowledged and skipped.
+The router processes `opened`, `reopened`, and new-commit synchronization as reviews. Assign, unassign, comments, red CI (`workflow_job`), and default-branch `push` write worker ledger jobs (or cancel in-flight worker rows). PR description edits and other unknown events are acknowledged and skipped. Org-hook checkboxes are GitOps, not this repo.
 
 The service also exposes:
 
@@ -221,7 +221,7 @@ The service rejects requests that fail any of these checks:
 | Method/path | Only `POST /webhooks/gitea` is accepted |
 | Content type | Must include `application/json` |
 | Signature | `X-Gitea-Signature` must match the raw body HMAC-SHA256 |
-| Event | Only `X-Gitea-Event: pull_request` is processed |
+| Event | Router: org-hook events (`pull_request` review + assign/comment/CI/push worker kinds). Ping `200`. Unknown `202`-skip. Monolith: `pull_request` review actions. Engine: webhook disabled |
 | Origin | Repository URLs must match `GITEA_URL` origin |
 | Scope | Repository owner must be in `GITEA_ALLOWED_ORGS`, or that list must include `*` |
 | Repo allowlist | `GITEA_ALLOWED_REPOS` is enforced when set |

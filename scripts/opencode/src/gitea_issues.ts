@@ -193,7 +193,7 @@ export async function resolveWorkerPullRequest(
 }
 
 export async function upsertWorkerComment(
-  api: IssueApi,
+  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">,
   owner: string,
   repo: string,
   issueNumber: number,

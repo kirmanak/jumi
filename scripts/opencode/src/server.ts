@@ -4,6 +4,7 @@ import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { createGiteaForge } from "./forge.ts";
+import type { IssueApi } from "./gitea_issues.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
@@ -23,7 +24,14 @@ import {
 } from "./review_jobs.ts";
 import { renderTokenMetrics } from "./token_metrics.ts";
 import type { ReviewJob } from "./types.ts";
-import { parsePullRequestPayload, validateWebhookPayload, verifyGiteaSignature } from "./webhook.ts";
+import {
+  isReviewWebhookAction,
+  parsePullRequestPayload,
+  peekWebhookAction,
+  validateWebhookPayload,
+  verifyGiteaSignature,
+} from "./webhook.ts";
+import { cancelLedgerWorkerJobs, type HandleWorkerWebhookDeps, handleWorkerWebhookEvent } from "./worker_webhook.ts";
 import type { GitRunner } from "./workspace.ts";
 import { createReviewWorkspace, removeReviewWorkspace } from "./workspace.ts";
 
@@ -57,6 +65,7 @@ export interface FetchHandlerDeps {
   renderMetrics?: () => string | Promise<string>;
   webhookEnabled?: boolean;
   getPR?: ReviewApi["getPR"];
+  worker?: HandleWorkerWebhookDeps;
 }
 
 export interface RunReviewJobExtras {
@@ -205,41 +214,63 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
     if (!signatureOk) return json(401, { error: "invalid signature" });
 
     const event = request.headers.get("x-gitea-event");
-    if (event !== "pull_request") return json(202, { skipped: `unsupported event ${event ?? "unknown"}` });
+    const eventType = request.headers.get("x-gitea-event-type");
+    if (event === "ping" || eventType === "ping") return json(200, { ok: true });
 
-    try {
-      const payload = parsePullRequestPayload(rawBody);
-      const validation = validateWebhookPayload(payload, {
-        giteaUrl: config.giteaUrl,
-        allowedOrgs: config.allowedOrgs,
-        allowedRepos: config.allowedRepos,
-      });
-      if ("skip" in validation) return json(202, { skipped: validation.skip });
+    const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+    const reviewAction = event === "pull_request" ? peekWebhookAction(rawBody) : undefined;
+    if (event === "pull_request" && (!deps.worker || isReviewWebhookAction(reviewAction))) {
+      try {
+        const payload = parsePullRequestPayload(rawBody);
+        const validation = validateWebhookPayload(payload, {
+          giteaUrl: config.giteaUrl,
+          allowedOrgs: config.allowedOrgs,
+          allowedRepos: config.allowedRepos,
+        });
+        if ("skip" in validation) return json(202, { skipped: validation.skip });
 
-      const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
-      const job = { ...validation, delivery };
-      if (deps.getPR) {
-        try {
-          const pr = await deps.getPR(job.owner, job.repo, job.prNumber);
-          if (job.headSha !== pr.head.sha) {
-            const key = reviewJobKey(job);
-            logger(`stale head ${key} current=${pr.head.sha}`);
-            return json(202, { key, queued: false });
+        const job = { ...validation, delivery };
+        if (deps.getPR) {
+          try {
+            const pr = await deps.getPR(job.owner, job.repo, job.prNumber);
+            if (job.headSha !== pr.head.sha) {
+              const key = reviewJobKey(job);
+              logger(`stale head ${key} current=${pr.head.sha}`);
+              return json(202, { key, queued: false });
+            }
+          } catch (err) {
+            logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
           }
-        } catch (err) {
-          logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
         }
+        const result = await deps.queue.enqueue(job);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        return json(202, result);
+      } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        return json(400, { error: err instanceof Error ? err.message : String(err) });
       }
-      const result = await deps.queue.enqueue(job);
-      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
-      return json(202, result);
-    } catch (err) {
-      if (isQueueUnavailable(err)) {
-        logger(`queue unavailable: ${err.message}`);
-        return json(503, { error: "queue unavailable" });
-      }
-      return json(400, { error: err instanceof Error ? err.message : String(err) });
     }
+
+    if (deps.worker) {
+      return handleWorkerWebhookEvent(
+        rawBody,
+        event,
+        eventType,
+        delivery,
+        {
+          giteaUrl: config.giteaUrl,
+          allowedOrgs: config.allowedOrgs,
+          allowedRepos: config.allowedRepos,
+          botUsername: config.botUsername,
+        },
+        { ...deps.worker, logger: deps.worker.logger ?? logger }
+      );
+    }
+
+    return json(202, { skipped: `unsupported event ${event ?? "unknown"}` });
   };
 }
 
@@ -442,6 +473,14 @@ function engineId(): string {
   return `engine-${hostname()}-${process.pid}-${crypto.randomUUID()}`;
 }
 
+function workerMailboxApi(api: ReviewApi): Pick<IssueApi, "listOpenPulls" | "getIssue"> {
+  const extra = api as ReviewApi & Partial<Pick<IssueApi, "listOpenPulls">>;
+  return {
+    getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
+    listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
+  };
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -542,6 +581,21 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         logger,
         renderMetrics: () => renderQueueMetrics(store),
         getPR: (owner, repo, index) => api.getPR(owner, repo, index),
+        worker: {
+          queue: { enqueue: (job) => store.enqueueIssue(job) },
+          api: workerMailboxApi(api),
+          cancel: (owner, repo, issueNumber) =>
+            cancelLedgerWorkerJobs({
+              store,
+              api,
+              owner,
+              repo,
+              issueNumber,
+              botUsername: config.botUsername,
+              logger,
+            }),
+          logger,
+        },
       }),
       logger,
       deps

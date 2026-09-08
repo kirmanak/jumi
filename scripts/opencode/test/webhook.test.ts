@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { parsePullRequestPayload, validateWebhookPayload, verifyGiteaSignature } from "../src/webhook.ts";
+import {
+  isReviewWebhookAction,
+  parsePullRequestPayload,
+  peekWebhookAction,
+  validateWebhookPayload,
+  verifyGiteaSignature,
+} from "../src/webhook.ts";
 import { encodeJson, makePayload, makeRepo, makeUser, signBody } from "./fixtures.ts";
 
 describe("verifyGiteaSignature", () => {
@@ -135,5 +141,19 @@ describe("validateWebhookPayload", () => {
         { ...policy, allowedOrgs: ["*"], allowedRepos: ["kirmanak/demo"] }
       )
     ).toThrow("Repository pulpy/app is not allowed");
+  });
+});
+
+describe("peekWebhookAction / isReviewWebhookAction", () => {
+  test("reads action from a JSON body", () => {
+    expect(peekWebhookAction(encodeJson({ action: "synchronize" }))).toBe("synchronize");
+    expect(peekWebhookAction(encodeJson({}))).toBeUndefined();
+    expect(peekWebhookAction(new TextEncoder().encode("not-json"))).toBeUndefined();
+  });
+
+  test("recognizes review actions", () => {
+    expect(isReviewWebhookAction("opened")).toBe(true);
+    expect(isReviewWebhookAction("assigned")).toBe(false);
+    expect(isReviewWebhookAction(undefined)).toBe(false);
   });
 });

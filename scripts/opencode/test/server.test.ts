@@ -1,15 +1,30 @@
 import { describe, expect, test } from "bun:test";
-import { MemoryReviewJobStore, QueueUnavailableError, renderQueueMetrics } from "../src/review_jobs.ts";
+import {
+  MemoryReviewJobStore,
+  QueueUnavailableError,
+  renderQueueMetrics,
+  WORKER_JOB_KINDS,
+} from "../src/review_jobs.ts";
 import type { ReviewQueueLike } from "../src/server.ts";
 import { createFetchHandler, shouldSeedOpenCodeAuth, startReviewer } from "../src/server.ts";
-import type { ReviewJob } from "../src/types.ts";
+import type { IssueJob, ReviewJob } from "../src/types.ts";
+import { cancelLedgerWorkerJobs } from "../src/worker_webhook.ts";
 import {
   encodeJson,
   makeBranch,
+  makeComment,
   makeConfig,
+  makeIssue,
+  makeIssueCommentPayload,
+  makeIssueJob,
+  makeIssuePayload,
   makeJob,
   makePayload,
   makePR,
+  makePushPayload,
+  makeRepo,
+  makeUser,
+  makeWorkflowJobPayload,
   responseJson,
   signBody,
 } from "./fixtures.ts";
@@ -27,7 +42,7 @@ function makeQueue(): ReviewQueueLike & { jobs: ReviewJob[] } {
 
 async function signedRequest(
   body: unknown,
-  overrides: RequestInit & { event?: string; secret?: string } = {}
+  overrides: RequestInit & { event?: string; eventType?: string; secret?: string } = {}
 ): Promise<Request> {
   const raw = encodeJson(body);
   const secret = overrides.secret ?? "webhook-secret";
@@ -35,6 +50,7 @@ async function signedRequest(
   const headers = new Headers(overrides.headers);
   headers.set("content-type", "application/json");
   headers.set("x-gitea-signature", signature);
+  if (overrides.eventType) headers.set("x-gitea-event-type", overrides.eventType);
   headers.set("x-gitea-event", overrides.event ?? "pull_request");
   headers.set("x-gitea-delivery", "delivery-1");
   return new Request("https://reviewer.test/webhooks/gitea", {
@@ -93,6 +109,13 @@ describe("createFetchHandler", () => {
 
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event push" });
+  });
+
+  test("returns ok for ping events", async () => {
+    const handler = createFetchHandler(makeConfig(), { queue: makeQueue() });
+    const response = await handler(await signedRequest({ zen: "pong" }, { event: "ping" }));
+    expect(response.status).toBe(200);
+    expect(await responseJson(response)).toEqual({ ok: true });
   });
 
   test("enqueues valid pull request events", async () => {
@@ -248,5 +271,261 @@ describe("startReviewer", () => {
     });
     expect(seeded).toBe(1);
     expect(ran).toBe(0);
+  });
+});
+
+describe("createFetchHandler router mailbox", () => {
+  const repo = makeRepo();
+
+  function jumiPr() {
+    return makePR({
+      number: 127,
+      title: "Fix the thing",
+      body: "Fixes #12",
+      user: makeUser({ login: "jumi" }),
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      head: {
+        label: "kirmanak:jumi/issue-12-fix-the-thing",
+        ref: "jumi/issue-12-fix-the-thing",
+        sha: "headsha",
+        repo,
+        repo_id: repo.id,
+      },
+    });
+  }
+
+  function commentApi(comments: string[] = []) {
+    return {
+      comments,
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_owner: string, _repo: string, _index: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+      updateIssueComment: async (_owner: string, _repo: string, _id: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+      listOpenPulls: async () => [jumiPr()],
+      getIssue: async () => makeIssue(),
+    };
+  }
+
+  function mailboxHandler(
+    store = new MemoryReviewJobStore(),
+    extras: {
+      api?: ReturnType<typeof commentApi>;
+      cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
+      logs?: string[];
+    } = {}
+  ) {
+    const api = extras.api ?? commentApi();
+    const logs = extras.logs ?? [];
+    const logger = (message: string) => logs.push(message);
+    return {
+      store,
+      api,
+      logs,
+      handler: createFetchHandler(makeConfig({ role: "router" }), {
+        queue: store,
+        logger,
+        worker: {
+          queue: { enqueue: (job: IssueJob) => store.enqueueIssue(job) },
+          api,
+          cancel:
+            extras.cancel ??
+            ((owner, repo, issueNumber) =>
+              cancelLedgerWorkerJobs({
+                store,
+                api,
+                owner,
+                repo,
+                issueNumber,
+                botUsername: "jumi",
+                logger,
+              })),
+          logger,
+        },
+      }),
+    };
+  }
+
+  test("enqueues implement on issue assign", async () => {
+    const { handler, store, logs } = mailboxHandler();
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "assigned" }), { event: "issues", eventType: "issue_assign" })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows[0]?.kind).toBe("implement");
+    expect(logs.some((line) => line.includes("queued implement:kirmanak/demo#12"))).toBe(true);
+  });
+
+  test("cancels queued and leased worker rows on unassign and posts stopped", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    const { handler, api } = mailboxHandler(store);
+    const response = await handler(
+      await signedRequest(
+        makeIssuePayload({
+          action: "unassigned",
+          issue: makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
+        }),
+        { event: "issues", eventType: "issue_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", cancelled: true });
+    expect(store.rows[0]?.state).toBe("cancelled");
+    expect(store.rows[0]?.leasedBy).toBeNull();
+    expect(api.comments.at(-1)).toContain("stopped");
+  });
+
+  test("does not post stopped when no worker rows were cancelled", async () => {
+    const { handler, api } = mailboxHandler();
+    const response = await handler(
+      await signedRequest(
+        makeIssuePayload({
+          action: "unassigned",
+          issue: makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
+        }),
+        { event: "issues" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(api.comments).toEqual([]);
+  });
+
+  test("enqueues follow-up on a human PR comment", async () => {
+    const { handler, store, logs } = mailboxHandler();
+    const response = await handler(
+      await signedRequest(makeIssueCommentPayload({ pull_request: jumiPr() }), { event: "issue_comment" })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
+    expect(store.rows[0]?.kind).toBe("follow-up");
+    expect(logs.some((line) => line.includes("queued follow-up:"))).toBe(true);
+  });
+
+  test("review-comment delivery never 400s", async () => {
+    const { handler, store } = mailboxHandler();
+    const body = makePayload({
+      action: "reviewed",
+      pull_request: jumiPr(),
+      review: { id: 9, body: "please change this" },
+    });
+    expect("issue" in body).toBe(false);
+    expect("comment" in body).toBe(false);
+    const response = await handler(await signedRequest(body, { event: "pull_request_comment" }));
+    expect(response.status).toBe(202);
+    const json = await responseJson(response);
+    expect(json).not.toHaveProperty("error");
+    expect(json).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
+    expect(store.rows[0]?.kind).toBe("follow-up");
+  });
+
+  test("enqueues conflict on default-branch push", async () => {
+    const { handler, store, logs } = mailboxHandler();
+    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ queued: true, keys: ["conflict:kirmanak/demo#127:headsha"] });
+    expect(store.rows[0]?.kind).toBe("conflict");
+    expect(logs.some((line) => line.includes("queued conflict:"))).toBe(true);
+  });
+
+  test("enqueues follow-up on workflow_job", async () => {
+    const { handler, store, logs } = mailboxHandler();
+    const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "workflow_job" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ queued: true, keys: ["follow-up:kirmanak/demo#127:headsha"] });
+    expect(store.rows[0]?.kind).toBe("follow-up");
+    expect(logs.some((line) => line.includes("queued follow-up:"))).toBe(true);
+  });
+
+  test("pull_request opened still enqueues review", async () => {
+    const { handler, store } = mailboxHandler();
+    const response = await handler(await signedRequest(makePayload()));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows[0]?.kind).toBe("review");
+  });
+
+  test("pull_request assigned enqueues follow-up", async () => {
+    const { handler, store } = mailboxHandler();
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "assigned",
+          pull_request: makePR({
+            number: 50,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/50",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo,
+              repo_id: repo.id,
+            },
+          }),
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#50:headsha", queued: true });
+    expect(store.rows[0]?.kind).toBe("follow-up");
+  });
+
+  test("unknown events 202-skip", async () => {
+    const { handler } = mailboxHandler();
+    const response = await handler(await signedRequest(makePayload(), { event: "status" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
+  });
+
+  test("returns 503 when the ledger is down for worker events", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(makeConfig({ role: "router" }), {
+      queue: store,
+      worker: {
+        queue: {
+          enqueue() {
+            throw new QueueUnavailableError("down");
+          },
+        },
+      },
+    });
+    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" }), { event: "issues" }));
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "queue unavailable" });
+  });
+
+  test("unassign still 202s if the stopped comment fails", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const api = {
+      ...commentApi(),
+      createIssueComment: async () => {
+        throw new Error("gitea down");
+      },
+    };
+    const { handler } = mailboxHandler(store, { api });
+    const response = await handler(
+      await signedRequest(
+        makeIssuePayload({
+          action: "unassigned",
+          issue: makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
+        }),
+        { event: "issues" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(store.rows[0]?.state).toBe("cancelled");
   });
 });

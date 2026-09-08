@@ -1,7 +1,10 @@
 ARG BUN_VERSION=1.2.5
 ARG HELM_VERSION=3.18.6
 
-FROM oven/bun:${BUN_VERSION}-slim AS build
+# oven/bun:1.2.5-slim is bullseye; bullseye-security InRelease expires / 404s
+# (image-build 2026-09-05 libperl, 2026-09-08 Valid-Until). Fetch tools and
+# install git on bookworm; copy bun from the slim image.
+FROM debian:bookworm-slim AS tools
 
 ARG OPENCODE_VERSION=1.15.5
 ARG HELM_VERSION=3.18.6
@@ -33,6 +36,8 @@ RUN set -eu; \
     install -m 755 "${tmp_dir}/linux-${helm_arch}/helm" /usr/local/bin/helm; \
     rm -rf "${tmp_dir}"
 
+FROM oven/bun:${BUN_VERSION}-slim AS build
+
 WORKDIR /app/scripts/opencode
 COPY scripts/opencode/package.json scripts/opencode/bun.lock ./
 RUN bun install --frozen-lockfile --production
@@ -41,9 +46,6 @@ COPY scripts/opencode/src ./src
 COPY .gitea/opencode-review.json /app/.gitea/opencode-review.json
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 
-# oven/bun:1.2.5-slim is bullseye; git pulls libperl5.32 from bullseye-security,
-# which 404'd on deb.debian.org (image-build 2026-09-05). Install git on bookworm
-# and copy bun/opencode in.
 FROM debian:bookworm-slim AS runtime
 
 ARG VERSION=dev
@@ -57,8 +59,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils libstdc++6 python3 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/bun /usr/local/bin/bun
-COPY --from=build /usr/local/bin/opencode /usr/local/bin/opencode
-COPY --from=build /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=tools /usr/local/bin/opencode /usr/local/bin/opencode
+COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 RUN git --version \
   && rg --version \
   && jq --version \
