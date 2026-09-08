@@ -13,13 +13,13 @@ import type {
 export interface IssueApi {
   getRepo(owner: string, repo: string): Promise<GiteaRepo>;
   getIssue(owner: string, repo: string, index: number): Promise<GiteaIssue>;
+  getPR(owner: string, repo: string, index: number): Promise<GiteaPR>;
   listOpenPulls(owner: string, repo: string): Promise<GiteaPR[]>;
   createPullRequest(
     owner: string,
     repo: string,
     pull: { title: string; body: string; head: string; base: string }
   ): Promise<GiteaPR>;
-  searchAssignedIssues(): Promise<GiteaIssue[]>;
   findStickyIssueComment(
     owner: string,
     repo: string,

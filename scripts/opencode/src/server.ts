@@ -227,7 +227,10 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           allowedOrgs: config.allowedOrgs,
           allowedRepos: config.allowedRepos,
         });
-        if ("skip" in validation) return json(202, { skipped: validation.skip });
+        if ("skip" in validation) {
+          logger(`skipped ${validation.skip}`);
+          return json(202, { skipped: validation.skip });
+        }
 
         const job = { ...validation, delivery };
         if (deps.getPR) {
@@ -271,7 +274,9 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
       );
     }
 
-    return json(202, { skipped: `unsupported event ${event ?? "unknown"}` });
+    const skipReason = `unsupported event ${event ?? "unknown"}`;
+    logger(`skipped ${skipReason}`);
+    return json(202, { skipped: skipReason });
   };
 }
 

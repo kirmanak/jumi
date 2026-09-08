@@ -94,6 +94,11 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+function skipped(reason: string, logger: (message: string) => void): Response {
+  logger(`skipped ${reason}`);
+  return json(202, { skipped: reason });
+}
+
 function cancelKey(owner: string, repo: string, issueNumber: number): string {
   return `${owner}/${repo}#${issueNumber}`;
 }
@@ -134,13 +139,14 @@ export async function handleWorkerWebhookEvent(
   if (isPullAssignWebhookEvent(event, eventType)) {
     const action = peekWebhookAction(rawBody);
     if (action !== "assigned" && action !== "unassigned") {
-      return json(202, {
-        skipped: action ? `unsupported action ${action}` : `unsupported event ${event ?? eventType ?? "pull_request"}`,
-      });
+      return skipped(
+        action ? `unsupported action ${action}` : `unsupported event ${event ?? eventType ?? "pull_request"}`,
+        logger
+      );
     }
     try {
       const decision = shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy);
-      if (decision.type === "skip") return json(202, { skipped: decision.reason });
+      if (decision.type === "skip") return skipped(decision.reason, logger);
       if (decision.type === "cancel") {
         const result = deps.cancel
           ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)
@@ -167,20 +173,20 @@ export async function handleWorkerWebhookEvent(
   // Gitea 1.27: assignment uses X-Gitea-Event=issues and X-Gitea-Event-Type=issue_assign.
   // Accept either header so a proxy that copies Event-Type into Event still works.
   if (!isWorkerWebhookEvent(event, eventType)) {
-    return json(202, { skipped: `unsupported event ${event ?? eventType ?? "unknown"}` });
+    return skipped(`unsupported event ${event ?? eventType ?? "unknown"}`, logger);
   }
 
   if (isWorkflowJobWebhookEvent(event, eventType)) {
-    if (!deps.api) return json(202, { skipped: "not an in-scope jumi pull request" });
+    if (!deps.api) return skipped("not an in-scope jumi pull request", logger);
     let payload: ReturnType<typeof parseWorkflowJobPayload>;
     try {
       payload = parseWorkflowJobPayload(rawBody);
     } catch {
-      return json(202, { skipped: "malformed workflow_job payload" });
+      return skipped("malformed workflow_job payload", logger);
     }
     try {
       const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api);
-      if (decision.type === "skip") return json(202, { skipped: decision.reason });
+      if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const keys: string[] = [];
       for (const partial of decision.jobs) {
@@ -200,16 +206,16 @@ export async function handleWorkerWebhookEvent(
   }
 
   if (isPushWebhookEvent(event, eventType)) {
-    if (!deps.api) return json(202, { skipped: "no managed jumi PRs" });
+    if (!deps.api) return skipped("no managed jumi PRs", logger);
     let payload: ReturnType<typeof parsePushPayload>;
     try {
       payload = parsePushPayload(rawBody);
     } catch {
-      return json(202, { skipped: "malformed push payload" });
+      return skipped("malformed push payload", logger);
     }
     try {
       const decision = await shouldEnqueuePushConflicts(payload, policy, deps.api);
-      if (decision.type === "skip") return json(202, { skipped: decision.reason });
+      if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const keys: string[] = [];
       for (const partial of decision.jobs) {
@@ -234,7 +240,7 @@ export async function handleWorkerWebhookEvent(
       const decision = isPullRequestPayloadFollowUp(event, eventType)
         ? shouldEnqueuePullRejectedFollowUp(parsePullRejectedPayload(rawBody), policy, eventName)
         : shouldEnqueueIssueCommentFollowUp(parseIssueCommentPayload(rawBody), policy, eventName);
-      if (decision.type === "skip") return json(202, { skipped: decision.reason });
+      if (decision.type === "skip") return skipped(decision.reason, logger);
       const job: IssueJob = {
         ...decision.job,
         delivery,
@@ -248,7 +254,7 @@ export async function handleWorkerWebhookEvent(
     const payload = parseIssuesPayload(rawBody);
     const decision = shouldEnqueueIssue(payload, policy);
 
-    if (decision.type === "skip") return json(202, { skipped: decision.reason });
+    if (decision.type === "skip") return skipped(decision.reason, logger);
     if (decision.type === "cancel") {
       const result = deps.cancel
         ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)

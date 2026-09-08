@@ -537,13 +537,18 @@ describe("shouldEnqueuePullAssign", () => {
 describe("createWorkerFetchHandler follow-up events", () => {
   test("skips listed ignore login on issue_comment", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig({ followupIgnoreLogins: ["tapio"] }), { queue });
+    const logs: string[] = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ followupIgnoreLogins: ["tapio"] }), {
+      queue,
+      logger: (message) => logs.push(message),
+    });
     const response = await handler(
       await signedRequest(makeIssueCommentPayload({ sender: makeUser({ login: "tapio" }) }), { event: "issue_comment" })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "sender ignored" });
     expect(queue.jobs).toHaveLength(0);
+    expect(logs.some((line) => line.includes("skipped sender ignored"))).toBe(true);
   });
 
   test("enqueues issue_comment created on a jumi PR", async () => {

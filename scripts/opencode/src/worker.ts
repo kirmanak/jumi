@@ -12,9 +12,9 @@ import { implementFollowUp } from "./followup.ts";
 import { createGiteaForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
+import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
-import { scanAssignedIssues } from "./scan.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 
@@ -80,7 +80,14 @@ export function createIssueQueue(
                   maxFollowupRounds: config.maxFollowupRounds,
                   maxConflictRounds: config.maxConflictRounds,
                 })
-              : await implementIssue({ ...shared, timeoutMs: config.opencodeTimeoutMs });
+              : await implementIssue({
+                  ...shared,
+                  timeoutMs: config.opencodeTimeoutMs,
+                  followupTimeoutMs: config.followupTimeoutMs,
+                  conflictTimeoutMs: config.conflictTimeoutMs,
+                  maxFollowupRounds: config.maxFollowupRounds,
+                  maxConflictRounds: config.maxConflictRounds,
+                });
         logger(`${key} ${result.status}${result.status === "skipped" ? `: ${result.reason}` : ""}`);
       } finally {
         aborts.delete(key);
@@ -182,32 +189,6 @@ export async function handleIssueCancel(
     ...skipClaimKill,
   });
   return { key, cancelled: true };
-}
-
-export async function runAssignedIssueScan(
-  config: WorkerConfig,
-  api: IssueApi,
-  queue: WorkerQueueLike,
-  logger: (message: string) => void = log
-): Promise<void> {
-  const jobs = await scanAssignedIssues({
-    api,
-    home: config.home,
-    botUsername: config.botUsername,
-    policy: {
-      giteaUrl: config.giteaUrl,
-      allowedOrgs: config.allowedOrgs,
-      allowedRepos: config.allowedRepos,
-    },
-    logger,
-    maxFollowupRounds: config.maxFollowupRounds,
-    maxConflictRounds: config.maxConflictRounds,
-    followupIgnoreLogins: config.followupIgnoreLogins,
-  });
-  for (const job of jobs) {
-    const result = await queue.enqueue(job);
-    logger(`${result.queued ? "queued" : "deduped"} ${result.key} from scan`);
-  }
 }
 
 function workerPublishedState(status: string): "succeeded" | "skipped" | "failed" {
@@ -355,7 +336,14 @@ export async function processWorkerTick(
               maxFollowupRounds: config.maxFollowupRounds,
               maxConflictRounds: config.maxConflictRounds,
             })
-          : await runImplement({ ...shared, timeoutMs: config.opencodeTimeoutMs });
+          : await runImplement({
+              ...shared,
+              timeoutMs: config.opencodeTimeoutMs,
+              followupTimeoutMs: config.followupTimeoutMs,
+              conflictTimeoutMs: config.conflictTimeoutMs,
+              maxFollowupRounds: config.maxFollowupRounds,
+              maxConflictRounds: config.maxConflictRounds,
+            });
     stopHeartbeat();
     const current = await store.get(row.id);
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
@@ -370,6 +358,20 @@ export async function processWorkerTick(
       result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
     await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
+    const prNumber = pushedPrNumber(result);
+    if (prNumber !== undefined) {
+      try {
+        const conflictJob = await conflictJobIfUnmergeable(api, job, prNumber, logger);
+        if (conflictJob) {
+          const enqueued = await store.enqueueIssue(conflictJob);
+          logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} after-push mergeable=false`);
+        }
+      } catch (enqueueErr) {
+        logger(
+          `after-push conflict enqueue failed: ${enqueueErr instanceof Error ? enqueueErr.message : String(enqueueErr)}`
+        );
+      }
+    }
     return "processed";
   } catch (err) {
     stopHeartbeat();

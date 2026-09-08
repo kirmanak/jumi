@@ -13,7 +13,6 @@ import {
   handleIssueCancel,
   processWorkerTick,
   reclaimExpiredWorkerJobs,
-  runAssignedIssueScan,
   type WorkerQueueLike,
 } from "./worker.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -165,13 +164,6 @@ async function main() {
     }),
   });
 
-  const scan = () => {
-    void runAssignedIssueScan(config, api, queue).catch((err) => {
-      log(`scan failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  };
-  scan();
-  setInterval(scan, config.scanIntervalMs);
   if (ramQueue) bindAbort(shutdown.signal, () => abortIssueQueue(ramQueue));
 
   if (store) {

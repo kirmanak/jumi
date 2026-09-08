@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { MemoryReviewJobStore, QueueUnavailableError } from "../src/review_jobs.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
@@ -80,10 +82,25 @@ describe("createWorkerFetchHandler", () => {
   });
 
   test("skips unsupported events", async () => {
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
+    const logs: string[] = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue: makeQueue(),
+      logger: (message) => logs.push(message),
+    });
     const response = await handler(await signedRequest(makeIssuePayload(), { event: "status" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
+    expect(logs.some((line) => line.includes("skipped unsupported event status"))).toBe(true);
+  });
+
+  test("does not scan on a timer or at boot", async () => {
+    const src = await readFile(join(import.meta.dir, "../src/worker_server.ts"), "utf8");
+    expect(src).not.toContain("runAssignedIssueScan");
+    expect(src).not.toContain("scanIntervalMs");
+    expect(src).not.toContain("scanAssignedIssues");
+    const worker = await readFile(join(import.meta.dir, "../src/worker.ts"), "utf8");
+    expect(worker).not.toContain("searchAssignedIssues");
+    expect(worker).not.toContain("scanAssignedIssues");
   });
 
   test("skips X-Gitea-Event: pull_request opened", async () => {

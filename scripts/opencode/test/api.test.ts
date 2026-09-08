@@ -219,24 +219,6 @@ describe("GiteaAPI", () => {
     expect(urls[2]).toContain("/actions/jobs/9/logs");
   });
 
-  test("searchAssignedIssues fetches open assigned issues and pulls", async () => {
-    const urls: string[] = [];
-    globalThis.fetch = (async (url: RequestInfo | URL) => {
-      urls.push(String(url));
-      if (String(url).includes("type=issues")) return Response.json([{ id: 1, number: 12 }]);
-      if (String(url).includes("type=pulls")) return Response.json([{ id: 2, number: 50 }]);
-      return Response.json([]);
-    }) as unknown as typeof fetch;
-
-    const api = new GiteaAPI("https://gitea.example.test", "token-1");
-    const found = await api.searchAssignedIssues();
-    expect(found).toHaveLength(2);
-    expect(found[0]).toMatchObject({ id: 1, number: 12 });
-    expect(found[1]).toMatchObject({ id: 2, number: 50 });
-    expect(urls.some((url) => url.includes("type=issues"))).toBe(true);
-    expect(urls.some((url) => url.includes("type=pulls"))).toBe(true);
-  });
-
   test("throws useful errors for non-2xx responses", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 

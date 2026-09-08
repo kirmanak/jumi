@@ -306,7 +306,6 @@ export function makeWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerC
     conflictTimeoutMs: 3_600_000,
     maxFollowupRounds: 3,
     maxConflictRounds: 3,
-    scanIntervalMs: 300_000,
     leaseMs: 14_400_000 + 10 * 60 * 1000,
     maxJobAttempts: 2,
     ...overrides,

@@ -13,7 +13,9 @@ import {
   readClaim,
   writeClaim,
 } from "./claim.ts";
+import type { ConflictResult } from "./conflict.ts";
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
+import type { FollowUpResult } from "./followup.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import {
@@ -23,6 +25,7 @@ import {
   pullRequestClosesIssue,
   upsertWorkerComment,
 } from "./gitea_issues.ts";
+import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueJob } from "./types.ts";
 import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
 
@@ -52,6 +55,7 @@ export interface ImplementOptions {
   workdir: string;
   opencodeConfig?: string;
   timeoutMs?: number;
+  followupTimeoutMs?: number;
   conflictTimeoutMs?: number;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
@@ -147,7 +151,9 @@ async function readPullRequestDescription(worktree: string): Promise<string | nu
   }
 }
 
-export async function implementIssue(opts: ImplementOptions): Promise<ImplementResult> {
+export async function implementIssue(
+  opts: ImplementOptions
+): Promise<ImplementResult | FollowUpResult | ConflictResult> {
   const log = opts.logger ?? logDefault;
   const now = () => opts.now?.() ?? new Date();
   const pidAlive = opts.pidAlive ?? isPidAlive;
@@ -188,10 +194,12 @@ export async function implementIssue(opts: ImplementOptions): Promise<ImplementR
   };
 
   const pulls = await opts.api.listOpenPulls(owner, repo);
-  const existingPr = pulls.find((pr) => pullRequestClosesIssue(pr, issueNumber));
-  if (existingPr) {
-    // Scan already skips open Fixes/Closes PRs. Do not persist terminal: closing
-    // that PR unmerged often leaves issueUpdatedAt unchanged, which would trap acquireClaim.
+  const jumiCloser = pulls.find((pr) => isJumiCloserForIssue(pr, owner, repo, issueNumber, opts.botUsername));
+  if (jumiCloser) {
+    await forgetClaim();
+    return runCloserWork(opts, jumiCloser);
+  }
+  if (pulls.some((pr) => pullRequestClosesIssue(pr, issueNumber))) {
     await forgetClaim();
     return { status: "skipped", reason: `open PR already closes #${issueNumber}` };
   }

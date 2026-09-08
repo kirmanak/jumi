@@ -21,6 +21,11 @@ describe("loadWorkerConfig", () => {
     expect(config).not.toHaveProperty("role");
   });
 
+  test("has no scan-interval env", () => {
+    const config = loadWorkerConfig({ ...required, WORKER_SCAN_INTERVAL_MS: "60000" });
+    expect(config).not.toHaveProperty("scanIntervalMs");
+  });
+
   test("loads optional DATABASE_URL when set", () => {
     const config = loadWorkerConfig({
       ...required,

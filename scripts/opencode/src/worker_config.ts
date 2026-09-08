@@ -27,7 +27,6 @@ export interface WorkerConfig {
   conflictTimeoutMs: number;
   maxFollowupRounds: number;
   maxConflictRounds: number;
-  scanIntervalMs: number;
   databaseUrl?: string;
   leaseMs: number;
   maxJobAttempts: number;
@@ -116,7 +115,6 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     conflictTimeoutMs: intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000),
     maxFollowupRounds: intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3),
     maxConflictRounds: intEnv(resolved, "MAX_CONFLICT_ROUNDS", 3),
-    scanIntervalMs: intEnv(resolved, "WORKER_SCAN_INTERVAL_MS", 5 * 60 * 1000),
     databaseUrl: optionalEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),

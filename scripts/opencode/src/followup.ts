@@ -384,7 +384,7 @@ export function buildFeedbackMarkdown(opts: {
     const triggerBody = (opts.triggerBody ?? opts.trigger.body ?? "").trim();
     triggerLines.push(triggerBody ? triggerBody : "(no trigger body)");
   } else {
-    triggerLines.push("Event: scan");
+    triggerLines.push("Event: assigned");
     triggerLines.push("");
   }
   triggerLines.push("");

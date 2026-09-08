@@ -31,9 +31,9 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
   const defaults: IssueApi = {
     getRepo: async () => makeRepo(),
     getIssue: async () => makeIssue(),
+    getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [],
     createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
-    searchAssignedIssues: async () => [],
     findStickyIssueComment: async () => ({ id: 9 }),
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
@@ -215,6 +215,46 @@ describe("processWorkerTick", () => {
       }
     );
     expect(followUp).toEqual({ timeoutMs: 1_800_000, maxFollowupRounds: 5, conflictTimeoutMs: 900_000 });
+
+    await store.enqueueIssue(makeIssueJob());
+    let implement: {
+      timeoutMs?: number;
+      followupTimeoutMs?: number;
+      conflictTimeoutMs?: number;
+      maxFollowupRounds?: number;
+      maxConflictRounds?: number;
+    } = {};
+    await processWorkerTick(
+      store,
+      makeWorkerConfig({
+        opencodeTimeoutMs: 14_400_000,
+        followupTimeoutMs: 1_800_000,
+        conflictTimeoutMs: 900_000,
+        maxFollowupRounds: 5,
+        maxConflictRounds: 7,
+      }),
+      makeApi(),
+      "worker-1",
+      {
+        implement: async (opts) => {
+          implement = {
+            timeoutMs: opts.timeoutMs,
+            followupTimeoutMs: opts.followupTimeoutMs,
+            conflictTimeoutMs: opts.conflictTimeoutMs,
+            maxFollowupRounds: opts.maxFollowupRounds,
+            maxConflictRounds: opts.maxConflictRounds,
+          };
+          return { status: "no-changes" };
+        },
+      }
+    );
+    expect(implement).toEqual({
+      timeoutMs: 14_400_000,
+      followupTimeoutMs: 1_800_000,
+      conflictTimeoutMs: 900_000,
+      maxFollowupRounds: 5,
+      maxConflictRounds: 7,
+    });
 
     await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 127, headSha: "headsha" }));
     let conflict: { timeoutMs?: number; maxConflictRounds?: number } = {};
@@ -600,5 +640,90 @@ describe("processWorkerTick", () => {
       key: "implement:kirmanak/demo#12",
       queued: true,
     });
+  });
+
+  test("after implement push, mergeable false enqueues conflict", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi({
+        getPR: async () => makePR({ number: 3, mergeable: false, head: { ...makePR().head, sha: "newsha" } }),
+      }),
+      "worker-1",
+      {
+        implement: async () => ({
+          status: "pr",
+          prNumber: 3,
+          htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/3",
+        }),
+      }
+    );
+    const conflict = store.rows.find((row) => row.kind === "conflict");
+    expect(conflict?.state).toBe("queued");
+    expect(conflict?.prNumber).toBe(3);
+    expect(conflict?.headSha).toBe("newsha");
+    expect(conflict?.issueNumber).toBe(12);
+  });
+
+  test("after follow-up push, mergeable false enqueues conflict", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 127, headSha: "headsha" }));
+    await processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi({ getPR: async () => makePR({ number: 127, mergeable: false }) }),
+      "worker-1",
+      {
+        followUp: async () => ({
+          status: "pushed",
+          prNumber: 127,
+          htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+        }),
+      }
+    );
+    expect(store.rows.find((row) => row.kind === "conflict")?.state).toBe("queued");
+  });
+
+  test("after conflict push, mergeable false enqueues another conflict", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 127, headSha: "headsha" }));
+    await processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi({
+        getPR: async () => makePR({ number: 127, mergeable: false, head: { ...makePR().head, sha: "next" } }),
+      }),
+      "worker-1",
+      {
+        conflict: async () => ({
+          status: "pushed",
+          prNumber: 127,
+          htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+        }),
+      }
+    );
+    expect(store.rows.filter((row) => row.kind === "conflict" && row.state === "queued")).toHaveLength(1);
+    expect(store.rows.find((row) => row.kind === "conflict" && row.state === "queued")?.headSha).toBe("next");
+  });
+
+  test("after push, null mergeable does not enqueue conflict", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi({ getPR: async () => makePR({ number: 3, mergeable: null }) }),
+      "worker-1",
+      {
+        implement: async () => ({
+          status: "pr",
+          prNumber: 3,
+          htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/3",
+        }),
+      }
+    );
+    expect(store.rows.some((row) => row.kind === "conflict")).toBe(false);
   });
 });

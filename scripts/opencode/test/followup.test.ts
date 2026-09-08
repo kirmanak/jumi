@@ -53,12 +53,12 @@ function makeApi(
   const defaults: IssueApi = {
     getRepo: async () => makeRepo(),
     getIssue: async () => makeIssue(),
+    getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [jumiPr()],
     createPullRequest: async (_owner, _repo, pull) => {
       pulls.push(pull);
       return makePR({ number: 3, title: pull.title, body: pull.body });
     },
-    searchAssignedIssues: async () => [],
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, index, body) => {
       commentIndexes.push(index);

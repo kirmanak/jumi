@@ -61,7 +61,6 @@ function makeFakeForge(overrides: Partial<Forge> = {}): Forge & {
         html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/3",
       });
     },
-    searchAssignedIssues: async () => [],
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);

@@ -413,7 +413,7 @@ describe("createFetchHandler router mailbox", () => {
   });
 
   test("skips follow-up for ignored comment logins", async () => {
-    const { handler, store } = mailboxHandler(undefined, { followupIgnoreLogins: ["tapio"] });
+    const { handler, store, logs } = mailboxHandler(undefined, { followupIgnoreLogins: ["tapio"] });
     const response = await handler(
       await signedRequest(makeIssueCommentPayload({ pull_request: jumiPr(), sender: makeUser({ login: "tapio" }) }), {
         event: "issue_comment",
@@ -422,6 +422,7 @@ describe("createFetchHandler router mailbox", () => {
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "sender ignored" });
     expect(store.rows).toHaveLength(0);
+    expect(logs.some((line) => line.includes("skipped sender ignored"))).toBe(true);
   });
 
   test("review-comment delivery never 400s", async () => {
@@ -499,10 +500,11 @@ describe("createFetchHandler router mailbox", () => {
   });
 
   test("unknown events 202-skip", async () => {
-    const { handler } = mailboxHandler();
+    const { handler, logs } = mailboxHandler();
     const response = await handler(await signedRequest(makePayload(), { event: "status" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
+    expect(logs.some((line) => line.includes("skipped unsupported event status"))).toBe(true);
   });
 
   test("returns 503 when the ledger is down for worker events", async () => {

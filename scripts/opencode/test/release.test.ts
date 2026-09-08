@@ -310,7 +310,6 @@ describe("deploy/contract.md", () => {
       "CONFLICT_TIMEOUT_MS",
       "MAX_FOLLOWUP_ROUNDS",
       "MAX_CONFLICT_ROUNDS",
-      "WORKER_SCAN_INTERVAL_MS",
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",
     ]);

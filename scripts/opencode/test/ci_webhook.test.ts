@@ -206,10 +206,16 @@ describe("createWorkerFetchHandler workflow_job", () => {
   });
 
   test("status event stays skipped", async () => {
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue(), api: makeApi() });
+    const logs: string[] = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue: makeQueue(),
+      api: makeApi(),
+      logger: (message) => logs.push(message),
+    });
     const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "status" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
+    expect(logs.some((line) => line.includes("skipped unsupported event status"))).toBe(true);
   });
 
   test("does not call listOpenPulls on malformed body", async () => {
