@@ -154,6 +154,7 @@ During each review the service emits single-line structured logs prefixed with `
 - `event=opencode_start` — model, prompt size, parent RSS, cgroup, **per-review** OpenCode DB path/size
 - `event=opencode_sample` — every ~5s while OpenCode runs: **child PID RSS**, peaks, cgroup
 - `event=opencode_end` — exit code, duration, child/parent peaks, stdout/stderr byte totals
+- Successful runs also emit `[opencode stderr]` with the **last** 64 KiB of OpenCode stderr (tool traces live at the end). `opencode run` is not given `--print-logs`
 - `event=post_opencode` / `post_fetch_pr` / `post_find_sticky` / `post_sticky_result` / `post_comment_*` / `post_review_done` — **parent** RSS after OpenCode (sticky comment path)
 - `event=workspace_remove_start` / `workspace_remove_end` — parent RSS around workspace cleanup
 

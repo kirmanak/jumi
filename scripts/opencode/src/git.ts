@@ -66,19 +66,61 @@ function buildEnv(
   return env;
 }
 
-const OPENCODE_STDERR_LOG_MAX_BYTES = 2_000;
-
-function truncateNote(label: string, maxBytes: number): string {
+function truncateNote(label: string, maxBytes: number, keep: "head" | "tail" = "head"): string {
+  if (keep === "tail") return `[${label} truncated at ${maxBytes} bytes; kept last]\n\n`;
   return `\n\n[${label} truncated at ${maxBytes} bytes]`;
+}
+
+function concatChunks(chunks: Uint8Array[], capturedBytes: number): Uint8Array {
+  const captured = new Uint8Array(capturedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    captured.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return captured;
+}
+
+function retainChunk(
+  chunks: Uint8Array[],
+  state: { capturedBytes: number },
+  value: Uint8Array,
+  maxBytes: number,
+  keep: "head" | "tail"
+): void {
+  if (keep === "head") {
+    if (state.capturedBytes >= maxBytes) return;
+    const remaining = maxBytes - state.capturedBytes;
+    const chunk = value.byteLength <= remaining ? value : value.slice(0, remaining);
+    chunks.push(chunk);
+    state.capturedBytes += chunk.byteLength;
+    return;
+  }
+
+  chunks.push(value);
+  state.capturedBytes += value.byteLength;
+  while (state.capturedBytes > maxBytes && chunks.length > 0) {
+    const overflow = state.capturedBytes - maxBytes;
+    const first = chunks[0];
+    if (!first) break;
+    if (first.byteLength <= overflow) {
+      chunks.shift();
+      state.capturedBytes -= first.byteLength;
+    } else {
+      chunks[0] = first.slice(overflow);
+      state.capturedBytes -= overflow;
+    }
+  }
 }
 
 async function readStreamLimited(
   stream: ReadableStream<Uint8Array>,
   label: string,
-  maxBytes?: number
+  maxBytes?: number,
+  keep: "head" | "tail" = "head"
 ): Promise<{ text: string; totalBytes: number }> {
   const chunks: Uint8Array[] = [];
-  let capturedBytes = 0;
+  const state = { capturedBytes: 0 };
   let totalBytes = 0;
   const reader = stream.getReader();
 
@@ -90,30 +132,24 @@ async function readStreamLimited(
       totalBytes += value.byteLength;
       if (!maxBytes || maxBytes <= 0) {
         chunks.push(value);
-        capturedBytes += value.byteLength;
+        state.capturedBytes += value.byteLength;
         continue;
       }
-      if (capturedBytes >= maxBytes) continue;
-
-      const remaining = maxBytes - capturedBytes;
-      const chunk = value.byteLength <= remaining ? value : value.slice(0, remaining);
-      chunks.push(chunk);
-      capturedBytes += chunk.byteLength;
+      retainChunk(chunks, state, value, maxBytes, keep);
     }
   } finally {
     reader.releaseLock();
   }
 
-  const captured = new Uint8Array(capturedBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    captured.set(chunk, offset);
-    offset += chunk.byteLength;
+  const output = new TextDecoder().decode(concatChunks(chunks, state.capturedBytes));
+  if (maxBytes && maxBytes > 0 && totalBytes > maxBytes) {
+    const text =
+      keep === "tail"
+        ? `${truncateNote(label, maxBytes, "tail")}${output}`
+        : `${output}${truncateNote(label, maxBytes, "head")}`;
+    return { text, totalBytes };
   }
-
-  const output = new TextDecoder().decode(captured);
-  const text = maxBytes && maxBytes > 0 && totalBytes > maxBytes ? `${output}${truncateNote(label, maxBytes)}` : output;
-  return { text, totalBytes };
+  return { text: output, totalBytes };
 }
 
 function countToolishLines(stderr: string): number {
@@ -219,8 +255,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     // Consume stdout, stderr, and the exit code concurrently.
     // Reading stderr in parallel is required to prevent a deadlock when the
     // child writes more than the OS pipe buffer (~64KB) to stderr. Keep only a
-    // bounded prefix so verbose OpenCode logs cannot grow the reviewer heap
-    // without bound.
+    // bounded tail so verbose OpenCode logs cannot grow the reviewer heap
+    // without bound; tool traces live at the end, not behind the banner.
     let stdoutResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
     let stderrResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
     let exitCode: number | null = null;
@@ -228,7 +264,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     try {
       [stdoutResult, stderrResult, exitCode] = await Promise.all([
         readStreamLimited(proc.stdout, "opencode output", opts.maxOutputBytes),
-        readStreamLimited(proc.stderr, "opencode stderr", OPENCODE_STDERR_MAX_BYTES),
+        readStreamLimited(proc.stderr, "opencode stderr", OPENCODE_STDERR_MAX_BYTES, "tail"),
         proc.exited,
       ]);
     } catch (err) {
@@ -290,16 +326,11 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     }
 
     if (exitCode === 0) {
-      // Do not dump full OpenCode tool transcripts into the parent log stream —
-      // permission-denial payloads alone can be multi‑KB of repeated JSON and the
-      // post-OOM trail showed parent RSS climbing after opencode_end.
+      // Log the already-bounded stderr capture (last 64 KiB). Do not pass
+      // --print-logs: that is a different firehose. The old 2 KiB log-head cap
+      // hid tool traces behind the OpenCode banner.
       if (stderr) {
-        const logBytes = byteLength(stderr);
-        const preview =
-          logBytes <= OPENCODE_STDERR_LOG_MAX_BYTES
-            ? stderr
-            : `${stderr.slice(0, OPENCODE_STDERR_LOG_MAX_BYTES)}\n…[stderr log capped at ${OPENCODE_STDERR_LOG_MAX_BYTES} bytes; total ${logBytes}]`;
-        log(`[opencode stderr] ${preview}`);
+        log(`[opencode stderr] ${stderr}`);
       }
       return { status: "ok", exitCode: 0, stdout };
     }

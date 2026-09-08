@@ -169,6 +169,87 @@ exit 7
         const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
         expect(result.status).toBe("exit");
         expect(result.message).toContain("[opencode stderr truncated at");
+        expect(result.message).toContain("kept last");
+      }
+    );
+  });
+
+  test("keeps the tail of oversized stderr on failed runs", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+python3 - <<'PY' >&2
+import sys
+sys.stdout.write("HEADMARKER\\n")
+sys.stdout.write("x" * 100000)
+sys.stdout.write("\\nTAILMARKER\\n")
+PY
+exit 7
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.message).toContain("[opencode stderr truncated at");
+        expect(result.message).toContain("kept last");
+        expect(result.message).toContain("TAILMARKER");
+        expect(result.message).not.toContain("HEADMARKER");
+      }
+    );
+  });
+
+  test("logs the captured stderr on success instead of a 2 KiB head", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+python3 - <<'PY' >&2
+print("HEADMARKER")
+print("y" * 5000)
+print("TAILMARKER")
+PY
+`,
+      async (_binDir, workdir) => {
+        const logs: string[] = [];
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          logger: (message) => logs.push(message),
+        });
+        expect(result.status).toBe("ok");
+        const stderrLog = logs.find((line) => line.includes("[opencode stderr]"));
+        expect(stderrLog).toBeDefined();
+        expect(stderrLog).toContain("HEADMARKER");
+        expect(stderrLog).toContain("TAILMARKER");
+        expect(stderrLog!.length).toBeGreaterThan(2000);
+        expect(stderrLog).not.toContain("stderr log capped at 2000");
+      }
+    );
+  });
+
+  test("logs the last 64 KiB of stderr when the child writes more", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+python3 - <<'PY' >&2
+import sys
+sys.stdout.write("HEADMARKER\\n")
+sys.stdout.write("z" * 100000)
+sys.stdout.write("\\nTAILMARKER\\n")
+PY
+`,
+      async (_binDir, workdir) => {
+        const logs: string[] = [];
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          logger: (message) => logs.push(message),
+        });
+        expect(result.status).toBe("ok");
+        const stderrLog = logs.find((line) => line.includes("[opencode stderr]"));
+        expect(stderrLog).toBeDefined();
+        expect(stderrLog).toContain("TAILMARKER");
+        expect(stderrLog).toContain("kept last");
+        expect(stderrLog).not.toContain("HEADMARKER");
       }
     );
   });
