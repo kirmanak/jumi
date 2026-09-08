@@ -46,6 +46,7 @@ export interface ImplementOptions {
   giteaUrl: string;
   giteaToken: string;
   botUsername: string;
+  followupIgnoreLogins?: readonly string[];
   model: string;
   home: string;
   workdir: string;

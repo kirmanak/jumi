@@ -111,6 +111,43 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
     expect(decision).toEqual({ type: "skip", reason: "sender is bot" });
   });
 
+  test("skips listed FOLLOWUP_IGNORE_LOGINS senders case-insensitively", () => {
+    const ignorePolicy = { ...policy, followupIgnoreLogins: ["tapio", "renovate-bot"] };
+    expect(
+      shouldEnqueueIssueCommentFollowUp(
+        makeIssueCommentPayload({ sender: makeUser({ login: "Tapio" }) }),
+        ignorePolicy,
+        "issue_comment"
+      )
+    ).toEqual({ type: "skip", reason: "sender ignored" });
+    expect(
+      shouldEnqueueIssueCommentFollowUp(
+        makeIssueCommentPayload({ sender: makeUser({ login: "renovate-bot" }) }),
+        ignorePolicy,
+        "issue_comment"
+      )
+    ).toEqual({ type: "skip", reason: "sender ignored" });
+  });
+
+  test("unset ignore list still enqueues non-bot senders", () => {
+    const decision = shouldEnqueueIssueCommentFollowUp(
+      makeIssueCommentPayload({ sender: makeUser({ login: "tapio" }) }),
+      policy,
+      "issue_comment"
+    );
+    expect(decision.type).toBe("enqueue");
+  });
+
+  test("BOT_USERNAME in the ignore list still skips as bot", () => {
+    expect(
+      shouldEnqueueIssueCommentFollowUp(
+        makeIssueCommentPayload({ sender: makeUser({ login: "jumi" }) }),
+        { ...policy, followupIgnoreLogins: ["jumi", "tapio"] },
+        "issue_comment"
+      )
+    ).toEqual({ type: "skip", reason: "sender is bot" });
+  });
+
   test("skips sender jumi even when body is a current-head failure sticky", () => {
     const decision = shouldEnqueueIssueCommentFollowUp(
       makeIssueCommentPayload({
@@ -498,6 +535,17 @@ describe("shouldEnqueuePullAssign", () => {
 });
 
 describe("createWorkerFetchHandler follow-up events", () => {
+  test("skips listed ignore login on issue_comment", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ followupIgnoreLogins: ["tapio"] }), { queue });
+    const response = await handler(
+      await signedRequest(makeIssueCommentPayload({ sender: makeUser({ login: "tapio" }) }), { event: "issue_comment" })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "sender ignored" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
   test("enqueues issue_comment created on a jumi PR", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });

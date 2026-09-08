@@ -25,6 +25,7 @@ export interface ScanOptions {
   logger?: (message: string) => void;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
+  followupIgnoreLogins?: readonly string[];
 }
 
 function hasCloneInfo(repository: GiteaRepo | GiteaRepositoryMeta | undefined): repository is GiteaRepo {
@@ -57,6 +58,7 @@ async function jobForManagedPr(opts: {
   nowMs: number;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
+  followupIgnoreLogins?: readonly string[];
 }): Promise<IssueJob | undefined> {
   const followUp = await needsFollowUp({
     api: opts.api,
@@ -67,6 +69,7 @@ async function jobForManagedPr(opts: {
     botUsername: opts.botUsername,
     home: opts.home,
     maxFollowupRounds: opts.maxFollowupRounds,
+    followupIgnoreLogins: opts.followupIgnoreLogins,
   });
   const ci = await needsCiFollowUp({
     api: opts.api,
@@ -195,6 +198,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
         nowMs,
         maxFollowupRounds: opts.maxFollowupRounds,
         maxConflictRounds: opts.maxConflictRounds,
+        followupIgnoreLogins: opts.followupIgnoreLogins,
       });
       if (job) jobs.push(job);
       else log(`skipping ${entry.owner}/${entry.repo}#${entry.issue.number}: assigned PR needs no follow-up`);
@@ -231,6 +235,7 @@ export async function scanAssignedIssues(opts: ScanOptions): Promise<IssueJob[]>
           nowMs,
           maxFollowupRounds: opts.maxFollowupRounds,
           maxConflictRounds: opts.maxConflictRounds,
+          followupIgnoreLogins: opts.followupIgnoreLogins,
         });
         if (job) jobs.push(job);
         else log(`skipping ${skipLabel}: open PR already closes issue`);

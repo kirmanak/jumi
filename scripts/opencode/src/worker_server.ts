@@ -91,6 +91,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
         allowedOrgs: config.allowedOrgs,
         allowedRepos: config.allowedRepos,
         botUsername: config.botUsername,
+        followupIgnoreLogins: config.followupIgnoreLogins,
       },
       { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger }
     );

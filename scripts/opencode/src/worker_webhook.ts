@@ -14,7 +14,10 @@ import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import type { IssueJob } from "./types.ts";
 import { parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
-export type WorkerWebhookPolicy = WebhookPolicy & { botUsername: string };
+export type WorkerWebhookPolicy = WebhookPolicy & {
+  botUsername: string;
+  followupIgnoreLogins?: readonly string[];
+};
 
 export interface WorkerWebhookQueue {
   enqueue(job: IssueJob): EnqueueResult | Promise<EnqueueResult>;

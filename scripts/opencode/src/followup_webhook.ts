@@ -10,7 +10,10 @@ import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, Git
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
-export type FollowUpWebhookPolicy = WebhookPolicy & { botUsername: string };
+export type FollowUpWebhookPolicy = WebhookPolicy & {
+  botUsername: string;
+  followupIgnoreLogins?: readonly string[];
+};
 
 export type FollowUpWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
@@ -38,6 +41,15 @@ function requireNumber(value: unknown, name: string): number {
 
 function loginEquals(login: string | undefined, botUsername: string): boolean {
   return typeof login === "string" && login.toLowerCase() === botUsername.toLowerCase();
+}
+
+export function loginInList(login: string | undefined, logins: readonly string[] | undefined): boolean {
+  if (typeof login !== "string" || !login) return false;
+  const needle = login.toLowerCase();
+  for (const item of logins ?? []) {
+    if (item.toLowerCase() === needle) return true;
+  }
+  return false;
 }
 
 export function isPullThread(issue: GiteaIssue): boolean {
@@ -217,6 +229,9 @@ export function shouldEnqueueIssueCommentFollowUp(
   }
   if (loginEquals(payload.sender?.login, policy.botUsername)) {
     return { type: "skip", reason: "sender is bot" };
+  }
+  if (loginInList(payload.sender?.login, policy.followupIgnoreLogins)) {
+    return { type: "skip", reason: "sender ignored" };
   }
   const body = payload.comment.body ?? "";
   if (!body.trim()) return { type: "skip", reason: "empty comment body" };

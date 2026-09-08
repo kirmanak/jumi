@@ -79,6 +79,15 @@ describe("loadWorkerConfig", () => {
     expect(() => loadWorkerConfig({ ...required, FOLLOWUP_TIMEOUT_MS: "abc" })).toThrow("Invalid positive integer");
     expect(() => loadWorkerConfig({ ...required, CONFLICT_TIMEOUT_MS: "-1" })).toThrow("Invalid positive integer");
   });
+
+  test("parses FOLLOWUP_IGNORE_LOGINS CSV and treats empty as no extra skips", () => {
+    expect(loadWorkerConfig(required).followupIgnoreLogins).toEqual([]);
+    expect(loadWorkerConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: "" }).followupIgnoreLogins).toEqual([]);
+    expect(loadWorkerConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: " , " }).followupIgnoreLogins).toEqual([]);
+    expect(
+      loadWorkerConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: "tapio, renovate-bot, " }).followupIgnoreLogins
+    ).toEqual(["tapio", "renovate-bot"]);
+  });
 });
 
 describe("worker ReviewQueue", () => {

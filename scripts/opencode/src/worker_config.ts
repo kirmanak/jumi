@@ -11,6 +11,7 @@ export interface WorkerConfig {
   allowedOrgs: string[];
   allowedRepos: string[];
   botUsername: string;
+  followupIgnoreLogins: string[];
   model: string;
   opencodeConfig?: string;
   opencodeWellKnownUrl?: string;
@@ -98,6 +99,7 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     allowedOrgs: csvEnv(resolved, "GITEA_ALLOWED_ORGS", ["kirmanak"]),
     allowedRepos: csvEnv(resolved, "GITEA_ALLOWED_REPOS"),
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
+    followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
     opencodeWellKnownUrl: optionalEnv(resolved, "OPENCODE_WELLKNOWN_URL", "https://kirmanak.stream"),

@@ -317,6 +317,7 @@ describe("createFetchHandler router mailbox", () => {
       api?: ReturnType<typeof commentApi>;
       cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
       logs?: string[];
+      followupIgnoreLogins?: string[];
     } = {}
   ) {
     const api = extras.api ?? commentApi();
@@ -326,27 +327,30 @@ describe("createFetchHandler router mailbox", () => {
       store,
       api,
       logs,
-      handler: createFetchHandler(makeConfig({ role: "router" }), {
-        queue: store,
-        logger,
-        worker: {
-          queue: { enqueue: (job: IssueJob) => store.enqueueIssue(job) },
-          api,
-          cancel:
-            extras.cancel ??
-            ((owner, repo, issueNumber) =>
-              cancelLedgerWorkerJobs({
-                store,
-                api,
-                owner,
-                repo,
-                issueNumber,
-                botUsername: "jumi",
-                logger,
-              })),
+      handler: createFetchHandler(
+        makeConfig({ role: "router", followupIgnoreLogins: extras.followupIgnoreLogins ?? [] }),
+        {
+          queue: store,
           logger,
-        },
-      }),
+          worker: {
+            queue: { enqueue: (job: IssueJob) => store.enqueueIssue(job) },
+            api,
+            cancel:
+              extras.cancel ??
+              ((owner, repo, issueNumber) =>
+                cancelLedgerWorkerJobs({
+                  store,
+                  api,
+                  owner,
+                  repo,
+                  issueNumber,
+                  botUsername: "jumi",
+                  logger,
+                })),
+            logger,
+          },
+        }
+      ),
     };
   }
 
@@ -406,6 +410,18 @@ describe("createFetchHandler router mailbox", () => {
     expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
     expect(store.rows[0]?.kind).toBe("follow-up");
     expect(logs.some((line) => line.includes("queued follow-up:"))).toBe(true);
+  });
+
+  test("skips follow-up for ignored comment logins", async () => {
+    const { handler, store } = mailboxHandler(undefined, { followupIgnoreLogins: ["tapio"] });
+    const response = await handler(
+      await signedRequest(makeIssueCommentPayload({ pull_request: jumiPr(), sender: makeUser({ login: "tapio" }) }), {
+        event: "issue_comment",
+      })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "sender ignored" });
+    expect(store.rows).toHaveLength(0);
   });
 
   test("review-comment delivery never 400s", async () => {

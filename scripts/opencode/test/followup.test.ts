@@ -1747,6 +1747,57 @@ describe("collectFollowUpItems", () => {
     expect(items.reviews).toEqual([]);
   });
 
+  test("skips listed ignore logins and still skips the bot", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 1, body: "## PR Change Summary", user: makeUser({ login: "tapio" }) }),
+        makeComment({ id: 2, body: "Edited/Blocked", user: makeUser({ login: "renovate-bot" }) }),
+        makeComment({ id: 3, body: "please fix", user: makeUser({ login: "alice" }) }),
+        makeComment({ id: 4, body: "bot note", user: makeUser({ login: "jumi" }) }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha, [
+      "tapio",
+      "renovate-bot",
+    ]);
+    expect(items.comments.map((comment) => comment.id)).toEqual([3]);
+  });
+
+  test("unset ignore list keeps non-bot comments as human feedback", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 1, body: "## PR Change Summary", user: makeUser({ login: "tapio" }) }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
+    expect(items.comments.map((comment) => comment.id)).toEqual([1]);
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: jumiPr(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: jumiPr(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          followupIgnoreLogins: ["tapio"],
+        })
+      ).toBe(false);
+    });
+  });
+
   const HEAD_SHA = "a62c750c0ffee000000000000000000000000000";
   const STALE_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 

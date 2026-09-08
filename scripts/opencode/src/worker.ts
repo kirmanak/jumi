@@ -55,6 +55,7 @@ export function createIssueQueue(
           giteaUrl: config.giteaUrl,
           giteaToken: config.giteaToken,
           botUsername: config.botUsername,
+          followupIgnoreLogins: config.followupIgnoreLogins,
           model: config.model,
           home: config.home,
           workdir: config.workdir,
@@ -201,6 +202,7 @@ export async function runAssignedIssueScan(
     logger,
     maxFollowupRounds: config.maxFollowupRounds,
     maxConflictRounds: config.maxConflictRounds,
+    followupIgnoreLogins: config.followupIgnoreLogins,
   });
   for (const job of jobs) {
     const result = await queue.enqueue(job);
@@ -321,6 +323,7 @@ export async function processWorkerTick(
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
       botUsername: config.botUsername,
+      followupIgnoreLogins: config.followupIgnoreLogins,
       model: config.model,
       home: config.home,
       workdir: config.workdir,

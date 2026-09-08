@@ -75,6 +75,16 @@ describe("loadConfig", () => {
     expect(config.maxFiles).toBe(3);
   });
 
+  test("parses FOLLOWUP_IGNORE_LOGINS CSV and treats empty as no extra skips", () => {
+    expect(loadConfig(required).followupIgnoreLogins).toEqual([]);
+    expect(loadConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: "" }).followupIgnoreLogins).toEqual([]);
+    expect(loadConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: " , " }).followupIgnoreLogins).toEqual([]);
+    expect(loadConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: "tapio, renovate-bot, " }).followupIgnoreLogins).toEqual([
+      "tapio",
+      "renovate-bot",
+    ]);
+  });
+
   test("parses wildcard owner allowlist", () => {
     const config = loadConfig({
       ...required,

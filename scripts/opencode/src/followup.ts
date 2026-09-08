@@ -22,7 +22,7 @@ import {
   writeConflictState,
 } from "./conflict.ts";
 import { resolveEngine, throwIfEngineFailed } from "./engine.ts";
-import { isJumiInternalBody, isJumiWorkerBody } from "./followup_webhook.ts";
+import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -182,12 +182,14 @@ export async function deleteFollowUpState(
 
 export function isInScopeHumanComment(
   comment: { body?: string | null; user?: { login?: string } },
-  botUsername: string
+  botUsername: string,
+  ignoreLogins: readonly string[] = []
 ): boolean {
   const body = comment.body ?? "";
   if (!body.trim()) return false;
   if (isJumiInternalBody(body)) return false;
   if (loginEquals(comment.user?.login, botUsername)) return false;
+  if (loginInList(comment.user?.login, ignoreLogins)) return false;
   return true;
 }
 
@@ -234,9 +236,10 @@ export function isJumiReviewFinding(comment: { body?: string | null }, headSha: 
 export function isInScopeFollowUpComment(
   comment: { body?: string | null; user?: { login?: string } },
   botUsername: string,
-  headSha: string
+  headSha: string,
+  ignoreLogins: readonly string[] = []
 ): boolean {
-  return isJumiReviewFinding(comment, headSha) || isInScopeHumanComment(comment, botUsername);
+  return isJumiReviewFinding(comment, headSha) || isInScopeHumanComment(comment, botUsername, ignoreLogins);
 }
 
 export function isRequestChangesReview(review: GiteaPullReview): boolean {
@@ -260,7 +263,8 @@ export async function collectFollowUpItems(
   repo: string,
   prNumber: number,
   botUsername: string,
-  headSha: string
+  headSha: string,
+  ignoreLogins: readonly string[] = []
 ): Promise<{ comments: GiteaComment[]; inlines: GiteaPullReviewComment[]; reviews: GiteaPullReview[] }> {
   const [rawComments, rawReviews, rawInlines] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
@@ -275,12 +279,16 @@ export async function collectFollowUpItems(
     }),
   ]);
   return {
-    comments: rawComments.filter((comment) => isInScopeFollowUpComment(comment, botUsername, headSha)),
-    inlines: rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername)),
+    comments: rawComments.filter((comment) => isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins)),
+    inlines: rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername, ignoreLogins)),
     reviews: rawReviews.filter(
       (review) =>
         (isRequestChangesReview(review) || isCommentReview(review)) &&
-        isInScopeHumanComment({ body: review.body ?? review.content ?? "", user: review.user }, botUsername)
+        isInScopeHumanComment(
+          { body: review.body ?? review.content ?? "", user: review.user },
+          botUsername,
+          ignoreLogins
+        )
     ),
   };
 }
@@ -321,6 +329,7 @@ export async function needsFollowUp(opts: {
   botUsername: string;
   home: string;
   maxFollowupRounds?: number;
+  followupIgnoreLogins?: readonly string[];
 }): Promise<boolean> {
   const state = await readFollowUpState(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
   if (state.round >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return false;
@@ -330,7 +339,8 @@ export async function needsFollowUp(opts: {
     opts.repo,
     opts.pr.number,
     opts.botUsername,
-    opts.pr.head.sha
+    opts.pr.head.sha,
+    opts.followupIgnoreLogins
   );
   if (!hasUnhandledFollowUpItems(items, state)) return false;
   if (state.lastHeadSha && state.lastHeadSha === opts.pr.head.sha && !hasUnhandledFollowUpItems(items, state)) {
@@ -540,7 +550,15 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   }
 
   const state = await readFollowUpState(statePath);
-  const pendingItems = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
+  const pendingItems = await collectFollowUpItems(
+    opts.api,
+    owner,
+    repo,
+    pr.number,
+    opts.botUsername,
+    pr.head.sha,
+    opts.followupIgnoreLogins
+  );
   let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
   let ci: CiInspection = { sha: pr.head.sha, pending: false, failed: [], unhandled: [] };
   try {
@@ -828,7 +846,15 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     throwIfAborted(opts.abortSignal);
     await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
     if (hasFeedback) {
-      const items = await collectFollowUpItems(opts.api, owner, repo, pr.number, opts.botUsername, pr.head.sha);
+      const items = await collectFollowUpItems(
+        opts.api,
+        owner,
+        repo,
+        pr.number,
+        opts.botUsername,
+        pr.head.sha,
+        opts.followupIgnoreLogins
+      );
       const feedback = buildFeedbackMarkdown({
         pr,
         trigger: opts.job.trigger,

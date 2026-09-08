@@ -264,6 +264,42 @@ describe("scanAssignedIssues", () => {
     }
   });
 
+  test("ignored login comments do not enqueue follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
+    try {
+      const jobs = await scanAssignedIssues({
+        api: makeApi({
+          searchAssignedIssues: async () => [makeIssue({ repository: repo })],
+          listOpenPulls: async () => [
+            makePR({
+              number: 127,
+              user: makeUser({ login: "jumi" }),
+              body: "Fixes #12",
+              head: {
+                label: "kirmanak:jumi/issue-12-fix-the-thing",
+                ref: "jumi/issue-12-fix-the-thing",
+                sha: "headsha",
+                repo,
+                repo_id: repo.id,
+              },
+            }),
+          ],
+          listIssueComments: async () => [
+            makeComment({ id: 55, body: "## PR Change Summary", user: makeUser({ login: "Tapio" }) }),
+          ],
+        }),
+        home,
+        botUsername: "jumi",
+        policy,
+        followupIgnoreLogins: ["tapio"],
+        logger: () => undefined,
+      });
+      expect(jobs).toHaveLength(0);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("jumi closer + mergeable false + no comments → enqueues conflict", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-scan-"));
     try {
