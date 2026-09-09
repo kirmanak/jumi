@@ -27,7 +27,14 @@ import {
 } from "./gitea_issues.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
+import {
+  type GitRunner,
+  gitConfigArgs,
+  gitEnv,
+  runGit,
+  validateCloneUrl,
+  workerOpenCodeChildEnv,
+} from "./workspace.ts";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 const PR_BODY_MAX_CHARS = 8000;
@@ -350,11 +357,14 @@ export async function implementIssue(
         configPath: opts.opencodeConfig,
         home: opts.home,
         sanitizeEnv,
-        extraEnv: gitOpenCodeChildEnv({
-          giteaUrl: opts.giteaUrl,
-          username: opts.botUsername,
-          token: opts.giteaToken,
-        }),
+        extraEnv: workerOpenCodeChildEnv(
+          {
+            giteaUrl: opts.giteaUrl,
+            username: opts.botUsername,
+            token: opts.giteaToken,
+          },
+          worktree
+        ),
         timeoutMs: opts.timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel: `${owner}/${repo}#${issueNumber}`,

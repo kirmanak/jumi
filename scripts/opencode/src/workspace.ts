@@ -137,6 +137,20 @@ export function gitOpenCodeChildEnv(auth: GitAuth): Record<string, string> {
   };
 }
 
+export function workerOpenCodeChildEnv(auth: GitAuth, workdir: string): Record<string, string> {
+  const javaHome = process.env.JAVA_HOME || "/opt/java/openjdk";
+  const workRoot = process.env.WORKDIR || "/work";
+  const path = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  return {
+    ...gitOpenCodeChildEnv(auth),
+    JAVA_HOME: javaHome,
+    PATH: `${join(javaHome, "bin")}:${path}`,
+    JAVA_TOOL_OPTIONS: `-Djava.io.tmpdir=${join(workdir, ".jumi-tmp")}`,
+    GRADLE_USER_HOME: join(workRoot, ".gradle"),
+    GRADLE_OPTS: "-Dorg.gradle.daemon=false",
+  };
+}
+
 export function gitEnv(auth: GitAuth): Record<string, string | undefined> {
   const gitea = new URL(normalizeGiteaUrl(auth.giteaUrl));
   return {

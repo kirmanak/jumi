@@ -31,6 +31,16 @@
       "automerge": true,
       "platformAutomerge": true,
       "ignoreTests": false
+    },
+    {
+      "description": "Keep the worker JDK on Temurin 21.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "eclipse-temurin"
+      ],
+      "allowedVersions": "/^21\\./"
     }
   ],
   "minimumReleaseAge": "3 days",

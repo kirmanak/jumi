@@ -24,7 +24,14 @@ import {
   type OpenCodeRunner,
 } from "./implement.ts";
 import type { GiteaPR, IssueJob } from "./types.ts";
-import { type GitRunner, gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
+import {
+  type GitRunner,
+  gitConfigArgs,
+  gitEnv,
+  runGit,
+  validateCloneUrl,
+  workerOpenCodeChildEnv,
+} from "./workspace.ts";
 
 export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_CONFLICT_ROUNDS = 3;
@@ -718,11 +725,14 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       home: opts.home,
       opencodeConfig: opts.opencodeConfig,
       sanitizeOpenCodeEnv: sanitizeEnv,
-      extraEnv: gitOpenCodeChildEnv({
-        giteaUrl: opts.giteaUrl,
-        username: opts.botUsername,
-        token: opts.giteaToken,
-      }),
+      extraEnv: workerOpenCodeChildEnv(
+        {
+          giteaUrl: opts.giteaUrl,
+          username: opts.botUsername,
+          token: opts.giteaToken,
+        },
+        worktree
+      ),
       maxOutputBytes: opts.maxOutputBytes,
       timeoutMs,
       openCodeRunner: engine,

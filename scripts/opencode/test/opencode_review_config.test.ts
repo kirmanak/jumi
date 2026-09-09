@@ -119,3 +119,19 @@ describe("reviewer image permissions", () => {
     expect(dockerfile).not.toMatch(/kubectl/);
   });
 });
+
+describe("worker image JDK", () => {
+  const repoRoot = join(process.cwd(), "../..");
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+  const workerStage = dockerfile.slice(dockerfile.indexOf("FROM runtime AS worker"));
+  const beforeWorker = dockerfile.slice(0, dockerfile.indexOf("FROM runtime AS worker"));
+
+  test("copies pinned Temurin 21 into the worker target only", () => {
+    expect(dockerfile).toContain("ARG TEMURIN_TAG=21.0.12_8-jdk");
+    expect(dockerfile).toMatch(/FROM eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
+    expect(workerStage).toContain("COPY --from=jdk /opt/java/openjdk /opt/java/openjdk");
+    expect(workerStage).toContain("JAVA_HOME=/opt/java/openjdk");
+    expect(beforeWorker).not.toContain("COPY --from=jdk");
+    expect(beforeWorker).not.toContain("JAVA_HOME=");
+  });
+});

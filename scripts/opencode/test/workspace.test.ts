@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkoutPullRequestWorkspace, createReviewWorkspace, type GitRunner } from "../src/workspace.ts";
+import {
+  checkoutPullRequestWorkspace,
+  createReviewWorkspace,
+  type GitRunner,
+  workerOpenCodeChildEnv,
+} from "../src/workspace.ts";
 import { makeBranch, makeJob, makePR, makeRepo } from "./fixtures.ts";
 
 function makeCheckoutFixture() {
@@ -141,5 +146,53 @@ describe("review workspace", () => {
     expect(calls.map(stripGitConfigArgs)).toContainEqual(["checkout", "--force", "-B", "jumi/pr-48", "a".repeat(40)]);
     expect(stripGitConfigArgs(calls.at(-2) ?? [])).toEqual(["rev-parse", "HEAD"]);
     expect(stripGitConfigArgs(calls.at(-1) ?? [])).toEqual(["rev-parse", "jumi/target"]);
+  });
+});
+
+describe("workerOpenCodeChildEnv", () => {
+  const auth = {
+    giteaUrl: "https://gitea.kirmanak.stream",
+    username: "jumi",
+    token: "bot-token",
+  };
+
+  test("passes git auth plus JDK/Gradle env under /work, not HOME", () => {
+    const originalJavaHome = process.env.JAVA_HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    delete process.env.JAVA_HOME;
+    delete process.env.WORKDIR;
+    try {
+      const env = workerOpenCodeChildEnv(auth, "/work/kirmanak/demo/12");
+      expect(env.GIT_AUTH_TOKEN).toBe("bot-token");
+      expect(env.JAVA_HOME).toBe("/opt/java/openjdk");
+      expect(env.PATH.startsWith("/opt/java/openjdk/bin:")).toBe(true);
+      expect(env.JAVA_TOOL_OPTIONS).toBe("-Djava.io.tmpdir=/work/kirmanak/demo/12/.jumi-tmp");
+      expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
+      expect(env.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
+      expect(env.HOME).toBeUndefined();
+    } finally {
+      if (originalJavaHome === undefined) delete process.env.JAVA_HOME;
+      else process.env.JAVA_HOME = originalJavaHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+    }
+  });
+
+  test("forwards image JAVA_HOME and WORKDIR", () => {
+    const originalJavaHome = process.env.JAVA_HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    process.env.JAVA_HOME = "/opt/custom-jdk";
+    process.env.WORKDIR = "/work";
+    try {
+      const env = workerOpenCodeChildEnv(auth, "/work/owner/repo/1");
+      expect(env.JAVA_HOME).toBe("/opt/custom-jdk");
+      expect(env.PATH.startsWith("/opt/custom-jdk/bin:")).toBe(true);
+      expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
+    } finally {
+      if (originalJavaHome === undefined) delete process.env.JAVA_HOME;
+      else process.env.JAVA_HOME = originalJavaHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+    }
   });
 });

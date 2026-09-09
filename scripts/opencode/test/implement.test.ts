@@ -340,6 +340,13 @@ describe("implementIssue", () => {
       expect(openCodeOpts?.extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
       expect(openCodeOpts?.extraEnv?.GITEA_BOT_TOKEN).toBeUndefined();
       expect(openCodeOpts?.extraEnv?.GIT_AUTHOR_NAME).toBe("jumi");
+      expect(openCodeOpts?.extraEnv?.JAVA_HOME).toBe(process.env.JAVA_HOME || "/opt/java/openjdk");
+      expect(openCodeOpts?.extraEnv?.GRADLE_USER_HOME).toBe(join(process.env.WORKDIR || "/work", ".gradle"));
+      expect(openCodeOpts?.extraEnv?.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
+      expect(openCodeOpts?.extraEnv?.JAVA_TOOL_OPTIONS).toBe(
+        `-Djava.io.tmpdir=${join(workdir, "kirmanak/demo/12/.jumi-tmp")}`
+      );
+      expect(openCodeOpts?.extraEnv?.PATH?.startsWith(`${openCodeOpts?.extraEnv?.JAVA_HOME}/bin:`)).toBe(true);
       expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "rev-list" && args.includes("origin/main..HEAD"))).toBe(true);

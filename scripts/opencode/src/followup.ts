@@ -30,7 +30,7 @@ import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } fro
 import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
 import type { GiteaComment, GiteaPR, GiteaPullReview, GiteaPullReviewComment, IssueJob } from "./types.ts";
 import { parseCheckLine } from "./verdict.ts";
-import { gitConfigArgs, gitEnv, gitOpenCodeChildEnv, runGit, validateCloneUrl } from "./workspace.ts";
+import { gitConfigArgs, gitEnv, runGit, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_FOLLOWUP_ROUNDS = 3;
@@ -795,11 +795,14 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       home: opts.home,
       opencodeConfig: opts.opencodeConfig,
       sanitizeOpenCodeEnv: sanitizeEnv,
-      extraEnv: gitOpenCodeChildEnv({
-        giteaUrl: opts.giteaUrl,
-        username: opts.botUsername,
-        token: opts.giteaToken,
-      }),
+      extraEnv: workerOpenCodeChildEnv(
+        {
+          giteaUrl: opts.giteaUrl,
+          username: opts.botUsername,
+          token: opts.giteaToken,
+        },
+        worktree
+      ),
       maxOutputBytes: opts.maxOutputBytes,
       timeoutMs: conflictTimeoutMs,
       openCodeRunner: engine,
@@ -900,11 +903,14 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         configPath: opts.opencodeConfig,
         home: opts.home,
         sanitizeEnv,
-        extraEnv: gitOpenCodeChildEnv({
-          giteaUrl: opts.giteaUrl,
-          username: opts.botUsername,
-          token: opts.giteaToken,
-        }),
+        extraEnv: workerOpenCodeChildEnv(
+          {
+            giteaUrl: opts.giteaUrl,
+            username: opts.botUsername,
+            token: opts.giteaToken,
+          },
+          worktree
+        ),
         timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel: `${owner}/${repo}#${issueNumber}`,

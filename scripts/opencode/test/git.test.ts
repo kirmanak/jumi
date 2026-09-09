@@ -69,6 +69,36 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
     );
   });
 
+  test("forwards extraEnv toolchain vars into the sanitized child", async () => {
+    process.env.GITEA_BOT_TOKEN = "secret-token";
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'JAVA_HOME=%s TMPOPT=%s GRADLE_HOME=%s DAEMON=%s SECRET=%s\\n' "$JAVA_HOME" "$JAVA_TOOL_OPTIONS" "$GRADLE_USER_HOME" "$GRADLE_OPTS" "$GITEA_BOT_TOKEN"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: {
+            JAVA_HOME: "/opt/java/openjdk",
+            JAVA_TOOL_OPTIONS: `-Djava.io.tmpdir=${workdir}/.jumi-tmp`,
+            GRADLE_USER_HOME: "/work/.gradle",
+            GRADLE_OPTS: "-Dorg.gradle.daemon=false",
+            GITEA_BOT_TOKEN: "should-not-pass",
+          },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("JAVA_HOME=/opt/java/openjdk");
+        expect(result.stdout).toContain(`TMPOPT=-Djava.io.tmpdir=${workdir}/.jumi-tmp`);
+        expect(result.stdout).toContain("GRADLE_HOME=/work/.gradle");
+        expect(result.stdout).toContain("DAEMON=-Dorg.gradle.daemon=false");
+        expect(result.stdout).toContain("SECRET=");
+      }
+    );
+  });
+
   test("truncates output", async () => {
     await withFakeOpenCode(
       `#!/bin/sh

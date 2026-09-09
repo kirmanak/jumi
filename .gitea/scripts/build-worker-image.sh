@@ -13,6 +13,7 @@ fi
 : "${BUN_VERSION:?BUN_VERSION is required}"
 : "${OPENCODE_VERSION:?OPENCODE_VERSION is required}"
 : "${HELM_VERSION:?HELM_VERSION is required}"
+: "${TEMURIN_TAG:?TEMURIN_TAG is required}"
 
 primary_tag="$1"
 shift
@@ -45,11 +46,12 @@ buildah bud \
   "${tag_args[@]}" \
   --build-arg "BUN_VERSION=${BUN_VERSION}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
-  --build-arg "HELM_VERSION=${HELM_VERSION}" \
-  --build-arg "VERSION=${VERSION}" \
-  --build-arg "REVISION=${REVISION}" \
-  -f Dockerfile \
-  .
+      --build-arg "HELM_VERSION=${HELM_VERSION}" \
+      --build-arg "TEMURIN_TAG=${TEMURIN_TAG}" \
+      --build-arg "VERSION=${VERSION}" \
+      --build-arg "REVISION=${REVISION}" \
+      -f Dockerfile \
+      .
 
 verify_rootless_user() {
   local actual_user
@@ -72,6 +74,43 @@ verify_rootless_user() {
 }
 
 verify_rootless_user
+
+verify_worker_jdk() {
+  local ctr java_home java_version
+  ctr="$(buildah from "${primary_tag}")"
+  if ! java_home="$(buildah run "${ctr}" -- printenv JAVA_HOME)"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "JAVA_HOME missing in worker image" >&2
+    exit 1
+  fi
+  if [ "${java_home}" != "/opt/java/openjdk" ]; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "Expected JAVA_HOME=/opt/java/openjdk, got ${java_home:-<empty>}" >&2
+    exit 1
+  fi
+  if ! java_version="$(buildah run "${ctr}" -- java -version 2>&1)"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "java missing in worker image" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${java_version}" | grep -E 'version "21(\.|$)' >/dev/null; then
+    printf '%s\n' "${java_version}" >&2
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker image java is not JDK 21" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${java_version}" | grep -F Temurin >/dev/null; then
+    printf '%s\n' "${java_version}" >&2
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker image java is not Temurin" >&2
+    exit 1
+  fi
+  echo "Verified worker JDK: ${java_home}"
+  printf '%s\n' "${java_version}"
+  buildah rm "${ctr}" >/dev/null
+}
+
+verify_worker_jdk
 
 if [ "${PUSH_IMAGE:-false}" = "true" ]; then
   : "${REGISTRY:?REGISTRY is required when PUSH_IMAGE=true}"

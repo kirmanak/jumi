@@ -76,6 +76,11 @@ verify_rootless_user
 verify_reviewer_runtime() {
   local ctr config_json
   ctr="$(buildah from "${primary_tag}")"
+  if buildah run "${ctr}" -- sh -c 'command -v java >/dev/null 2>&1'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "reviewer image must not ship a JVM" >&2
+    exit 1
+  fi
   if ! buildah run "${ctr}" -- python3 --version; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "python3 missing in reviewer image" >&2

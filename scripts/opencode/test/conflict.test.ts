@@ -559,6 +559,10 @@ describe("implementConflict", () => {
       });
       expect(extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
       expect(extraEnv?.GITEA_BOT_TOKEN).toBeUndefined();
+      expect(extraEnv?.JAVA_HOME).toBe(process.env.JAVA_HOME || "/opt/java/openjdk");
+      expect(extraEnv?.GRADLE_USER_HOME).toBe(join(process.env.WORKDIR || "/work", ".gradle"));
+      expect(extraEnv?.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
+      expect(extraEnv?.JAVA_TOOL_OPTIONS).toBe(`-Djava.io.tmpdir=${join(workdir, "kirmanak/demo/12/.jumi-tmp")}`);
     });
   });
 

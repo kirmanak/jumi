@@ -1,5 +1,6 @@
 ARG BUN_VERSION=1.2.5
 ARG HELM_VERSION=3.18.6
+ARG TEMURIN_TAG=21.0.12_8-jdk
 
 # oven/bun:1.2.5-slim is bullseye; bullseye-security InRelease expires / 404s
 # (image-build 2026-09-05 libperl, 2026-09-08 Valid-Until). Fetch tools and
@@ -95,8 +96,16 @@ EXPOSE 3000
 ENTRYPOINT ["/app/scripts/opencode/entrypoint.sh"]
 CMD ["bun", "run", "src/server.ts"]
 
+ARG TEMURIN_TAG
+FROM eclipse-temurin:${TEMURIN_TAG} AS jdk
+
 FROM runtime AS worker
+USER root
+COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
-ENV OPENCODE_CONFIG=/app/.gitea/opencode-implement.json \
+USER 10001:10001
+ENV JAVA_HOME=/opt/java/openjdk \
+    OPENCODE_CONFIG=/app/.gitea/opencode-implement.json \
     AGENT_INSTANCE=jumi-worker
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 CMD ["bun", "run", "src/worker_server.ts"]
