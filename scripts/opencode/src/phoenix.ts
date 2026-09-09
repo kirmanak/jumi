@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import type { TraceContext } from "./engine.ts";
 import {
   encodeTracesRequest,
+  type OtlpResource,
   type OtlpSpan,
   type OtlpValue,
   SPAN_KIND_INTERNAL,
@@ -10,11 +11,30 @@ import {
   STATUS_CODE_OK,
 } from "./otlp.ts";
 
-export const PHOENIX_OTLP_TIMEOUT_MS = 5_000;
+export const PHOENIX_OTLP_TIMEOUT_MS = 15_000;
+export const PHOENIX_OTLP_MAX_BYTES = 4 * 1024 * 1024;
+export const PHOENIX_ATTR_CEILING_CHARS = 64 * 1024;
 export const PUBLIC_PHOENIX_HOST = "phoenix.kirmanak.stream";
-const HEAD_CHARS = 256;
-const MAX_TOOL_SPANS = 256;
 const KIND_ATTR = "openinference.span.kind";
+const PROTECTED_ATTRS = new Set([
+  KIND_ATTR,
+  "openinference.project.name",
+  "kind",
+  "owner",
+  "repo",
+  "sha",
+  "job_id",
+  "agent_instance",
+  "tool.name",
+  "tool.status",
+  "llm.model_name",
+  "llm.provider",
+  "llm.token_count.prompt",
+  "llm.token_count.completion",
+  "service.name",
+  "input.mime_type",
+  "output.mime_type",
+]);
 
 export type { TraceContext, TraceKind } from "./engine.ts";
 
@@ -23,11 +43,15 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 let errors = 0;
 let fetchImpl: FetchLike = globalThis.fetch;
 let timeoutMs = PHOENIX_OTLP_TIMEOUT_MS;
+let maxOtlpBytes = PHOENIX_OTLP_MAX_BYTES;
+let attrCeilingChars = PHOENIX_ATTR_CEILING_CHARS;
 
 export function resetTraceExportForTests(): void {
   errors = 0;
   fetchImpl = globalThis.fetch;
   timeoutMs = PHOENIX_OTLP_TIMEOUT_MS;
+  maxOtlpBytes = PHOENIX_OTLP_MAX_BYTES;
+  attrCeilingChars = PHOENIX_ATTR_CEILING_CHARS;
 }
 
 export function setTraceFetchForTests(fn: FetchLike | undefined): void {
@@ -36,6 +60,11 @@ export function setTraceFetchForTests(fn: FetchLike | undefined): void {
 
 export function setTraceTimeoutForTests(ms: number): void {
   timeoutMs = ms;
+}
+
+export function setTraceLimitsForTests(opts?: { maxBytes?: number; attrCeiling?: number }): void {
+  maxOtlpBytes = opts?.maxBytes ?? PHOENIX_OTLP_MAX_BYTES;
+  attrCeilingChars = opts?.attrCeiling ?? PHOENIX_ATTR_CEILING_CHARS;
 }
 
 export function traceExportErrors(): number {
@@ -54,13 +83,6 @@ function noteError(): void {
   errors += 1;
 }
 
-function head(value: unknown): string | undefined {
-  if (value == null) return undefined;
-  const text = String(value);
-  if (!text) return undefined;
-  return text.length <= HEAD_CHARS ? text : text.slice(0, HEAD_CHARS);
-}
-
 function asNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "bigint") return Number(value);
@@ -69,6 +91,57 @@ function asNumber(value: unknown): number | undefined {
     if (Number.isFinite(parsed)) return parsed;
   }
   return undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "string") return value || undefined;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  return undefined;
+}
+
+function parseObject(raw: unknown): Record<string, unknown> | undefined {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  try {
+    return asRecord(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+function field(obj: Record<string, unknown> | undefined, ...path: string[]): unknown {
+  let current: unknown = obj;
+  for (const key of path) {
+    const rec = asRecord(current);
+    if (!rec) return undefined;
+    current = rec[key];
+  }
+  return current;
+}
+
+function jsonAttr(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "string") return value || undefined;
+  try {
+    const text = JSON.stringify(value);
+    if (!text || text === "{}" || text === "[]") return undefined;
+    return text;
+  } catch {
+    return undefined;
+  }
+}
+
+function payloadString(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "string") return value || undefined;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return jsonAttr(value);
 }
 
 function msToNano(ms: number): bigint {
@@ -128,126 +201,258 @@ interface SessionRow {
   time_updated: number | null;
 }
 
-interface MessageRow {
+interface RawMessageRow {
   id: string;
   session_id: string;
   time_created: number | null;
   time_updated: number | null;
-  role: string | null;
-  model_id: string | null;
-  provider_id: string | null;
-  model_id_nested: string | null;
-  provider_nested: string | null;
-  tokens_input: number | null;
-  tokens_output: number | null;
-  msg_created: number | null;
-  msg_completed: number | null;
-  error: string | null;
+  data: unknown;
 }
 
-interface PartRow {
+interface RawPartRow {
   id: string;
   message_id: string;
   time_created: number | null;
   time_updated: number | null;
-  type: string | null;
-  tool: string | null;
-  status: string | null;
-  start_ms: number | null;
-  end_ms: number | null;
-  error: string | null;
-  command: string | null;
-  path: string | null;
-  file_path: string | null;
-  pattern: string | null;
-  name: string | null;
-  glob: string | null;
+  data: unknown;
 }
 
-function readTrace(db: Database): { sessions: SessionRow[]; messages: MessageRow[]; parts: PartRow[] } | undefined {
+interface ParsedPart {
+  id: string;
+  messageId: string;
+  timeCreated: number | null;
+  timeUpdated: number | null;
+  type: string | undefined;
+  tool: string | undefined;
+  status: string | undefined;
+  startMs: number | undefined;
+  endMs: number | undefined;
+  input: unknown;
+  output: string | undefined;
+  error: string | undefined;
+  text: string | undefined;
+  file: Record<string, unknown> | undefined;
+}
+
+interface ParsedMessage {
+  id: string;
+  timeCreated: number | null;
+  timeUpdated: number | null;
+  role: string;
+  model: string | undefined;
+  provider: string | undefined;
+  tokensInput: number | undefined;
+  tokensOutput: number | undefined;
+  msgCreated: number | undefined;
+  msgCompleted: number | undefined;
+  error: string | undefined;
+  system: string | undefined;
+  parts: ParsedPart[];
+}
+
+function readTrace(
+  db: Database
+): { sessions: SessionRow[]; messages: RawMessageRow[]; parts: RawPartRow[] } | undefined {
   const tables = tableNames(db);
   if (!tables.has("session") || !tables.has("message") || !tables.has("part")) return undefined;
   const sessions = db
     .query("SELECT id, time_created, time_updated FROM session ORDER BY time_created, id")
     .all() as SessionRow[];
   const messages = db
-    .query(
-      `SELECT
-        id,
-        session_id,
-        time_created,
-        time_updated,
-        json_extract(data, '$.role') AS role,
-        json_extract(data, '$.modelID') AS model_id,
-        json_extract(data, '$.providerID') AS provider_id,
-        json_extract(data, '$.model.id') AS model_id_nested,
-        json_extract(data, '$.model.providerID') AS provider_nested,
-        json_extract(data, '$.tokens.input') AS tokens_input,
-        json_extract(data, '$.tokens.output') AS tokens_output,
-        json_extract(data, '$.time.created') AS msg_created,
-        json_extract(data, '$.time.completed') AS msg_completed,
-        substr(CAST(json_extract(data, '$.error.message') AS TEXT), 1, ${HEAD_CHARS}) AS error
-      FROM message
-      ORDER BY time_created, id`
-    )
-    .all() as MessageRow[];
+    .query("SELECT id, session_id, time_created, time_updated, data FROM message ORDER BY time_created, id")
+    .all() as RawMessageRow[];
   const parts = db
-    .query(
-      `SELECT
-        id,
-        message_id,
-        time_created,
-        time_updated,
-        json_extract(data, '$.type') AS type,
-        json_extract(data, '$.tool') AS tool,
-        json_extract(data, '$.state.status') AS status,
-        json_extract(data, '$.state.time.start') AS start_ms,
-        json_extract(data, '$.state.time.end') AS end_ms,
-        substr(CAST(json_extract(data, '$.state.error') AS TEXT), 1, ${HEAD_CHARS}) AS error,
-        substr(CAST(json_extract(data, '$.state.input.command') AS TEXT), 1, ${HEAD_CHARS}) AS command,
-        substr(CAST(json_extract(data, '$.state.input.path') AS TEXT), 1, ${HEAD_CHARS}) AS path,
-        substr(CAST(json_extract(data, '$.state.input.filePath') AS TEXT), 1, ${HEAD_CHARS}) AS file_path,
-        substr(CAST(json_extract(data, '$.state.input.pattern') AS TEXT), 1, ${HEAD_CHARS}) AS pattern,
-        substr(CAST(json_extract(data, '$.state.input.name') AS TEXT), 1, ${HEAD_CHARS}) AS name,
-        substr(CAST(json_extract(data, '$.state.input.glob') AS TEXT), 1, ${HEAD_CHARS}) AS glob
-      FROM part
-      WHERE json_extract(data, '$.type') = 'tool'
-      ORDER BY time_created, id
-      LIMIT ${MAX_TOOL_SPANS}`
-    )
-    .all() as PartRow[];
+    .query("SELECT id, message_id, time_created, time_updated, data FROM part ORDER BY time_created, id")
+    .all() as RawPartRow[];
   return { sessions, messages, parts };
 }
 
-function toolName(row: PartRow): string {
-  const tool = head(row.tool) ?? "tool";
+function parsePart(row: RawPartRow): ParsedPart {
+  const data = parseObject(row.data);
+  const state = asRecord(field(data, "state"));
+  const time = asRecord(field(state, "time"));
+  const file =
+    data && data.type === "file"
+      ? {
+          type: "file",
+          mime: data.mime,
+          filename: data.filename,
+          url: data.url,
+          path: field(data, "source", "path"),
+        }
+      : undefined;
+  return {
+    id: row.id,
+    messageId: row.message_id,
+    timeCreated: row.time_created,
+    timeUpdated: row.time_updated,
+    type: asString(data?.type),
+    tool: asString(data?.tool),
+    status: asString(state?.status),
+    startMs: asNumber(time?.start),
+    endMs: asNumber(time?.end),
+    input: state?.input,
+    output: payloadString(state?.output),
+    error: payloadString(state?.error),
+    text: asString(data?.text),
+    file,
+  };
+}
+
+function parseMessage(row: RawMessageRow, parts: ParsedPart[]): ParsedMessage {
+  const data = parseObject(row.data);
+  const errObj = asRecord(data?.error);
+  return {
+    id: row.id,
+    timeCreated: row.time_created,
+    timeUpdated: row.time_updated,
+    role: asString(data?.role) ?? "",
+    model: asString(data?.modelID) ?? asString(field(data, "model", "id")) ?? asString(field(data, "model", "modelID")),
+    provider: asString(data?.providerID) ?? asString(field(data, "model", "providerID")),
+    tokensInput: asNumber(field(data, "tokens", "input")),
+    tokensOutput: asNumber(field(data, "tokens", "output")),
+    msgCreated: asNumber(field(data, "time", "created")),
+    msgCompleted: asNumber(field(data, "time", "completed")),
+    error: payloadString(errObj?.message) ?? payloadString(data?.error),
+    system: asString(data?.system),
+    parts,
+  };
+}
+
+function toolName(part: ParsedPart): string {
+  const tool = part.tool ?? "tool";
   if (tool === "skill") {
-    const skill = head(row.name);
+    const skill = asString(field(asRecord(part.input), "name"));
     if (skill) return `skill:${skill}`;
   }
   return tool;
 }
 
-function toolParams(row: PartRow): string | undefined {
-  const params: Record<string, string> = {};
-  const command = head(row.command);
-  const path = head(row.path) ?? head(row.file_path);
-  const pattern = head(row.pattern);
-  const name = head(row.name);
-  const glob = head(row.glob);
-  if (command) params.command = command;
-  if (path) params.path = path;
-  if (pattern) params.pattern = pattern;
-  if (name) params.name = name;
-  if (glob) params.glob = glob;
-  const keys = Object.keys(params);
-  if (keys.length === 0) return undefined;
-  return JSON.stringify(params);
+function partContent(part: ParsedPart): string | undefined {
+  if (part.type === "text" || part.type === "reasoning") return part.text;
+  if (part.type === "file") return jsonAttr(part.file);
+  if (part.type !== "tool") return undefined;
+  return jsonAttr({
+    tool: part.tool,
+    input: part.input,
+    output: part.output,
+    error: part.error,
+  });
+}
+
+function messagePayload(msg: ParsedMessage): string | undefined {
+  const chunks: string[] = [];
+  if (msg.system) chunks.push(msg.system);
+  for (const part of msg.parts) {
+    const content = partContent(part);
+    if (content) chunks.push(content);
+  }
+  if (chunks.length === 0) return undefined;
+  return chunks.join("\n");
+}
+
+function llmInputValue(prior: ParsedMessage[]): string | undefined {
+  const messages: Array<{ role: string; content: string }> = [];
+  for (const msg of prior) {
+    const content = messagePayload(msg);
+    if (!content) continue;
+    messages.push({ role: msg.role || "user", content });
+  }
+  if (messages.length === 0) return undefined;
+  return JSON.stringify(messages);
+}
+
+function llmOutputValue(msg: ParsedMessage): string | undefined {
+  const texts: string[] = [];
+  for (const part of msg.parts) {
+    if ((part.type === "text" || part.type === "reasoning") && part.text) texts.push(part.text);
+  }
+  if (texts.length) return texts.join("\n");
+  const calls = msg.parts
+    .filter((part) => part.type === "tool")
+    .map((part) => ({ tool: part.tool, input: part.input }));
+  if (calls.length) return jsonAttr(calls);
+  return msg.error;
+}
+
+function setIo(
+  attrs: Record<string, OtlpValue>,
+  input: string | undefined,
+  output: string | undefined,
+  jsonInput: boolean
+): void {
+  if (input) {
+    attrs["input.value"] = input;
+    attrs["input.mime_type"] = jsonInput ? "application/json" : "text/plain";
+  }
+  if (output) {
+    attrs["output.value"] = output;
+    attrs["output.mime_type"] = output.startsWith("{") || output.startsWith("[") ? "application/json" : "text/plain";
+  }
+}
+
+type ShrinkSlot = { kind: "attr"; span: OtlpSpan; key: string } | { kind: "status"; span: OtlpSpan };
+
+function shrinkSlots(spans: OtlpSpan[]): ShrinkSlot[] {
+  const slots: ShrinkSlot[] = [];
+  for (const span of spans) {
+    for (const key of Object.keys(span.attributes)) {
+      if (PROTECTED_ATTRS.has(key)) continue;
+      if (typeof span.attributes[key] === "string") slots.push({ kind: "attr", span, key });
+    }
+    if (span.statusMessage) slots.push({ kind: "status", span });
+  }
+  return slots;
+}
+
+function slotText(slot: ShrinkSlot): string {
+  if (slot.kind === "status") return slot.span.statusMessage ?? "";
+  const value = slot.span.attributes[slot.key];
+  return typeof value === "string" ? value : "";
+}
+
+function writeSlot(slot: ShrinkSlot, text: string): void {
+  if (slot.kind === "status") {
+    slot.span.statusMessage = text || undefined;
+    return;
+  }
+  if (!text) delete slot.span.attributes[slot.key];
+  else slot.span.attributes[slot.key] = text;
+}
+
+function encodeWithinLimit(resource: OtlpResource, spans: OtlpSpan[]): Uint8Array | undefined {
+  let body = encodeTracesRequest(resource, spans);
+  if (body.byteLength <= maxOtlpBytes) return body;
+
+  for (const slot of shrinkSlots(spans)) {
+    const text = slotText(slot);
+    if (text.length > attrCeilingChars) writeSlot(slot, text.slice(0, attrCeilingChars));
+  }
+  body = encodeTracesRequest(resource, spans);
+  if (body.byteLength <= maxOtlpBytes) return body;
+
+  while (true) {
+    body = encodeTracesRequest(resource, spans);
+    if (body.byteLength <= maxOtlpBytes) return body;
+    const overflow = body.byteLength - maxOtlpBytes;
+    let best: ShrinkSlot | undefined;
+    let bestLen = 0;
+    for (const slot of shrinkSlots(spans)) {
+      const len = slotText(slot).length;
+      if (len > bestLen) {
+        best = slot;
+        bestLen = len;
+      }
+    }
+    if (!best || bestLen <= 0) return undefined;
+    const cut = Math.max(1, overflow, Math.ceil(bestLen / 2));
+    writeSlot(best, slotText(best).slice(0, Math.max(0, bestLen - cut)));
+  }
 }
 
 function buildSpans(
   trace: TraceContext | undefined,
-  rows: { sessions: SessionRow[]; messages: MessageRow[]; parts: PartRow[] }
+  rows: { sessions: SessionRow[]; messages: RawMessageRow[]; parts: RawPartRow[] }
 ): OtlpSpan[] {
   const shared = filterAttrs(trace, agentInstance());
   const now = Date.now();
@@ -273,28 +478,38 @@ function buildSpans(
     },
   ];
 
-  for (const message of rows.messages) {
-    const role = String(message.role ?? "");
-    const model = head(message.model_id) ?? head(message.model_id_nested);
-    const provider = head(message.provider_id) ?? head(message.provider_nested);
-    if (role !== "assistant") continue;
-    if (!model && !provider) continue;
-    const start = asNumber(message.msg_created) ?? asNumber(message.time_created) ?? sessionStart;
-    const end = asNumber(message.msg_completed) ?? asNumber(message.time_updated) ?? start;
+  const partsByMessage = new Map<string, ParsedPart[]>();
+  const parsedParts: ParsedPart[] = [];
+  for (const row of rows.parts) {
+    const part = parsePart(row);
+    parsedParts.push(part);
+    const list = partsByMessage.get(part.messageId);
+    if (list) list.push(part);
+    else partsByMessage.set(part.messageId, [part]);
+  }
+  const messages = rows.messages.map((row) => parseMessage(row, partsByMessage.get(row.id) ?? []));
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role !== "assistant") continue;
+    if (!message.model && !message.provider) continue;
+    const start = message.msgCreated ?? asNumber(message.timeCreated) ?? sessionStart;
+    const end = message.msgCompleted ?? asNumber(message.timeUpdated) ?? start;
     const times = spanTimes(start, end, sessionStart, sessionEnd);
     const attrs: Record<string, OtlpValue> = { ...shared, [KIND_ATTR]: "LLM" };
-    if (model) attrs["llm.model_name"] = model;
-    if (provider) attrs["llm.provider"] = provider;
-    const prompt = asNumber(message.tokens_input);
-    const completion = asNumber(message.tokens_output);
-    if (prompt != null) attrs["llm.token_count.prompt"] = Math.trunc(prompt);
-    if (completion != null) attrs["llm.token_count.completion"] = Math.trunc(completion);
-    const err = head(message.error);
+    if (message.model) attrs["llm.model_name"] = message.model;
+    if (message.provider) attrs["llm.provider"] = message.provider;
+    if (message.tokensInput != null) attrs["llm.token_count.prompt"] = Math.trunc(message.tokensInput);
+    if (message.tokensOutput != null) attrs["llm.token_count.completion"] = Math.trunc(message.tokensOutput);
+    const input = llmInputValue(messages.slice(0, i));
+    const output = llmOutputValue(message);
+    setIo(attrs, input, output, true);
+    const err = message.error;
     spans.push({
       traceId,
       spanId: randomId(8),
       parentSpanId: rootId,
-      name: model ?? "llm",
+      name: message.model ?? "llm",
       kind: SPAN_KIND_INTERNAL,
       startTimeUnixNano: times.start,
       endTimeUnixNano: times.end,
@@ -304,24 +519,26 @@ function buildSpans(
     });
   }
 
-  for (const part of rows.parts) {
+  for (const part of parsedParts) {
+    if (part.type !== "tool") continue;
     const name = toolName(part);
-    const status = head(part.status) ?? "unknown";
-    const start = asNumber(part.start_ms) ?? asNumber(part.time_created) ?? sessionStart;
-    const end = asNumber(part.end_ms) ?? asNumber(part.time_updated) ?? start;
+    const status = part.status ?? "unknown";
+    const start = part.startMs ?? asNumber(part.timeCreated) ?? sessionStart;
+    const end = part.endMs ?? asNumber(part.timeUpdated) ?? start;
     const times = spanTimes(start, end, sessionStart, sessionEnd);
-    const startMs = asNumber(part.start_ms);
-    const endMs = asNumber(part.end_ms);
     const attrs: Record<string, OtlpValue> = {
       ...shared,
       [KIND_ATTR]: "TOOL",
       "tool.name": name,
       "tool.status": status,
     };
-    if (startMs != null && endMs != null) attrs["tool.duration_ms"] = Math.max(0, Math.trunc(endMs - startMs));
-    const params = toolParams(part);
+    if (part.startMs != null && part.endMs != null)
+      attrs["tool.duration_ms"] = Math.max(0, Math.trunc(part.endMs - part.startMs));
+    const params = jsonAttr(part.input);
     if (params) attrs["tool.parameters"] = params;
-    const err = head(part.error);
+    const output = part.output ?? part.error;
+    setIo(attrs, params, output, true);
+    const err = part.error;
     const failed = status === "error" || Boolean(err);
     spans.push({
       traceId,
@@ -340,15 +557,15 @@ function buildSpans(
   return spans;
 }
 
-export function buildOpenCodeTraceRequest(dbPath: string, trace?: TraceContext): Uint8Array | undefined {
-  if (!existsSync(dbPath)) return undefined;
+function buildTraceBody(dbPath: string, trace?: TraceContext): { body?: Uint8Array; tooLarge?: boolean } {
+  if (!existsSync(dbPath)) return {};
   const db = new Database(dbPath);
   try {
     const rows = readTrace(db);
-    if (!rows) return undefined;
+    if (!rows) return {};
     const agent = agentInstance();
     const spans = buildSpans(trace, rows);
-    return encodeTracesRequest(
+    const body = encodeWithinLimit(
       {
         attributes: {
           "service.name": agent,
@@ -358,9 +575,15 @@ export function buildOpenCodeTraceRequest(dbPath: string, trace?: TraceContext):
       },
       spans
     );
+    if (!body) return { tooLarge: true };
+    return { body };
   } finally {
     db.close();
   }
+}
+
+export function buildOpenCodeTraceRequest(dbPath: string, trace?: TraceContext): Uint8Array | undefined {
+  return buildTraceBody(dbPath, trace).body;
 }
 
 export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceContext }): Promise<void> {
@@ -371,14 +594,18 @@ export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceC
     noteError();
     return;
   }
-  let body: Uint8Array | undefined;
+  let result: { body?: Uint8Array; tooLarge?: boolean };
   try {
-    body = buildOpenCodeTraceRequest(opts.dbPath, opts.trace);
+    result = buildTraceBody(opts.dbPath, opts.trace);
   } catch {
     noteError();
     return;
   }
-  if (!body) return;
+  if (result.tooLarge) {
+    noteError();
+    return;
+  }
+  if (!result.body) return;
   const agent = agentInstance();
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
@@ -389,7 +616,10 @@ export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceC
         "Content-Type": "application/x-protobuf",
         "phoenix-project": agent,
       },
-      body: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer,
+      body: result.body.buffer.slice(
+        result.body.byteOffset,
+        result.body.byteOffset + result.body.byteLength
+      ) as ArrayBuffer,
       signal: ac.signal,
     });
     if (!response.ok) noteError();

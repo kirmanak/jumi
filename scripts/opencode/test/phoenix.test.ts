@@ -6,9 +6,11 @@ import { join } from "node:path";
 import {
   buildOpenCodeTraceRequest,
   exportOpenCodeTrace,
+  PHOENIX_OTLP_TIMEOUT_MS,
   PUBLIC_PHOENIX_HOST,
   resetTraceExportForTests,
   setTraceFetchForTests,
+  setTraceLimitsForTests,
   setTraceTimeoutForTests,
   traceExportErrors,
 } from "../src/phoenix.ts";
@@ -144,6 +146,9 @@ function writeTraceDb(
       extraInput?: Record<string, unknown>;
     }>;
     assistant?: { modelID?: string; providerID?: string; input?: number; output?: number; error?: string };
+    userText?: string;
+    assistantText?: string;
+    extraParts?: Array<{ id?: string; messageId?: string; data: unknown }>;
   } = {}
 ): void {
   const db = new Database(path);
@@ -155,6 +160,23 @@ function writeTraceDb(
     "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
   );
   db.run("INSERT INTO session VALUES (?, ?, ?)", ["ses1", 1_000, 5_000]);
+  if (opts.userText) {
+    db.run("INSERT INTO message VALUES (?, ?, ?, ?, ?)", [
+      "msg-user",
+      "ses1",
+      900,
+      900,
+      JSON.stringify({ role: "user", time: { created: 900 } }),
+    ]);
+    db.run("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", [
+      "part-user",
+      "msg-user",
+      "ses1",
+      900,
+      900,
+      JSON.stringify({ type: "text", text: opts.userText }),
+    ]);
+  }
   const assistant = opts.assistant ?? { modelID: "grok-4.6", providerID: "xai", input: 10, output: 3 };
   db.run("INSERT INTO message VALUES (?, ?, ?, ?, ?)", [
     "msg1",
@@ -171,6 +193,17 @@ function writeTraceDb(
     }),
   ]);
   let i = 0;
+  if (opts.assistantText) {
+    i += 1;
+    db.run("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", [
+      `part${i}`,
+      "msg1",
+      "ses1",
+      1_050,
+      1_080,
+      JSON.stringify({ type: "text", text: opts.assistantText }),
+    ]);
+  }
   for (const tool of opts.tools ?? []) {
     i += 1;
     db.run("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", [
@@ -198,21 +231,35 @@ function writeTraceDb(
       }),
     ]);
   }
+  for (const extra of opts.extraParts ?? []) {
+    i += 1;
+    const data = typeof extra.data === "string" ? extra.data : JSON.stringify(extra.data);
+    db.run("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", [
+      extra.id ?? `part${i}`,
+      extra.messageId ?? "msg1",
+      "ses1",
+      1_300,
+      1_300,
+      data,
+    ]);
+  }
   db.close();
 }
 
 describe("buildOpenCodeTraceRequest", () => {
-  test("builds an AGENT root with truncated TOOL and LLM children", async () => {
+  test("builds an AGENT root with full TOOL and LLM payloads", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
     const dbPath = join(dir, "opencode-session.db");
     try {
       writeTraceDb(dbPath, {
+        userText: "review this PR please",
+        assistantText: "looks fine after grep",
         tools: [
           {
             tool: "bash",
             status: "completed",
             command: "ls -la /work",
-            output: "HUGE_STDOUT_BODY_MUST_NOT_APPEAR",
+            output: "HUGE_STDOUT_BODY_MUST_APPEAR",
             start: 1_100,
             end: 1_250,
           },
@@ -220,7 +267,7 @@ describe("buildOpenCodeTraceRequest", () => {
             tool: "read",
             status: "completed",
             path: "src/git.ts",
-            output: "FILE_BODY_MUST_NOT_APPEAR",
+            output: "FILE_BODY_MUST_APPEAR",
           },
           {
             tool: "skill",
@@ -234,6 +281,12 @@ describe("buildOpenCodeTraceRequest", () => {
             extraInput: { blob: "do-not-guess-this-body" },
             output: "secret-output",
           },
+          {
+            tool: "webfetch",
+            status: "completed",
+            extraInput: { url: "https://example.com/opencode" },
+            output: "fetched-body",
+          },
         ],
       });
       const body = buildOpenCodeTraceRequest(dbPath, {
@@ -245,10 +298,13 @@ describe("buildOpenCodeTraceRequest", () => {
       });
       expect(body).toBeDefined();
       const text = new TextDecoder().decode(body);
-      expect(text).not.toContain("HUGE_STDOUT_BODY_MUST_NOT_APPEAR");
-      expect(text).not.toContain("FILE_BODY_MUST_NOT_APPEAR");
-      expect(text).not.toContain("do-not-guess-this-body");
-      expect(text).not.toContain("secret-output");
+      expect(text).toContain("HUGE_STDOUT_BODY_MUST_APPEAR");
+      expect(text).toContain("FILE_BODY_MUST_APPEAR");
+      expect(text).toContain("do-not-guess-this-body");
+      expect(text).toContain("secret-output");
+      expect(text).toContain("https://example.com/opencode");
+      expect(text).toContain("review this PR please");
+      expect(text).toContain("looks fine after grep");
       const resource = decodeResourceAttrs(body!);
       expect(resource["openinference.project.name"]).toBe("jumi");
       expect(resource.kind).toBe("review");
@@ -264,22 +320,29 @@ describe("buildOpenCodeTraceRequest", () => {
       expect(llm?.attrs["llm.model_name"]).toBe("grok-4.6");
       expect(llm?.attrs["llm.provider"]).toBe("xai");
       expect(llm?.attrs["llm.token_count.prompt"]).toBe(10);
+      expect(String(llm?.attrs["input.value"])).toContain("review this PR please");
+      expect(llm?.attrs["output.value"]).toBe("looks fine after grep");
       const bash = spans.find((s) => s.name === "bash");
       expect(bash?.attrs["openinference.span.kind"]).toBe("TOOL");
       expect(bash?.attrs["tool.status"]).toBe("completed");
       expect(bash?.attrs["tool.duration_ms"]).toBe(150);
       expect(String(bash?.attrs["tool.parameters"])).toContain("ls -la /work");
+      expect(bash?.attrs["output.value"]).toBe("HUGE_STDOUT_BODY_MUST_APPEAR");
       const skill = spans.find((s) => s.name === "skill:gitops-apply-review");
       expect(skill?.attrs["tool.status"]).toBe("error");
+      expect(skill?.attrs["output.value"]).toBe("denied");
       const mystery = spans.find((s) => s.name === "mystery");
       expect(mystery?.attrs["tool.status"]).toBe("completed");
-      expect(mystery?.attrs["tool.parameters"]).toBeUndefined();
+      expect(String(mystery?.attrs["tool.parameters"])).toContain("do-not-guess-this-body");
+      expect(mystery?.attrs["output.value"]).toBe("secret-output");
+      const fetch = spans.find((s) => s.name === "webfetch");
+      expect(String(fetch?.attrs["input.value"])).toContain("https://example.com/opencode");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("truncates command heads and skips missing tables", async () => {
+  test("keeps long commands and skips missing tables", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
     try {
       const dbPath = join(dir, "opencode-session.db");
@@ -289,7 +352,7 @@ describe("buildOpenCodeTraceRequest", () => {
       const body = buildOpenCodeTraceRequest(dbPath, { kind: "implement", owner: "a", repo: "b" });
       const bash = decodeSpans(body!).find((s) => s.name === "bash");
       const params = JSON.parse(String(bash?.attrs["tool.parameters"])) as { command: string };
-      expect(params.command.length).toBe(256);
+      expect(params.command.length).toBe(400);
 
       const sessionOnly = join(dir, "session-only.db");
       const db = new Database(sessionOnly);
@@ -300,9 +363,67 @@ describe("buildOpenCodeTraceRequest", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("exports every tool span and keeps unreadable part payloads off the job", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
+    const dbPath = join(dir, "opencode-session.db");
+    try {
+      writeTraceDb(dbPath, {
+        tools: Array.from({ length: 300 }, (_, i) => ({
+          tool: "bash",
+          status: "completed",
+          command: `echo ${i}`,
+        })),
+        extraParts: [{ data: "not-json{{{{" }],
+      });
+      const body = buildOpenCodeTraceRequest(dbPath, { kind: "review", owner: "a", repo: "b" });
+      const spans = decodeSpans(body!);
+      expect(spans.filter((s) => s.attrs["openinference.span.kind"] === "TOOL")).toHaveLength(300);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("shrinks largest string attributes to fit the encoded cap", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
+    const dbPath = join(dir, "opencode-session.db");
+    try {
+      setTraceLimitsForTests({ maxBytes: 2_500, attrCeiling: 400 });
+      writeTraceDb(dbPath, {
+        tools: [
+          { tool: "bash", status: "completed", command: "pwd", output: "B".repeat(2_000) },
+          { tool: "read", status: "completed", path: "src/git.ts", output: "R".repeat(800) },
+        ],
+      });
+      const body = buildOpenCodeTraceRequest(dbPath, {
+        kind: "review",
+        owner: "personal",
+        repo: "jumi",
+        sha: "abc123",
+        jobId: "42",
+      });
+      expect(body).toBeDefined();
+      expect(body!.byteLength).toBeLessThanOrEqual(2_500);
+      const spans = decodeSpans(body!);
+      const bash = spans.find((s) => s.name === "bash");
+      const read = spans.find((s) => s.name === "read");
+      const llm = spans.find((s) => s.attrs["openinference.span.kind"] === "LLM");
+      expect(bash?.attrs["tool.status"]).toBe("completed");
+      expect(read?.attrs["tool.name"]).toBe("read");
+      expect(llm?.attrs["llm.token_count.prompt"]).toBe(10);
+      expect(spans[0]?.attrs.job_id).toBe("42");
+      expect(String(bash?.attrs["output.value"] ?? "").length).toBeLessThan(2_000);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("exportOpenCodeTrace", () => {
+  test("uses a 15s OTLP timeout", () => {
+    expect(PHOENIX_OTLP_TIMEOUT_MS).toBe(15_000);
+  });
+
   test("skips when endpoint is unset", async () => {
     delete process.env.PHOENIX_OTLP_ENDPOINT;
     let called = false;
@@ -375,6 +496,26 @@ describe("exportOpenCodeTrace", () => {
       await expect(exportOpenCodeTrace({ dbPath })).resolves.toBeUndefined();
       expect(traceExportErrors()).toBe(1);
       expect(renderTokenMetrics()).toContain('ai_trace_exporter_errors{agent_instance="jumi"} 1');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("over-cap after shrinking increments errors without throwing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
+    const dbPath = join(dir, "opencode-session.db");
+    try {
+      writeTraceDb(dbPath, { tools: [{ tool: "bash", status: "completed", command: "pwd" }] });
+      process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
+      setTraceLimitsForTests({ maxBytes: 80 });
+      let called = false;
+      setTraceFetchForTests(async () => {
+        called = true;
+        return new Response(null, { status: 200 });
+      });
+      await expect(exportOpenCodeTrace({ dbPath })).resolves.toBeUndefined();
+      expect(called).toBe(false);
+      expect(traceExportErrors()).toBe(1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

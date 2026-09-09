@@ -292,7 +292,7 @@ PY
     );
   });
 
-  test("exports a truncated Phoenix trace after OpenCode exits and ignores export failures", async () => {
+  test("exports a Phoenix trace after OpenCode exits and ignores export failures", async () => {
     process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
     const posts: Uint8Array[] = [];
     setTraceFetchForTests(async (_url, init) => {
@@ -336,7 +336,7 @@ PY
         expect(posts).toHaveLength(1);
         const payload = new TextDecoder().decode(posts[0]);
         expect(payload).toContain("bash");
-        expect(payload).not.toContain("FULL_STDOUT");
+        expect(payload).toContain("FULL_STDOUT");
         expect(traceExportErrors()).toBe(1);
         expect(renderTokenMetrics()).toContain('ai_trace_exporter_errors{agent_instance="jumi"} 1');
       }
