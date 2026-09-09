@@ -64,6 +64,7 @@ export function createIssueQueue(
           sanitizeOpenCodeEnv: true,
           abortSignal: abort.signal,
           logger: (message: string) => logger(message),
+          jobId: job.delivery,
         };
         const result =
           job.mode === "conflict"
@@ -317,6 +318,7 @@ export async function processWorkerTick(
         pids?.set(key, pid);
       },
       logger: (message: string) => logger(message),
+      jobId: String(row.id),
     };
     const runImplement = extras.implement ?? implementIssue;
     const runFollowUp = extras.followUp ?? implementFollowUp;

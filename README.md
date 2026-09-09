@@ -139,7 +139,8 @@ Optional environment variables:
 | `CONFLICT_TIMEOUT_MS` | `3600000` | Conflict OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
 | `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per issue |
 | `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
-| `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics` |
+| `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics`. Phoenix project name for truncated OpenCode traces |
+| `PHOENIX_OTLP_ENDPOINT` | unset | In-cluster Phoenix OTLP HTTP base URL (app port, `/v1/traces`). Unset skips export. Never `phoenix.kirmanak.stream` |
 | `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (org-hook mailbox + PG enqueue/reclaim; no OpenCode), or `engine` (lease + OpenCode). Unset is `monolith`. |
 | `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith`. GitOps must set it on the worker; process start stays fail-closed if unset (first-run assign uses the in-memory queue). When set, implement/follow-up/conflict use the shared `review_jobs` ledger |
 | `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
@@ -213,6 +214,8 @@ GET /metrics
 ```
 
 `GET /metrics` is Prometheus text (`ai_tokens_total`, `ai_tokens`, `ai_sessions`) from **in-process** counters. After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums, then deletes the workspace as today. Totals reset on process restart; Grafana `increase()` handles that. Optional `AGENT_INSTANCE` (default `jumi`) is the series label. This is not a durable OpenCode DB on `HOME`.
+
+When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs a truncated OpenInference trace (OTLP HTTP protobuf) to in-cluster Phoenix: one `AGENT` root per job, `TOOL` children (and `LLM` when message data has a model call). Attributes include `openinference.span.kind`, `kind`, owner/repo, SHA, job id, and `agent_instance`. Tool payloads keep name, status, duration, and a path/command head — no file bodies, no bash stdout, not attached to the Gitea sticky. Unset skips export. Timeout, the public Phoenix hostname, or an unreadable DB increments `ai_trace_exporter_errors` and does not fail the job. Phoenix **project** is `AGENT_INSTANCE` so reviewer (`jumi`) and worker (`jumi-worker`) do not mix.
 
 ## Security Model
 

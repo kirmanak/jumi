@@ -75,6 +75,7 @@ export interface RunReviewJobExtras {
   workspacePreparer?: WorkspacePreparer;
   gitRunner?: GitRunner;
   abortSignal?: AbortSignal;
+  jobId?: string;
 }
 
 export async function runReviewJob(
@@ -110,6 +111,7 @@ export async function runReviewJob(
       workspacePreparer: extras.workspacePreparer,
       gitRunner: extras.gitRunner,
       abortSignal: extras.abortSignal,
+      jobId: extras.jobId ?? job.delivery,
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;
@@ -421,6 +423,7 @@ export async function processEngineTick(
     };
     const result = await runReviewJob(config, job, api, logger, {
       ...extras,
+      jobId: String(row.id),
       persistResult: async (persisted) => {
         await store.saveResult(row.id, leasedBy, persisted);
       },

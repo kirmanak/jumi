@@ -40,6 +40,7 @@ Notes (not keys): `GITEA_WEBHOOK_SECRET` is not required when `JUMI_ROLE=engine`
 - `DATABASE_URL`
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
+- `PHOENIX_OTLP_ENDPOINT`
 
 #### ports
 - `3000`
@@ -93,6 +94,7 @@ Notes (not keys): `GITEA_WEBHOOK_SECRET` is not required when `JUMI_ROLE=engine`
 - `MAX_CONFLICT_ROUNDS`
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
+- `PHOENIX_OTLP_ENDPOINT`
 
 #### ports
 - `3000`

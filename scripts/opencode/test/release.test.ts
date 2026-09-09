@@ -285,6 +285,7 @@ describe("deploy/contract.md", () => {
       "DATABASE_URL",
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",
+      "PHOENIX_OTLP_ENDPOINT",
     ]);
     expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET", "DATABASE_URL"]);
     expect(parsed.worker.optionalEnv).toEqual([
@@ -312,6 +313,7 @@ describe("deploy/contract.md", () => {
       "MAX_CONFLICT_ROUNDS",
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",
+      "PHOENIX_OTLP_ENDPOINT",
     ]);
     expect(parsed.reviewer.ports).toEqual(["3000"]);
     expect(parsed.worker.ports).toEqual(["3000"]);

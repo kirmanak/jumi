@@ -30,6 +30,7 @@ export interface ServiceConfig {
   databaseUrl?: string;
   leaseMs: number;
   maxJobAttempts: number;
+  phoenixOtlpEndpoint?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -136,5 +137,6 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     databaseUrl: role === "monolith" ? undefined : requireEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
+    phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
   };
 }

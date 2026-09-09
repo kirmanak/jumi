@@ -1,3 +1,13 @@
+export type TraceKind = "review" | "implement" | "follow-up" | "conflict";
+
+export interface TraceContext {
+  kind: TraceKind;
+  owner: string;
+  repo: string;
+  sha?: string;
+  jobId?: string;
+}
+
 export interface EngineRunOptions {
   prompt: string;
   model: string;
@@ -13,6 +23,7 @@ export interface EngineRunOptions {
   abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;
   logger?: (message: string) => void;
+  trace?: TraceContext;
 }
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";

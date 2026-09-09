@@ -12,6 +12,7 @@ import {
   trackMemoryPeak,
 } from "./diagnostics.ts";
 import type { Engine, EngineResult, EngineRunOptions } from "./engine.ts";
+import { exportOpenCodeTrace } from "./phoenix.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -312,6 +313,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
     });
     recordOpenCodeDb(dbPath);
+    await exportOpenCodeTrace({ dbPath, trace: opts.trace });
 
     if (opts.abortSignal?.aborted) {
       const err = new Error("cancelled");

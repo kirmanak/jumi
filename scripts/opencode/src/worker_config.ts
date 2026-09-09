@@ -30,6 +30,7 @@ export interface WorkerConfig {
   databaseUrl?: string;
   leaseMs: number;
   maxJobAttempts: number;
+  phoenixOtlpEndpoint?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -118,5 +119,6 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     databaseUrl: optionalEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
+    phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
   };
 }

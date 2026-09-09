@@ -19,6 +19,15 @@ describe("loadWorkerConfig", () => {
     expect(config.giteaUrl).toBe("https://gitea.kirmanak.stream");
     expect(config.databaseUrl).toBeUndefined();
     expect(config).not.toHaveProperty("role");
+    expect(config.phoenixOtlpEndpoint).toBeUndefined();
+  });
+
+  test("parses optional PHOENIX_OTLP_ENDPOINT", () => {
+    const config = loadWorkerConfig({
+      ...required,
+      PHOENIX_OTLP_ENDPOINT: "http://phoenix.phoenix.svc:6006",
+    });
+    expect(config.phoenixOtlpEndpoint).toBe("http://phoenix.phoenix.svc:6006");
   });
 
   test("has no scan-interval env", () => {

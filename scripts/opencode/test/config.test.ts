@@ -27,6 +27,15 @@ describe("loadConfig", () => {
     expect(config.databaseUrl).toBeUndefined();
     expect(config.leaseMs).toBe(900_000 + 10 * 60 * 1000);
     expect(config.maxJobAttempts).toBe(2);
+    expect(config.phoenixOtlpEndpoint).toBeUndefined();
+  });
+
+  test("parses optional PHOENIX_OTLP_ENDPOINT", () => {
+    const config = loadConfig({
+      ...required,
+      PHOENIX_OTLP_ENDPOINT: "http://phoenix.phoenix.svc:6006",
+    });
+    expect(config.phoenixOtlpEndpoint).toBe("http://phoenix.phoenix.svc:6006");
   });
 
   test("ignores DATABASE_URL for monolith", () => {

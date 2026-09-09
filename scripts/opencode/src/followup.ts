@@ -806,6 +806,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       helmRunner: opts.helmRunner,
       logger: log,
       abortSignal: opts.abortSignal,
+      jobId: opts.jobId ?? opts.job.delivery,
       ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
       onPid: async (pid) => {
         await opts.onPid?.(pid);
@@ -907,6 +908,13 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel: `${owner}/${repo}#${issueNumber}`,
+        trace: {
+          kind: "follow-up",
+          owner,
+          repo,
+          sha: pr.head.sha,
+          jobId: opts.jobId ?? opts.job.delivery,
+        },
         logger: log,
         abortSignal: opts.abortSignal,
         onPid: async (pid) => {

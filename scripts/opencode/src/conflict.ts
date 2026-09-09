@@ -85,6 +85,7 @@ export interface MergeDefaultIntoWorktreeOpts {
   abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;
   ciMarkdown?: string;
+  jobId?: string;
 }
 
 function logDefault(message: string) {
@@ -447,6 +448,13 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
         timeoutMs: opts.timeoutMs ?? CONFLICT_TIMEOUT_MS,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
+        trace: {
+          kind: "conflict",
+          owner: opts.job.owner,
+          repo: opts.job.repo,
+          sha: headSha,
+          jobId: opts.jobId ?? opts.job.delivery,
+        },
         logger: log,
         abortSignal: opts.abortSignal,
         onPid: opts.onPid,
@@ -722,6 +730,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       logger: log,
       abortSignal: opts.abortSignal,
       ciMarkdown,
+      jobId: opts.jobId ?? opts.job.delivery,
       onPid: async (pid) => {
         await opts.onPid?.(pid);
         await serializeClaim(async () => {

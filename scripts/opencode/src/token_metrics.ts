@@ -2,6 +2,7 @@
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
+import { resetTraceExportForTests, traceExportErrors } from "./phoenix.ts";
 
 export const TOKEN_TYPES = ["input", "cached_input", "output", "cache_write", "reasoning"] as const;
 export type TokenType = (typeof TOKEN_TYPES)[number];
@@ -65,6 +66,7 @@ export function resetTokenMetricsForTests(): void {
   sessions.clear();
   lastSuccessSeconds = 0;
   errors = 0;
+  resetTraceExportForTests();
 }
 
 export function recordOpenCodeDb(path: string): void {
@@ -140,6 +142,9 @@ export function renderTokenMetrics(): string {
     "# HELP ai_token_exporter_errors OpenCode DB read failures in this process",
     "# TYPE ai_token_exporter_errors counter",
     `ai_token_exporter_errors{agent_instance="${agent}"} ${errors}`,
+    "# HELP ai_trace_exporter_errors Phoenix OTLP export failures in this process",
+    "# TYPE ai_trace_exporter_errors counter",
+    `ai_trace_exporter_errors{agent_instance="${agent}"} ${traceExportErrors()}`,
     "# HELP ai_tokens_total Cumulative AI tokens observed by this process",
     "# TYPE ai_tokens_total counter",
   ];

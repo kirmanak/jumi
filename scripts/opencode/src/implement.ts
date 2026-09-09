@@ -73,6 +73,7 @@ export interface ImplementOptions {
   logger?: (message: string) => void;
   useClaim?: boolean;
   onPid?: (pid: number) => void | Promise<void>;
+  jobId?: string;
 }
 
 function logDefault(message: string) {
@@ -357,6 +358,13 @@ export async function implementIssue(
         timeoutMs: opts.timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel: `${owner}/${repo}#${issueNumber}`,
+        trace: {
+          kind: "implement",
+          owner,
+          repo,
+          sha: headSha,
+          jobId: opts.jobId ?? opts.job.delivery,
+        },
         logger: log,
         abortSignal: opts.abortSignal,
         onPid: async (pid) => {

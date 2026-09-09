@@ -1,17 +1,25 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runOpenCode } from "../src/git.ts";
+import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
+const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
+
+beforeEach(() => {
+  delete process.env.PHOENIX_OTLP_ENDPOINT;
+});
 
 afterEach(() => {
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
+  if (originalPhoenix === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
+  else process.env.PHOENIX_OTLP_ENDPOINT = originalPhoenix;
   resetTokenMetricsForTests();
 });
 
@@ -250,6 +258,57 @@ PY
         expect(stderrLog).toContain("TAILMARKER");
         expect(stderrLog).toContain("kept last");
         expect(stderrLog).not.toContain("HEADMARKER");
+      }
+    );
+  });
+
+  test("exports a truncated Phoenix trace after OpenCode exits and ignores export failures", async () => {
+    process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
+    const posts: Uint8Array[] = [];
+    setTraceFetchForTests(async (_url, init) => {
+      posts.push(new Uint8Array(init?.body as Uint8Array));
+      return new Response("no", { status: 500 });
+    });
+    await withFakeOpenCode(
+      `#!/bin/sh
+python3 - <<'PY'
+import json, os, sqlite3
+path = os.environ["OPENCODE_DB"]
+con = sqlite3.connect(path)
+con.execute("CREATE TABLE session (id TEXT, time_created INTEGER, time_updated INTEGER)")
+con.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
+con.execute("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
+con.execute("INSERT INTO session VALUES (?, ?, ?)", ("ses1", 1, 2))
+con.execute(
+  "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+  ("msg1", "ses1", 1, 2, json.dumps({"role": "assistant", "modelID": "grok-4.6", "providerID": "xai"})),
+)
+con.execute(
+  "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+  ("p1", "msg1", "ses1", 1, 2, json.dumps({
+    "type": "tool",
+    "tool": "bash",
+    "state": {"status": "error", "input": {"command": "pwd"}, "output": "FULL_STDOUT", "error": "boom", "time": {"start": 1, "end": 2}},
+  })),
+)
+con.commit()
+PY
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "review", owner: "personal", repo: "jumi", sha: "abc", jobId: "7" },
+        });
+        expect(result.status).toBe("ok");
+        expect(posts).toHaveLength(1);
+        const payload = new TextDecoder().decode(posts[0]);
+        expect(payload).toContain("bash");
+        expect(payload).not.toContain("FULL_STDOUT");
+        expect(traceExportErrors()).toBe(1);
+        expect(renderTokenMetrics()).toContain('ai_trace_exporter_errors{agent_instance="jumi"} 1');
       }
     );
   });

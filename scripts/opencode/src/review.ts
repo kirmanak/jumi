@@ -101,6 +101,7 @@ export interface ReviewOptions {
   logger?: (message: string) => void;
   persistResult?: (result: PersistReviewResult) => Promise<void>;
   abortSignal?: AbortSignal;
+  jobId?: string;
 }
 
 export type PersistReviewResult =
@@ -576,6 +577,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       reviewLabel,
       logger: log,
       abortSignal: opts.abortSignal,
+      trace: {
+        kind: "review",
+        owner: opts.owner,
+        repo: opts.repo,
+        sha: reviewedHeadSha,
+        jobId: opts.jobId,
+      },
     });
     throwIfEngineFailed(engineResult);
 
