@@ -250,7 +250,6 @@ interface ParsedMessage {
   msgCreated: number | undefined;
   msgCompleted: number | undefined;
   error: string | undefined;
-  system: string | undefined;
   parts: ParsedPart[];
 }
 
@@ -318,7 +317,6 @@ function parseMessage(row: RawMessageRow, parts: ParsedPart[]): ParsedMessage {
     msgCreated: asNumber(field(data, "time", "created")),
     msgCompleted: asNumber(field(data, "time", "completed")),
     error: payloadString(errObj?.message) ?? payloadString(data?.error),
-    system: asString(data?.system),
     parts,
   };
 }
@@ -332,38 +330,16 @@ function toolName(part: ParsedPart): string {
   return tool;
 }
 
-function partContent(part: ParsedPart): string | undefined {
-  if (part.type === "text" || part.type === "reasoning") return part.text;
-  if (part.type === "file") return jsonAttr(part.file);
-  if (part.type !== "tool") return undefined;
-  return jsonAttr({
-    tool: part.tool,
-    input: part.input,
-    output: part.output,
-    error: part.error,
-  });
-}
-
-function messagePayload(msg: ParsedMessage): string | undefined {
-  const chunks: string[] = [];
-  if (msg.system) chunks.push(msg.system);
-  for (const part of msg.parts) {
-    const content = partContent(part);
-    if (content) chunks.push(content);
+function initialUserPrompt(messages: ParsedMessage[]): string | undefined {
+  for (const msg of messages) {
+    if (msg.role !== "user") continue;
+    const texts: string[] = [];
+    for (const part of msg.parts) {
+      if (part.type === "text" && part.text) texts.push(part.text);
+    }
+    if (texts.length) return texts.join("\n");
   }
-  if (chunks.length === 0) return undefined;
-  return chunks.join("\n");
-}
-
-function llmInputValue(prior: ParsedMessage[]): string | undefined {
-  const messages: Array<{ role: string; content: string }> = [];
-  for (const msg of prior) {
-    const content = messagePayload(msg);
-    if (!content) continue;
-    messages.push({ role: msg.role || "user", content });
-  }
-  if (messages.length === 0) return undefined;
-  return JSON.stringify(messages);
+  return undefined;
 }
 
 function llmOutputValue(msg: ParsedMessage): string | undefined {
@@ -469,18 +445,6 @@ function buildSpans(
   const traceId = randomId(16);
   const rootId = randomId(8);
   const rootName = trace ? `jumi ${trace.kind}` : "jumi opencode";
-  const spans: OtlpSpan[] = [
-    {
-      traceId,
-      spanId: rootId,
-      name: rootName,
-      kind: SPAN_KIND_INTERNAL,
-      startTimeUnixNano: rootTimes.start,
-      endTimeUnixNano: rootTimes.end,
-      attributes: { ...shared, [KIND_ATTR]: "AGENT" },
-      statusCode: STATUS_CODE_OK,
-    },
-  ];
 
   const partsByMessage = new Map<string, ParsedPart[]>();
   const parsedParts: ParsedPart[] = [];
@@ -493,8 +457,22 @@ function buildSpans(
   }
   const messages = rows.messages.map((row) => parseMessage(row, partsByMessage.get(row.id) ?? []));
 
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
+  const rootAttrs: Record<string, OtlpValue> = { ...shared, [KIND_ATTR]: "AGENT" };
+  setIo(rootAttrs, initialUserPrompt(messages), undefined, false);
+  const spans: OtlpSpan[] = [
+    {
+      traceId,
+      spanId: rootId,
+      name: rootName,
+      kind: SPAN_KIND_INTERNAL,
+      startTimeUnixNano: rootTimes.start,
+      endTimeUnixNano: rootTimes.end,
+      attributes: rootAttrs,
+      statusCode: STATUS_CODE_OK,
+    },
+  ];
+
+  for (const message of messages) {
     if (message.role !== "assistant") continue;
     if (!message.model && !message.provider) continue;
     const start = message.msgCreated ?? asNumber(message.timeCreated) ?? sessionStart;
@@ -505,9 +483,7 @@ function buildSpans(
     if (message.provider) attrs["llm.provider"] = message.provider;
     if (message.tokensInput != null) attrs["llm.token_count.prompt"] = Math.trunc(message.tokensInput);
     if (message.tokensOutput != null) attrs["llm.token_count.completion"] = Math.trunc(message.tokensOutput);
-    const input = llmInputValue(messages.slice(0, i));
-    const output = llmOutputValue(message);
-    setIo(attrs, input, output, true);
+    setIo(attrs, undefined, llmOutputValue(message), true);
     const err = message.error;
     spans.push({
       traceId,

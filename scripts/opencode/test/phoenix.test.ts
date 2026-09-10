@@ -149,6 +149,16 @@ function writeTraceDb(
     userText?: string;
     assistantText?: string;
     extraParts?: Array<{ id?: string; messageId?: string; data: unknown }>;
+    extraAssistants?: Array<{
+      id: string;
+      text?: string;
+      modelID?: string;
+      providerID?: string;
+      input?: number;
+      output?: number;
+      timeCreated?: number;
+      timeUpdated?: number;
+    }>;
   } = {}
 ): void {
   const db = new Database(path);
@@ -230,6 +240,34 @@ function writeTraceDb(
         },
       }),
     ]);
+  }
+  for (const extraAssistant of opts.extraAssistants ?? []) {
+    const created = extraAssistant.timeCreated ?? 3_000;
+    const completed = extraAssistant.timeUpdated ?? 4_000;
+    db.run("INSERT INTO message VALUES (?, ?, ?, ?, ?)", [
+      extraAssistant.id,
+      "ses1",
+      created,
+      completed,
+      JSON.stringify({
+        role: "assistant",
+        modelID: extraAssistant.modelID ?? "grok-4.6",
+        providerID: extraAssistant.providerID ?? "xai",
+        tokens: { input: extraAssistant.input ?? 20, output: extraAssistant.output ?? 4 },
+        time: { created, completed },
+      }),
+    ]);
+    if (extraAssistant.text) {
+      i += 1;
+      db.run("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", [
+        `part${i}`,
+        extraAssistant.id,
+        "ses1",
+        created,
+        completed,
+        JSON.stringify({ type: "text", text: extraAssistant.text }),
+      ]);
+    }
   }
   for (const extra of opts.extraParts ?? []) {
     i += 1;
@@ -317,13 +355,16 @@ describe("buildOpenCodeTraceRequest", () => {
       const spans = decodeSpans(body!);
       expect(spans[0]?.name).toBe("jumi review");
       expect(spans[0]?.attrs["openinference.span.kind"]).toBe("AGENT");
+      expect(spans[0]?.attrs["input.value"]).toBe("review this PR please");
+      expect(spans[0]?.attrs["input.mime_type"]).toBe("text/plain");
       expect(spans[0]?.attrs.job_id).toBe("42");
       expect(spans[0]?.attrs["session.id"]).toBe("42");
       const llm = spans.find((s) => s.attrs["openinference.span.kind"] === "LLM");
       expect(llm?.attrs["llm.model_name"]).toBe("grok-4.6");
       expect(llm?.attrs["llm.provider"]).toBe("xai");
       expect(llm?.attrs["llm.token_count.prompt"]).toBe(10);
-      expect(String(llm?.attrs["input.value"])).toContain("review this PR please");
+      expect(llm?.attrs["input.value"]).toBeUndefined();
+      expect(llm?.attrs["llm.input_messages"]).toBeUndefined();
       expect(llm?.attrs["output.value"]).toBe("looks fine after grep");
       const bash = spans.find((s) => s.name === "bash");
       expect(bash?.attrs["openinference.span.kind"]).toBe("TOOL");
@@ -419,6 +460,36 @@ describe("buildOpenCodeTraceRequest", () => {
       expect(spans[0]?.attrs.job_id).toBe("42");
       expect(spans[0]?.attrs["session.id"]).toBe("42");
       expect(String(bash?.attrs["output.value"] ?? "").length).toBeLessThan(2_000);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("puts the initial user prompt on AGENT once and omits LLM conversation reprints", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
+    const dbPath = join(dir, "opencode-session.db");
+    try {
+      writeTraceDb(dbPath, {
+        userText: "review this PR please",
+        assistantText: "first turn output",
+        extraAssistants: [{ id: "msg2", text: "second turn output", input: 40, output: 5 }],
+      });
+      const body = buildOpenCodeTraceRequest(dbPath, { kind: "review", owner: "personal", repo: "jumi" });
+      const spans = decodeSpans(body!);
+      const agent = spans.find((s) => s.attrs["openinference.span.kind"] === "AGENT");
+      const llms = spans.filter((s) => s.attrs["openinference.span.kind"] === "LLM");
+      expect(agent?.attrs["input.value"]).toBe("review this PR please");
+      expect(llms).toHaveLength(2);
+      expect(llms.map((s) => s.attrs["output.value"])).toEqual(["first turn output", "second turn output"]);
+      for (const llm of llms) {
+        expect(llm.attrs["input.value"]).toBeUndefined();
+        expect(llm.attrs["llm.input_messages"]).toBeUndefined();
+        expect(llm.attrs["llm.model_name"]).toBe("grok-4.6");
+        expect(llm.attrs["llm.provider"]).toBe("xai");
+        expect(String(llm.attrs["output.value"])).not.toContain("review this PR please");
+      }
+      const encoded = new TextDecoder().decode(body);
+      expect(encoded.split("review this PR please")).toHaveLength(2);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
