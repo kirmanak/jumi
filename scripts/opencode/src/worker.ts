@@ -6,6 +6,7 @@ import {
   followUpStatePath,
   isPidAlive,
   readClaim,
+  stuckStatePath,
 } from "./claim.ts";
 import { implementConflict } from "./conflict.ts";
 import { implementFollowUp } from "./followup.ts";
@@ -161,6 +162,7 @@ export async function handleIssueCancel(
   await deleteClaim(followUpStatePath(config.home, owner, repo, issueNumber));
   await deleteClaim(conflictStatePath(config.home, owner, repo, issueNumber));
   await deleteClaim(ciStatePath(config.home, owner, repo, issueNumber));
+  await deleteClaim(stuckStatePath(config.home, owner, repo, issueNumber));
   if (claim?.terminal) {
     await deleteClaim(claimPath);
     return { key, cancelled: true };

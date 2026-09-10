@@ -1,0 +1,213 @@
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
+import { parseReviewOutput } from "./verdict.ts";
+
+export const SAME_ACTION_LIMIT = 4;
+export const SAME_ERROR_LIMIT = 3;
+export const STUCK_HISTORY_LIMIT = 32;
+
+export type StuckKind = "action" | "ci" | "error";
+export type StuckReason = "repeated-action" | "repeated-error" | "ping-pong";
+
+export interface StuckFingerprint {
+  kind: StuckKind;
+  hash: string;
+}
+
+export interface StuckState {
+  fingerprints: StuckFingerprint[];
+  updatedAt: string;
+}
+
+export { reviewStuckStatePath, stuckStatePath };
+
+export function stuckComment(reason: StuckReason): string {
+  if (reason === "repeated-action") return "stuck: repeated action";
+  if (reason === "repeated-error") return "stuck: repeated error";
+  return "stuck: ping-pong";
+}
+
+export function stuckMarker(owner: string, repo: string, index: number): string {
+  return `<!-- jumi-stuck:${owner}/${repo}#${index} -->`;
+}
+
+export function hashText(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+const BOILERPLATE = new Set(["", "(no trigger body)", "no review comments this round. address jumi_ci.md."]);
+
+export function normalizeFinding(text: string): string {
+  let value = text.replace(/\r\n/g, "\n");
+  value = value.replace(/<!--\s*jumi-(?:review|check|stuck|worker):[\s\S]*?-->/gi, " ");
+  value = value.replace(/^Reviewed commit:\s*`[0-9a-fA-F]+`\s*$/gim, "");
+  value = value.replace(/^(?:PR|Number|Head SHA|Head ref|Event|Sender|Comment id|Review id):.*$/gim, "");
+  value = value.replace(/^#{1,3}\s+(?:Comment|Inline|Review)\s+\d+\b.*$/gim, "");
+  value = value.replace(/^# Review feedback\s*$/gim, "");
+  value = value.replace(/^## (?:Trigger|Other comments|Failed CI)\s*$/gim, "");
+  value = value.replace(/\b[0-9a-f]{7,40}\b/gi, "");
+  value = value.replace(/\s+/g, " ").trim().toLowerCase();
+  return value;
+}
+
+export function fingerprintReviewArtifact(markdown: string | null | undefined): string | undefined {
+  if (!markdown?.trim()) return undefined;
+  const parsed = parseReviewOutput(markdown);
+  if (parsed.verdict.incomplete) return undefined;
+  if (parsed.verdict.state !== "failure") return undefined;
+  const normalized = normalizeFinding(parsed.comment);
+  if (!normalized) return undefined;
+  return hashText(normalized);
+}
+
+export function fingerprintFollowUpText(markdown: string | null | undefined): string | undefined {
+  if (!markdown?.trim()) return undefined;
+  const normalized = normalizeFinding(markdown);
+  if (!normalized || BOILERPLATE.has(normalized)) return undefined;
+  return hashText(normalized);
+}
+
+export function fingerprintCiChecks(checks: { name: string; logHash: string }[]): string | undefined {
+  const parts = checks
+    .map((check) => `${check.name}:${check.logHash}`)
+    .filter((part) => !part.endsWith(":"))
+    .sort();
+  if (parts.length === 0) return undefined;
+  return hashText(parts.join("\n"));
+}
+
+export function fingerprintError(error: string | null | undefined): string | undefined {
+  const text = (error ?? "").trim();
+  if (!text) return undefined;
+  const lower = text.toLowerCase();
+  if (lower === "cancelled" || lower.includes("aborterror")) return undefined;
+  const normalized = normalizeFinding(text);
+  if (!normalized) return undefined;
+  return hashText(normalized);
+}
+
+function lastThreePingPong(fingerprints: readonly StuckFingerprint[]): boolean {
+  if (fingerprints.length < 3) return false;
+  const a = fingerprints[fingerprints.length - 3];
+  const b = fingerprints[fingerprints.length - 2];
+  const c = fingerprints[fingerprints.length - 1];
+  return a.hash === c.hash && a.hash !== b.hash;
+}
+
+function lastRepeat(fingerprints: readonly StuckFingerprint[], limit: number): boolean {
+  if (fingerprints.length < limit) return false;
+  const slice = fingerprints.slice(-limit);
+  return slice.every((fp) => fp.hash === slice[0].hash);
+}
+
+function detectKindStuck(
+  history: readonly StuckFingerprint[],
+  kind: StuckKind,
+  repeatLimit: number,
+  repeatReason: StuckReason
+): StuckReason | undefined {
+  const slice = history.filter((fp) => fp.kind === kind);
+  if (lastThreePingPong(slice)) return "ping-pong";
+  if (lastRepeat(slice, repeatLimit)) return repeatReason;
+  return undefined;
+}
+
+export function detectStuck(history: readonly StuckFingerprint[]): StuckReason | undefined {
+  const valid = history.filter((fp) => fp.hash);
+  return (
+    detectKindStuck(valid, "action", SAME_ACTION_LIMIT, "repeated-action") ??
+    detectKindStuck(valid, "ci", SAME_ACTION_LIMIT, "repeated-action") ??
+    detectKindStuck(valid, "error", SAME_ERROR_LIMIT, "repeated-error")
+  );
+}
+
+export function evaluateStuck(
+  history: readonly StuckFingerprint[],
+  current?: StuckFingerprint
+): StuckReason | undefined {
+  const existing = detectStuck(history);
+  if (existing) return existing;
+  if (current) return detectStuck([...history, current]);
+  return undefined;
+}
+
+function emptyStuckState(): StuckState {
+  return { fingerprints: [], updatedAt: "" };
+}
+
+function parseStuckState(parsed: unknown): StuckState {
+  if (!parsed || typeof parsed !== "object") return emptyStuckState();
+  const rec = parsed as { fingerprints?: unknown; updatedAt?: unknown };
+  const fingerprints: StuckFingerprint[] = [];
+  if (Array.isArray(rec.fingerprints)) {
+    for (const entry of rec.fingerprints) {
+      if (!entry || typeof entry !== "object") continue;
+      const fp = entry as { kind?: unknown; hash?: unknown };
+      if ((fp.kind === "action" || fp.kind === "ci" || fp.kind === "error") && typeof fp.hash === "string" && fp.hash) {
+        fingerprints.push({ kind: fp.kind, hash: fp.hash });
+      }
+    }
+  }
+  return {
+    fingerprints,
+    updatedAt: typeof rec.updatedAt === "string" ? rec.updatedAt : "",
+  };
+}
+
+export async function readStuckState(path: string): Promise<StuckState> {
+  try {
+    return parseStuckState(JSON.parse(await readFile(path, "utf8")));
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return emptyStuckState();
+    return emptyStuckState();
+  }
+}
+
+export async function writeStuckState(path: string, state: StuckState): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+export async function appendStuckFingerprint(
+  path: string,
+  fingerprint: StuckFingerprint,
+  now = () => new Date()
+): Promise<void> {
+  const state = await readStuckState(path);
+  const fingerprints = [...state.fingerprints, fingerprint].slice(-STUCK_HISTORY_LIMIT);
+  await writeStuckState(path, { fingerprints, updatedAt: now().toISOString() });
+}
+
+export async function deleteStuckState(home: string, owner: string, repo: string, issueNumber: number): Promise<void> {
+  await deleteClaim(stuckStatePath(home, owner, repo, issueNumber));
+}
+
+export async function upsertStuckComment(
+  api: {
+    findStickyIssueComment(
+      owner: string,
+      repo: string,
+      index: number,
+      botUsername: string,
+      marker: string
+    ): Promise<{ id: number } | undefined>;
+    createIssueComment(owner: string, repo: string, index: number, body: string): Promise<unknown>;
+    updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<unknown>;
+  },
+  owner: string,
+  repo: string,
+  index: number,
+  botUsername: string,
+  reason: StuckReason
+): Promise<void> {
+  const marker = stuckMarker(owner, repo, index);
+  const text = `${marker}\n${stuckComment(reason)}`;
+  const existing = await api.findStickyIssueComment(owner, repo, index, botUsername, marker);
+  if (existing) {
+    await api.updateIssueComment(owner, repo, existing.id, text);
+    return;
+  }
+  await api.createIssueComment(owner, repo, index, text);
+}

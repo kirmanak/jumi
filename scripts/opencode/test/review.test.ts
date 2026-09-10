@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
 import { applyContractEnvGate, publishReviewResult, reviewPullRequest } from "../src/review.ts";
+import { fingerprintReviewArtifact, readStuckState, writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -116,6 +118,75 @@ describe("reviewPullRequest", () => {
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "PR title disables review" });
+  });
+
+  test("stuck repeated finding skips OpenCode without failing jumi/opencode-review", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-review-stuck-"));
+    try {
+      const hash = fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!;
+      await writeStuckState(reviewStuckStatePath(home, "kirmanak", "demo", 7), {
+        fingerprints: [
+          { kind: "action", hash },
+          { kind: "action", hash },
+          { kind: "action", hash },
+          { kind: "action", hash },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const statuses: Array<{ state: string; context?: string }> = [];
+      const comments: string[] = [];
+      let openCode = 0;
+      const result = await reviewPullRequest({
+        ...skipOptions,
+        home,
+        api: makeApi({
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: 1, body });
+          },
+        }),
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "skipped", reason: "stuck: repeated action" });
+      expect(openCode).toBe(0);
+      expect(statuses.some((status) => status.state === "failure")).toBe(false);
+      expect(comments.at(-1)).toContain("stuck: repeated action");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("records a review finding fingerprint after a failure artifact", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-review-fp-"));
+    try {
+      await withWorkspace(async (workspace) => {
+        await reviewPullRequest({
+          ...reviewOptions(workspace),
+          home,
+          api: makeApi(),
+          openCodeRunner: async () => {
+            await writeReview(workspace, "please fix the tests\n<!-- jumi-check: failure -->");
+            return { status: "ok" };
+          },
+        });
+        const state = await readStuckState(reviewStuckStatePath(home, "kirmanak", "demo", 7));
+        expect(state.fingerprints).toEqual([
+          {
+            kind: "action",
+            hash: fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!,
+          },
+        ]);
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   test("posts the sticky from JUMI_REVIEW.md, not OpenCode stdout", async () => {

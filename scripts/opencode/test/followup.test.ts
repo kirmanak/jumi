@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCiState } from "../src/ci.ts";
-import { ciStatePath, claimFilePath, conflictStatePath, followUpStatePath, readClaim } from "../src/claim.ts";
+import {
+  ciStatePath,
+  claimFilePath,
+  conflictStatePath,
+  followUpStatePath,
+  readClaim,
+  stuckStatePath,
+} from "../src/claim.ts";
 import { CONFLICT_PROMPT, readConflictState, writeConflictState } from "../src/conflict.ts";
 import {
   buildFeedbackMarkdown,
@@ -16,6 +23,7 @@ import {
   writeFollowUpState,
 } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { fingerprintFollowUpText, writeStuckState } from "../src/stuck.ts";
 import type { GiteaPullReview } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
@@ -678,6 +686,207 @@ describe("implementFollowUp", () => {
       expect(result).toEqual({ status: "skipped", reason: "stuck: too many follow-up rounds" });
       expect(openCode).toBe(0);
       expect(api.comments.at(-1)).toContain("stuck: too many follow-up rounds");
+    });
+  });
+
+  test("same finding 4× → stuck sticky, no OpenCode, assignment stays", async () => {
+    await withDirs(async (home, workdir) => {
+      const hash = fingerprintFollowUpText("please fix the tests")!;
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "action", hash },
+          { kind: "action", hash },
+          { kind: "action", hash },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "stuck: repeated action" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: repeated action");
+      expect(await api.getIssue("kirmanak", "demo", 12)).toEqual(makeIssue());
+    });
+  });
+
+  test("review then CI then same review is not ping-pong", async () => {
+    await withDirs(async (home, workdir) => {
+      const a = fingerprintFollowUpText("please fix the tests")!;
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "action", hash: a },
+          { kind: "ci", hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
+    });
+  });
+
+  test("A→B→A ping-pong → stuck sticky, no OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const a = fingerprintFollowUpText("please fix the tests")!;
+      const b = fingerprintFollowUpText("please rename the helper")!;
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "action", hash: a },
+          { kind: "action", hash: b },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "stuck: ping-pong" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: ping-pong");
+    });
+  });
+
+  test("same error 3× → stuck sticky, no OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "error", hash },
+          { kind: "error", hash },
+          { kind: "error", hash },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "stuck: repeated error" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: repeated error");
+    });
+  });
+
+  test("empty feedback does not count as a repeating finding", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "action", hash: "aaa" },
+          { kind: "action", hash: "aaa" },
+          { kind: "action", hash: "aaa" },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api: makeApi({
+          listIssueComments: async () => [],
+          listPullReviews: async () => [],
+          listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+          listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+          getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+        }),
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "gitea" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
     });
   });
 

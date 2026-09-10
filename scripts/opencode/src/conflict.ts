@@ -10,6 +10,7 @@ import {
   deleteClaim,
   isPidAlive,
   readClaim,
+  stuckStatePath,
   writeClaim,
 } from "./claim.ts";
 import { resolveEngine, throwIfEngineFailed } from "./engine.ts";
@@ -23,6 +24,7 @@ import {
   type ImplementOptions,
   type OpenCodeRunner,
 } from "./implement.ts";
+import { appendStuckFingerprint, evaluateStuck, fingerprintError, readStuckState, stuckComment } from "./stuck.ts";
 import type { GiteaPR, IssueJob } from "./types.ts";
 import {
   type GitRunner,
@@ -576,6 +578,13 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     await forgetClaim();
     return { status: "stuck" };
   }
+  const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
+  const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints);
+  if (stuckReason) {
+    await sticky(stuckComment(stuckReason), pr.number);
+    await forgetClaim();
+    return { status: "stuck" };
+  }
 
   const configArgs = gitConfigArgs();
   const env = gitEnv({ giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken });
@@ -826,6 +835,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       return { status: "cancelled" };
     }
     await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(() => undefined);
+    const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+    if (errorHash) {
+      await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
+    }
     if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
       await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);
     }

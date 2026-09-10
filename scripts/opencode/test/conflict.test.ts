@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, conflictStatePath, readClaim, writeClaim } from "../src/claim.ts";
+import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
 import { CONFLICT_PROMPT, CONFLICT_TIMEOUT_MS, implementConflict, writeConflictState } from "../src/conflict.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -676,6 +677,44 @@ describe("implementConflict", () => {
       expect(result).toEqual({ status: "stuck" });
       expect(openCode).toBe(0);
       expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts");
+    });
+  });
+
+  test("same error 3× → stuck sticky, no OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "error", hash },
+          { kind: "error", hash },
+          { kind: "error", hash },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "stuck" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: repeated error");
     });
   });
 

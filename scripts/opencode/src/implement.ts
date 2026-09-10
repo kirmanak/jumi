@@ -11,6 +11,7 @@ import {
   followUpStatePath,
   isPidAlive,
   readClaim,
+  stuckStatePath,
   writeClaim,
 } from "./claim.ts";
 import type { ConflictResult } from "./conflict.ts";
@@ -26,6 +27,14 @@ import {
   upsertWorkerComment,
 } from "./gitea_issues.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
+import {
+  appendStuckFingerprint,
+  deleteStuckState,
+  evaluateStuck,
+  fingerprintError,
+  readStuckState,
+  stuckComment,
+} from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import {
   type GitRunner,
@@ -225,6 +234,14 @@ export async function implementIssue(
   } catch (err) {
     await forgetClaim();
     return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
+  const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints);
+  if (stuckReason) {
+    await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, stuckComment(stuckReason));
+    await forgetClaim();
+    return { status: "skipped", reason: stuckComment(stuckReason) };
   }
 
   const configArgs = gitConfigArgs();
@@ -463,6 +480,10 @@ export async function implementIssue(
       opts.botUsername,
       `Jumi failed: ${err instanceof Error ? err.message : String(err)}`
     ).catch(() => undefined);
+    const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+    if (errorHash) {
+      await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
+    }
     await stopHeartbeat();
     await stampTerminalClaim().catch(() => undefined);
     await detachWorktree();
@@ -498,4 +519,5 @@ export async function cancelIssueWork(opts: {
   await deleteClaim(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
   await deleteClaim(conflictStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
   await deleteClaim(ciStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
+  await deleteStuckState(opts.home, opts.owner, opts.repo, opts.issueNumber);
 }

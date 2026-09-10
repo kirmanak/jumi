@@ -62,7 +62,7 @@ export function isJumiWorkerBody(body: string | null | undefined): boolean {
 
 export function isJumiInternalBody(body: string | null | undefined): boolean {
   const text = body ?? "";
-  return isJumiWorkerBody(text) || text.includes("<!-- jumi-check:");
+  return isJumiWorkerBody(text) || text.includes("<!-- jumi-check:") || text.includes("<!-- jumi-stuck:");
 }
 
 export function parseIssueCommentPayload(rawBody: Uint8Array): GiteaIssueCommentPayload {

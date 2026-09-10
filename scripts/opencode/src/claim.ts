@@ -31,6 +31,14 @@ export function ciStatePath(home: string, owner: string, repo: string, issueNumb
   return join(home, "worker", "jobs", owner, repo, `${issueNumber}.ci.json`);
 }
 
+export function stuckStatePath(home: string, owner: string, repo: string, issueNumber: number): string {
+  return join(home, "worker", "jobs", owner, repo, `${issueNumber}.stuck.json`);
+}
+
+export function reviewStuckStatePath(home: string, owner: string, repo: string, prNumber: number): string {
+  return join(home, "reviewer", "jobs", owner, repo, `${prNumber}.stuck.json`);
+}
+
 export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {

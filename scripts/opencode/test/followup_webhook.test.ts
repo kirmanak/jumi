@@ -193,6 +193,24 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
     expect(decision).toEqual({ type: "skip", reason: "empty comment body" });
   });
 
+  test("skips jumi-stuck bodies", () => {
+    expect(
+      shouldEnqueueIssueCommentFollowUp(
+        makeIssueCommentPayload({
+          comment: {
+            id: 3,
+            body: "<!-- jumi-stuck:kirmanak/demo#12 -->\nstuck: repeated action",
+            user: makeUser({ login: "alice" }),
+            created_at: "",
+            updated_at: "",
+          },
+        }),
+        policy,
+        "issue_comment"
+      )
+    ).toEqual({ type: "skip", reason: "jumi internal comment" });
+  });
+
   test("skips jumi-check and jumi-worker bodies", () => {
     expect(
       shouldEnqueueIssueCommentFollowUp(

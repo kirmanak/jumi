@@ -11,6 +11,7 @@ import {
   followUpStatePath,
   isPidAlive,
   readClaim,
+  stuckStatePath,
   writeClaim,
 } from "./claim.ts";
 import {
@@ -28,6 +29,15 @@ import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
+import {
+  appendStuckFingerprint,
+  evaluateStuck,
+  fingerprintCiChecks,
+  fingerprintError,
+  fingerprintFollowUpText,
+  readStuckState,
+  stuckComment,
+} from "./stuck.ts";
 import type { GiteaComment, GiteaPR, GiteaPullReview, GiteaPullReviewComment, IssueJob } from "./types.ts";
 import { parseCheckLine } from "./verdict.ts";
 import { gitConfigArgs, gitEnv, runGit, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
@@ -624,6 +634,29 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
   }
 
+  const feedbackPreview = buildFeedbackMarkdown({
+    pr,
+    trigger: opts.job.trigger,
+    triggerBody: triggerBodyFromItems(opts.job.trigger, pendingItems),
+    comments: pendingItems.comments,
+    inlines: pendingItems.inlines,
+    reviews: pendingItems.reviews,
+  });
+  const findingHash = hasFeedback ? fingerprintFollowUpText(feedbackPreview.markdown) : undefined;
+  const ciHash = hasFeedback ? undefined : fingerprintCiChecks(ci.unhandled);
+  const currentFingerprint = findingHash
+    ? { kind: "action" as const, hash: findingHash }
+    : ciHash
+      ? { kind: "ci" as const, hash: ciHash }
+      : undefined;
+  const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
+  const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints, currentFingerprint);
+  if (stuckReason) {
+    await sticky(stuckComment(stuckReason), pr.number);
+    await forgetClaim();
+    return { status: "skipped", reason: stuckComment(stuckReason) };
+  }
+
   const configArgs = gitConfigArgs();
   const env = gitEnv({ giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken });
   const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
@@ -703,6 +736,9 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       handledReviewFindings: uniqueReviewFindings(handledReviewFindings),
       updatedAt: now().toISOString(),
     });
+    if (currentFingerprint) {
+      await appendStuckFingerprint(stuckPath, currentFingerprint, now);
+    }
     await persistCi();
   };
 
@@ -998,6 +1034,10 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       return { status: "cancelled" };
     }
     await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(() => undefined);
+    const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+    if (errorHash) {
+      await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
+    }
     if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
       await writeConflictState(conflictPath, {
         prNumber: pr.number,

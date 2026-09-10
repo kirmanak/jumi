@@ -14,6 +14,16 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
+import {
+  appendStuckFingerprint,
+  evaluateStuck,
+  fingerprintError,
+  fingerprintReviewArtifact,
+  readStuckState,
+  reviewStuckStatePath,
+  stuckComment,
+  upsertStuckComment,
+} from "./stuck.ts";
 import type {
   GiteaComment,
   GiteaCommitStatusPayload,
@@ -454,6 +464,16 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   const initialSkipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, reviewedHeadSha);
   if (initialSkipReason) return { status: "skipped", reason: initialSkipReason };
 
+  if (opts.home) {
+    const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
+    const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints);
+    if (stuckReason) {
+      await opts.persistResult?.({ kind: "skip", reason: stuckComment(stuckReason) });
+      await upsertStuckComment(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckReason);
+      return { status: "skipped", reason: stuckComment(stuckReason) };
+    }
+  }
+
   await postReviewStatus(
     opts.api,
     opts.owner,
@@ -639,6 +659,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
       const markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
       await persistOutcome({ kind: "markdown", markdown });
+      if (opts.home) {
+        const actionHash = fingerprintReviewArtifact(markdown);
+        if (actionHash) {
+          await appendStuckFingerprint(reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber), {
+            kind: "action",
+            hash: actionHash,
+          });
+        }
+      }
       return await publishReviewResult({
         api: opts.api,
         owner: opts.owner,
@@ -657,6 +686,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     if (!persisted && !persistFailed) {
       const message = `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`;
       await opts.persistResult?.({ kind: "error", error: message });
+      if (opts.home) {
+        const errorHash = fingerprintError(message);
+        if (errorHash) {
+          await appendStuckFingerprint(reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber), {
+            kind: "error",
+            hash: errorHash,
+          }).catch(() => undefined);
+        }
+      }
       await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, "failure", message, pr.html_url);
     }
     throw err;
