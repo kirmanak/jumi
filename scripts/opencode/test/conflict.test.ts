@@ -105,6 +105,18 @@ function notAncestorGit(extra: GitRunner = async () => ""): GitRunner {
   };
 }
 
+function conflictThenResolvedGit(extra: GitRunner = async () => ""): GitRunner {
+  let openCodeRan = false;
+  return notAncestorGit(async (args, opts) => {
+    const gitArgs = stripGitConfigArgs(args);
+    if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+    if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+    if (gitArgs[0] === "grep") return openCodeRan ? "" : "src/demo.ts";
+    if (gitArgs[0] === "add" && gitArgs.includes("-A")) openCodeRan = true;
+    return extra(args, opts);
+  });
+}
+
 describe("implementConflict", () => {
   test("skips when no open jumi closing PR", async () => {
     await withDirs(async (home, workdir) => {
@@ -209,7 +221,7 @@ describe("implementConflict", () => {
     });
   });
 
-  test("clean merge → commit + push -u origin <ref>, no OpenCode, no createPullRequest", async () => {
+  test("clean merge → no commit, no push, no sticky, no OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
       const gitCalls: string[][] = [];
@@ -217,6 +229,7 @@ describe("implementConflict", () => {
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("MERGE_HEAD")) return "mergehead";
         return "";
       });
       const result = await implementConflict({
@@ -236,28 +249,17 @@ describe("implementConflict", () => {
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({
-        status: "pushed",
-        prNumber: 127,
-        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
-      });
+      expect(result).toEqual({ status: "up-to-date" });
       expect(openCode).toBe(0);
       expect(api.pulls).toHaveLength(0);
-      expect(gitCalls.find((args) => args[0] === "push")).toEqual([
-        "push",
-        "-u",
-        "origin",
-        "jumi/issue-12-fix-the-thing",
-      ]);
-      expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
+      expect(api.comments).toEqual([]);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       expect(
         gitCalls.some((args) => args[0] === "merge" && args.includes("--no-ff") && args.includes("origin/main"))
       ).toBe(true);
-      expect(
-        gitCalls.some((args) => args[0] === "commit" && args.includes("Merge main into jumi/issue-12-fix-the-thing"))
-      ).toBe(true);
-      expect(api.comments.at(-1)).toContain("Pushed merge of main.");
-      expect(api.commentIndexes.at(-1)).toBe(127);
+      expect(gitCalls.some((args) => args[0] === "merge" && args.includes("--abort"))).toBe(true);
+      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
     });
   });
 
@@ -291,7 +293,7 @@ describe("implementConflict", () => {
         },
         logger: () => undefined,
       });
-      expect(result.status).toBe("pushed");
+      expect(result.status).toBe("up-to-date");
       expect(mergeEnv?.GIT_CONFIG_GLOBAL).toBe("/dev/null");
       expect(mergeEnv?.GIT_CONFIG_NOSYSTEM).toBe("1");
       expect(mergeEnv?.GIT_COMMITTER_NAME).toBe("jumi");
@@ -718,17 +720,12 @@ describe("implementConflict", () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
       const gitCalls: string[][] = [];
-      const gitRunner: GitRunner = async (args) => {
+      const gitRunner: GitRunner = conflictThenResolvedGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         gitCalls.push(gitArgs);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
-          throw new Error("git merge-base --is-ancestor failed with exit code 1");
-        }
-        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
-        if (gitArgs[0] === "rev-parse") return "headsha";
         if (gitArgs[0] === "push") throw new Error("non-fast-forward");
         return "";
-      };
+      });
       const result = await implementConflict({
         api,
         job: conflictJob(),
@@ -740,9 +737,7 @@ describe("implementConflict", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => {
-          throw new Error("opencode should not run");
-        },
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "skipped", reason: "remote already contains default" });
@@ -761,7 +756,7 @@ describe("implementConflict", () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
       const abort = new AbortController();
-      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+      const gitRunner: GitRunner = conflictThenResolvedGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "push") abort.abort();
         return "";
@@ -778,9 +773,7 @@ describe("implementConflict", () => {
         heartbeatIntervalMs: 0,
         abortSignal: abort.signal,
         gitRunner,
-        openCodeRunner: async () => {
-          throw new Error("opencode should not run");
-        },
+        openCodeRunner: async () => ({ status: "ok" }),
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "cancelled" });
@@ -805,7 +798,7 @@ describe("implementConflict", () => {
         const api = makeApi();
         const gitRunner: GitRunner =
           kind === "push"
-            ? notAncestorGit(async (args) => {
+            ? conflictThenResolvedGit(async (args) => {
                 const gitArgs = stripGitConfigArgs(args);
                 if (gitArgs[0] === "push") throw new Error("non-fast-forward");
                 if (gitArgs[0] === "merge-base") throw new Error("not ancestor");
@@ -829,9 +822,7 @@ describe("implementConflict", () => {
             workdir,
             heartbeatIntervalMs: 0,
             gitRunner,
-            openCodeRunner: async () => {
-              throw new Error("opencode should not run");
-            },
+            openCodeRunner: async () => ({ status: "ok" }),
             logger: () => undefined,
           })
         ).rejects.toThrow();
@@ -950,7 +941,7 @@ describe("implementConflict", () => {
         },
         logger: () => undefined,
       });
-      expect(result.status).toBe("pushed");
+      expect(result.status).toBe("up-to-date");
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
     });
   });

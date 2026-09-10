@@ -93,6 +93,7 @@ export interface MergeDefaultIntoWorktreeOpts {
   onPid?: (pid: number) => void | Promise<void>;
   ciMarkdown?: string;
   jobId?: string;
+  skipCleanMerge?: boolean;
 }
 
 function logDefault(message: string) {
@@ -423,6 +424,12 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
   if (leftoverLocks.length > 0) {
     return { status: "stuck", headSha, baseSha, openCodeRan: false, conflicted: true };
   }
+  if (opts.skipCleanMerge && remaining.length === 0 && !conflicted) {
+    if (await gitOk(git, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: worktree, env })) {
+      await git(["merge", "--abort"], { cwd: worktree, env }).catch(() => undefined);
+    }
+    return { status: "up-to-date", headSha, baseSha, openCodeRan: false, conflicted: false };
+  }
   if (remaining.length > 0) {
     throwIfAborted(opts.abortSignal);
     await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(opts.job));
@@ -719,6 +726,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       worktree,
       defaultBranch: opts.job.defaultBranch,
       headRef: branch,
+      skipCleanMerge: true,
       job: taskJob,
       pr,
       model: opts.model,
