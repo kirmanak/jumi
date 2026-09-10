@@ -24,6 +24,7 @@ const PROTECTED_ATTRS = new Set([
   "repo",
   "sha",
   "job_id",
+  "session.id",
   "agent_instance",
   "tool.name",
   "tool.status",
@@ -179,7 +180,10 @@ function filterAttrs(trace: TraceContext | undefined, agent: string): Record<str
   attrs.owner = trace.owner;
   attrs.repo = trace.repo;
   if (trace.sha) attrs.sha = trace.sha;
-  if (trace.jobId) attrs.job_id = trace.jobId;
+  if (trace.jobId) {
+    attrs.job_id = trace.jobId;
+    attrs["session.id"] = trace.jobId;
+  }
   return attrs;
 }
 

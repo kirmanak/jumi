@@ -312,10 +312,13 @@ describe("buildOpenCodeTraceRequest", () => {
       expect(resource.repo).toBe("jumi");
       expect(resource.sha).toBe("abc123");
       expect(resource.job_id).toBe("42");
+      expect(resource["session.id"]).toBe("42");
       expect(resource.agent_instance).toBe("jumi");
       const spans = decodeSpans(body!);
       expect(spans[0]?.name).toBe("jumi review");
       expect(spans[0]?.attrs["openinference.span.kind"]).toBe("AGENT");
+      expect(spans[0]?.attrs.job_id).toBe("42");
+      expect(spans[0]?.attrs["session.id"]).toBe("42");
       const llm = spans.find((s) => s.attrs["openinference.span.kind"] === "LLM");
       expect(llm?.attrs["llm.model_name"]).toBe("grok-4.6");
       expect(llm?.attrs["llm.provider"]).toBe("xai");
@@ -353,6 +356,8 @@ describe("buildOpenCodeTraceRequest", () => {
       const bash = decodeSpans(body!).find((s) => s.name === "bash");
       const params = JSON.parse(String(bash?.attrs["tool.parameters"])) as { command: string };
       expect(params.command.length).toBe(400);
+      expect(bash?.attrs.job_id).toBeUndefined();
+      expect(bash?.attrs["session.id"]).toBeUndefined();
 
       const sessionOnly = join(dir, "session-only.db");
       const db = new Database(sessionOnly);
@@ -412,6 +417,7 @@ describe("buildOpenCodeTraceRequest", () => {
       expect(read?.attrs["tool.name"]).toBe("read");
       expect(llm?.attrs["llm.token_count.prompt"]).toBe(10);
       expect(spans[0]?.attrs.job_id).toBe("42");
+      expect(spans[0]?.attrs["session.id"]).toBe("42");
       expect(String(bash?.attrs["output.value"] ?? "").length).toBeLessThan(2_000);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -477,6 +483,8 @@ describe("exportOpenCodeTrace", () => {
       const resource = decodeResourceAttrs(posts[0].body);
       expect(resource["openinference.project.name"]).toBe("jumi-worker");
       expect(resource.kind).toBe("follow-up");
+      expect(resource.job_id).toBe("9");
+      expect(resource["session.id"]).toBe("9");
       expect(traceExportErrors()).toBe(0);
 
       setTraceFetchForTests(async () => new Response("no", { status: 503 }));
