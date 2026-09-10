@@ -22,7 +22,7 @@ interface OpenCodeReviewConfig {
     edit: "allow" | "ask" | "deny";
     write: "allow" | "ask" | "deny";
     task: "allow" | "ask" | "deny";
-    external_directory: "allow" | "ask" | "deny";
+    external_directory: "allow" | "ask" | "deny" | { [pattern: string]: "allow" | "ask" | "deny" };
     lsp: "allow" | "ask" | "deny";
     skill: "allow" | "ask" | "deny" | { [pattern: string]: "allow" | "ask" | "deny" };
     question: "allow" | "ask" | "deny";
@@ -72,8 +72,23 @@ describe("opencode review config", () => {
     expect(config.permission.task).toBe("deny");
     expect(config.permission.question).toBe("deny");
     expect(config.permission.doom_loop).toBe("deny");
-    expect(config.permission.external_directory).toBe("deny");
     expect(config.skills?.paths).toEqual(["/app/review-skills"]);
+  });
+
+  test("allows Read of baked review-skills after star deny (last-match)", () => {
+    const rules = config.permission.external_directory;
+    expect(rules).toEqual({ "*": "deny", "/app/review-skills/**": "allow" });
+    if (typeof rules === "string") throw new Error("expected last-match object, not scalar deny");
+    expect(Object.keys(rules)).toEqual(["*", "/app/review-skills/**"]);
+
+    expect(bashPermission(rules, "/app/review-skills/gitops-apply-review/*")).toBe("allow");
+    expect(bashPermission(rules, "/app/review-skills/gitops-apply-review/references/*")).toBe("allow");
+    expect(bashPermission(rules, "/app/review-skills/*")).toBe("allow");
+    expect(bashPermission(rules, "/app/*")).toBe("deny");
+    expect(bashPermission(rules, "/app/.gitea/*")).toBe("deny");
+    expect(bashPermission(rules, "/app/scripts/*")).toBe("deny");
+    expect(bashPermission(rules, "/etc/*")).toBe("deny");
+    expect(bashPermission(rules, "/data/*")).toBe("deny");
   });
 
   test("defaults bash to allow, including pipes, quotes, and previously sealed searches", () => {

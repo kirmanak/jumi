@@ -7,7 +7,7 @@ description: Use when the diff touches Helm, Kubernetes, k3s/, Chart.yaml, or va
 
 House eyes for Helm/K8s/`k3s/` diffs. Catch "Jumi green, first apply explodes" from the **diff**, not from live cluster state.
 
-Load this skill via the skill tool. Do not Read `/app/review-skills` yourself.
+Load this skill via the skill tool.
 
 ## Tools in this image
 
