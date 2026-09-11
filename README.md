@@ -1,24 +1,114 @@
 # jumi
 
-Self-hosted Gitea PR review automation. Owner scope is `GITEA_ALLOWED_ORGS` (`*` = every owner on the instance).
+Deterministic control plane for Gitea: one Postgres job ledger, implement then review, capped iterate graph. OpenCode is the inner CLI plugin — the parent writes task files, the child has no forge token, the parent commits, pushes, and publishes.
 
-## Reviewer Service
+A stranger cloning this repo should set **their** Gitea origin, owner allowlist, org hook, Postgres URL, and OpenCode auth. Do not copy another cluster’s hostnames or owner names. Compiled env defaults in this tree (`GITEA_ALLOWED_ORGS`, `OPENCODE_WELLKNOWN_URL`) exist so this cluster’s GitOps can keep pinning them; override them for any other deploy.
 
-`jumi-reviewer` is a long-running webhook service. Gitea sends pull request webhooks to the service, the service verifies the webhook, runs OpenCode with persisted ChatGPT/OpenAI auth, posts a commit status on the PR head SHA, and posts or updates one sticky PR review comment.
+Reference deploy is Kubernetes standing pods. GitOps lives outside this repository (`deploy/contract.md` is the runtime contract). There is no Compose file or Helm chart here.
 
-Flow:
+## Loop
+
+Pickup is assign-to-bot. There is no periodic issue scan.
 
 ```text
-Gitea org/user/system webhook
-  -> Traefik HTTPS ingress
-  -> jumi-reviewer /webhooks/gitea
-  -> signature/org validation
-  -> single-worker review queue
-  -> OpenCode review
-  -> commit status + sticky Gitea PR comment
+assign issue to bot
+  → ledger kind implement
+  → OpenCode reads JUMI_TASK.md, writes the tree + JUMI_PR.md
+  → parent commits, pushes jumi/issue-{n}-…, opens PR (Fixes #n)
+  → ledger kind review
+  → OpenCode writes JUMI_REVIEW.md (trailer is the merge gate)
+  → parent posts one sticky + jumi/opencode-review on the head SHA
+  → failure trailer / human comment / red CI
+      → ledger kind follow-up (capped re-implement on the same branch)
+  → default-branch push with git conflicts
+      → ledger kind conflict (capped, same branch)
 ```
 
-The service posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `JUMI_REVIEW.md` (`<!-- jumi-check: success -->` or `<!-- jumi-check: failure -->`), not from OpenCode stdout and not by grepping 🔴/🟡 in the prose. Stuck follow-up/review loops skip OpenCode and do not fail this check:
+Unassign is the kill switch. Caps: 3 review-comment follow-up rounds and 3 conflict rounds per issue (CI follow-up is a separate per-`{head SHA, failed check}` budget). Stuck loops (same finding 4×, same error 3×, A→B→A) skip OpenCode that round and do not fail the review check.
+
+## Control plane
+
+One `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `conflict`). Roles share it:
+
+| Role | Image / process | Job |
+|------|-----------------|-----|
+| `router` | reviewer image, `JUMI_ROLE=router` | Org-hook **HMAC mailbox**: verify signature, persist rows, reclaim expired leases, queue metrics. No OpenCode, no HOME, no auth seed. |
+| `engine` | reviewer image, `JUMI_ROLE=engine` | Lease `review` only, run OpenCode, persist `JUMI_REVIEW.md` before workspace teardown, publish sticky/status. |
+| `worker` | worker image (`bun run src/worker_server.ts`) | Lease `implement` / `follow-up` / `conflict`. Not `JUMI_ROLE=router`. |
+| `monolith` | reviewer image, default `JUMI_ROLE` | In-process review queue so existing images stay live until GitOps flips. Ignores `DATABASE_URL`. |
+
+Router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). Cheap 202 skips log the reason. After the engine publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned to the bot, persist inserts a `follow-up` row.
+
+`router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is not required for `engine`; required on `router` / `monolith` / worker. GitOps must set `DATABASE_URL` on the worker; process start stays fail-closed if unset (first-run assign then uses the in-memory queue — do not 202 those jobs into RAM).
+
+The org hook hits the **router** mailbox. Worker pods do not need a public webhook path. Worker HTTP (`POST /webhooks/gitea`) still exists for local/dev and healthz/metrics.
+
+### Inner CLI (plugin)
+
+OpenCode is Engine impl #0: run to completion in a workspace. Stdout is logs, not the deliverable. The parent writes `JUMI_TASK.md` / `JUMI_FEEDBACK.md` / `JUMI_CI.md` / `JUMI_CONFLICT.md` and reads `JUMI_PR.md` / `JUMI_REVIEW.md`. The child is started with a sanitized env and does **not** receive `GITEA_BOT_TOKEN` or webhook secrets.
+
+## Point Gitea + Postgres + OpenCode at it
+
+1. Run standing pods: router (ingress), engine (review), worker (implement). Same images this repo builds; pin tags from your registry.
+2. Postgres: set `DATABASE_URL` on router, engine, and worker.
+3. Forge: set `GITEA_URL` to **your** Gitea origin, `GITEA_BOT_TOKEN` for a bot that can read PRs and post comments, `GITEA_ALLOWED_ORGS` to **your** owners (`*` = every owner on that instance). Optional `GITEA_ALLOWED_REPOS` as `owner/repo`.
+4. OpenCode auth: mount a volume at `/data` and seed `{HOME}/.local/share/opencode/auth.json` (see [OpenCode Auth](#opencode-auth)). Engine and worker need this; router does not.
+5. Org hook: POST JSON to `https://<your-ingress>/webhooks/gitea` with secret = `GITEA_WEBHOOK_SECRET`. Enable **both** Issues and Issue Assign (Gitea 1.27 fires assign only on the latter), plus pull request, comments, push, and workflow_job. See [Webhook Setup](#webhook-setup).
+
+Do not point the hook at a worker pod. Do not put a public Phoenix hostname in `PHOENIX_OTLP_ENDPOINT`.
+
+## Configuration
+
+Required:
+
+| Name | Who | Description |
+|------|-----|-------------|
+| `GITEA_URL` | all | Trusted Gitea base URL (your origin, not another cluster’s) |
+| `GITEA_BOT_TOKEN` | all | Bot token to fetch PR data and post comments |
+| `GITEA_WEBHOOK_SECRET` | `monolith` / `router` / worker | HMAC-SHA256 of the raw body (`X-Gitea-Signature`). Not required for `engine` |
+| `DATABASE_URL` | `router` / `engine` / worker | Postgres URL for the shared ledger |
+
+Optional (unset keeps the compiled default; set your own owners and well-known origin):
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `HOST` | `0.0.0.0` | HTTP bind host |
+| `PORT` | `3000` | HTTP bind port |
+| `GITEA_WEBHOOK_AUTH_TOKEN` | unset | Optional exact or bearer `Authorization` header value |
+| `GITEA_ALLOWED_ORGS` | `kirmanak` | Comma-separated allowed owners. Include `*` to accept every repository owner. Set this; do not inherit another cluster’s org name |
+| `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
+| `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment and for assign pickup |
+| `FOLLOWUP_IGNORE_LOGINS` | unset | Optional comma-separated logins skipped for follow-up in addition to `BOT_USERNAME` |
+| `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
+| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`; only `gitops-apply-review` is allowed (`skills.paths`); other skills denied; external_directory is last-match star deny then allow `/app/review-skills`; task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
+| `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. Override to **your** well-known host. The service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy |
+| `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
+| `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
+| `HOME` | `/data` in the image | OpenCode auth storage root |
+| `WORKDIR` | `/work` in the image | Temporary workspace root |
+| `QUEUE_CONCURRENCY` | `1` | Review worker concurrency |
+| `MAX_FILES` | `100` | Max changed files sent to OpenCode |
+| `MAX_PATCH_BYTES` | `500000` | Max patch bytes sent to OpenCode |
+| `MAX_OUTPUT_BYTES` | `80000` | Max OpenCode stdout bytes and max `JUMI_REVIEW.md` bytes; oversized artifacts fail closed without a sticky |
+| `MAX_WEBHOOK_BYTES` | `1048576` | Max accepted webhook payload bytes |
+| `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout (worker first-run default is 4h) |
+| `FOLLOWUP_TIMEOUT_MS` | `3600000` | Follow-up OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
+| `CONFLICT_TIMEOUT_MS` | `3600000` | Conflict OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
+| `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per issue |
+| `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
+| `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics`. Phoenix project name for OpenCode traces. Worker image sets `jumi-worker` |
+| `PHOENIX_OTLP_ENDPOINT` | unset | In-cluster Phoenix OTLP HTTP base URL (app port, `/v1/traces`). Unset skips export. Use an in-cluster URL, not a public hostname |
+| `JUMI_ROLE` | `monolith` | `monolith`, `router`, or `engine`. Unset is `monolith`. Worker is a separate image, not this flag |
+| `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
+| `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine or implementing worker aborts OpenCode and requeues the same job without consuming an attempt. Crash/OOM still uses reclaim |
+
+`deploy/contract.md` lists the same keys for GitOps.
+
+## Review
+
+The engine does not checkout or execute PR-head code as the review source of truth. It reviews forge PR metadata and file patches from the trusted Gitea API (workspace is for the artifact only).
+
+It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `JUMI_REVIEW.md` (`<!-- jumi-check: success -->` or `<!-- jumi-check: failure -->`), not from OpenCode stdout and not by grepping 🔴/🟡 in the prose:
 
 - `pending` while the review is running
 - `success` / `failure` from that trailer (❓ may still be `success`)
@@ -27,127 +117,85 @@ The service posts `jumi/opencode-review` on the PR head SHA from an explicit tra
 
 The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure. Title-gated skips (`WIP:`, `[skip review]`) still post no status.
 
-The service intentionally does not checkout or execute PR-head code. It reviews Gitea's PR metadata and file patches from the trusted Gitea API.
+## Worker jobs
 
-`JUMI_ROLE` (default `monolith`) keeps that in-process path so existing images stay live until GitOps flips. The same reviewer image can run `JUMI_ROLE=router` (org-hook mailbox: HMAC-verify, persist `review_jobs` in Postgres, reclaim expired leases, queue metrics; no OpenCode, no HOME, no auth seed) or `JUMI_ROLE=engine` (lease a row, run OpenCode, persist `JUMI_REVIEW.md` before workspace teardown, publish sticky/status). Both need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is required on `router` and `monolith` only. Reviewer and worker share one `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `conflict`). The router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). The reviewer engine leases `review` only. After it publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned `jumi`, persist inserts a `follow-up` row. Cheap 202 skips (unsupported event, not-in-scope, ignore-login, etc.) are logged with the reason. The worker is not `JUMI_ROLE=router`.
+Work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`). Pull-request issues (`issue.pull_request` present) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead.
 
-## Worker Service
+When `DATABASE_URL` is set, webhooks only enqueue (202) into the shared Postgres envelope and the worker leases with `FOR UPDATE SKIP LOCKED` (distinct owner per process; never the same row twice). First-run keeps that job row after the PR opens. Unassign cancels queued and leased worker rows; the running worker aborts when its lease is gone. The router does not kill processes. Without `DATABASE_URL`, a PID/heartbeat file under `{HOME}/worker/jobs/{owner}/{repo}/{number}.json` claims the issue (live only while that PID is alive **and** the heartbeat is newer than two minutes). With Postgres, the lease is the identity.
 
-`jumi-worker` is a sibling service in the same Bun package. The org hook hits the **reviewer router** mailbox; worker pods do not need a public webhook path. The router HMAC-verifies and writes the shared ledger. The worker only **leases** `implement` / `follow-up` / `conflict` and runs OpenCode. Worker HTTP (`POST /webhooks/gitea`) still exists for local/dev and healthz/metrics, but it is unused for correctness once GitOps points the org hook at the router. Work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`, default `jumi`). Pull-request issues (`issue.pull_request` present / non-null) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead. Org-hook checkboxes and GitOps IngressRoutes are not configured in this repo. When `DATABASE_URL` is set, webhooks only enqueue (202) into the shared Postgres envelope and the worker leases with `FOR UPDATE SKIP LOCKED` (distinct owner per process; never the same row twice). First-run keeps that job row after the PR opens. Either replica may lease; enqueue stays idempotent. Unassign is the kill switch via the ledger (queued and leased worker rows become cancelled); the running worker aborts when its lease is gone. The router does not kill processes. When `DATABASE_URL` is unset, today's in-memory queue and HOME JSON claims still handle first-run assign (fail closed for the Postgres graph: do not 202 those jobs into RAM).
+The parent clones a bare cache and worktree from the default branch, writes `JUMI_TASK.md`, and runs OpenCode with `.gitea/opencode-implement.json`. After OpenCode, the **parent** reads `JUMI_PR.md` when present, commits, pushes a `jumi/issue-{n}-{slug}` branch (never the default branch, never force-push), and opens a PR whose body always includes `Fixes #n`. If the tree is clean it comments `no changes` and clears the live claim without unassigning.
+
+Only a current-head `failure` trailer enqueues re-implement. Missing trailer / stub / `success` is not a finding. Do not treat the Jumi review commit status as a trailer substitute. Follow-up does not open a second PR. It checks out the existing `pr.head.ref`, merges `origin/<default>` into that branch, writes `JUMI_TASK.md` plus `JUMI_FEEDBACK.md`, and when the current head has a failed non-jumi check writes `JUMI_CI.md` (parent-injected log tail: last `##[error]` plus ~80 lines, 32–64 KiB, unpack noise dropped). The OpenCode child has git push creds only — no bot token, no `tea`, no Actions fetch. Timeout 60 minutes. Stickies go on the PR. Empty/missing/incomplete/stub artifacts do not count toward stuck. CI follow-up is one OpenCode per `{head SHA, failed check name}` unless the log hash changes. Known infra flakes (GitHub `140.82` checkout/cache timeout or unreachable, Helm remote-schema timeout/429, GARM `Invalid cross-device link` on dpkg, tofu S3 state lock) comment for a human and do not burn an OpenCode round. Unknown red → OpenCode. If the default-branch merge is stuck, follow-up does not run the feedback OpenCode that round.
+
+Conflict jobs stay on the existing branch: `git merge --no-ff origin/<default>` (never rebase, never force-push, never a second PR). A clean merge of default is a no-op. Git (unmerged paths / conflict markers after merging default into the PR head) is the gate, not Gitea `mergeable`. OpenCode runs only if those remain after the merge and Chart.lock regen (`helm dependency update`). Success comments `Pushed merge of {default}.`; unresolved markers comment `stuck: cannot resolve conflicts` without unassigning.
+
+If Jumi is assigned an issue that already has an open jumi closer, that first-run job collects existing human comments, live non-jumi commit statuses, and mergeable, and runs follow-up or conflict instead of skipping. A human-only closing PR still skips first-run and does not conflict-follow unless that PR itself is assigned to jumi. After the parent pushes, it GETs mergeable; `false` enqueues conflict on the same issue; omitted/`null` mergeable does not. Assigned foreign PRs (open, not draft/`WIP:`, not a fork; author and branch name do not matter) use the PR number as the job identity and never open a second PR or `jumi/issue-*` branch. Green tip is a no-op. A new head SHA cancels queued predecessor follow-up/conflict for that PR; if HEAD moved mid-job, skip that round. Never amend someone else's commit, force-push, rebase, or merge the PR.
+
+The worker image is built with `--target worker` and `CMD ["bun", "run", "src/worker_server.ts"]`. It copies a pinned Temurin 21 JDK (`JAVA_HOME=/opt/java/openjdk`). The sanitized OpenCode child gets `JAVA_HOME`, `JAVA_TOOL_OPTIONS=-Djava.io.tmpdir` on the workspace under `/work` (HotSpot ignores `TMPDIR`; pod `/tmp` is a 256Mi memory emptyDir), `GRADLE_USER_HOME` on `/work` (not the HOME PVC), and `GRADLE_OPTS` with the daemon disabled. The reviewer image has no JVM.
+
+## Webhook Setup
+
+Create a Gitea webhook that can reach the repos you want driven. For one org, use an organization webhook. For the whole instance, use a **system webhook** (Site Administration → Webhooks):
+
+| Setting | Value |
+|---------|-------|
+| Target URL | `https://<your-ingress>/webhooks/gitea` |
+| HTTP Method | `POST` |
+| POST Content Type | `application/json` |
+| Secret | Same value as `GITEA_WEBHOOK_SECRET` |
+| Trigger On | Pull request, Issues, Issue Assign, comments, push, workflow_job (see below) |
+| Active | Checked |
 
 Gitea 1.27 delivers assignment as a grouped issue event, not a GitHub-style top-level `assignee` field:
 
 - Headers: `X-Gitea-Event: issues` and `X-Gitea-Event-Type: issue_assign` (also `X-GitHub-Event` / `X-GitHub-Event-Type`).
-- Body: `IssuePayload` with `action`, `number`, `issue`, `repository`, `sender` (`modules/structs/hook.go`). `issue.assignee` / `issue.assignees` are `User` objects with `login` (and compat `username`).
-- Actions: `issues` → `opened`/`closed`/`reopened`/`edited`/`deleted`; `issue_assign` → `assigned`/`unassigned`.
+- Body: `IssuePayload` with `action`, `number`, `issue`, `repository`, `sender`. `issue.assignee` / `issue.assignees` are `User` objects with `login` (and compat `username`).
 - The org/system hook must enable **both** `Issues` and `Issue Assign` (separate Gitea checkboxes). `Issues` alone will not fire on assign.
 
-Webhook handling:
+Event map (router mailbox):
 
-- `X-Gitea-Event: issues` or `issue_assign` with action `assigned`, `opened`, or `reopened` (and assigned to the bot) → enqueue first-run implement
-- `unassigned` when the bot is no longer an assignee → cancel: mark queued and leased worker jobs for that issue cancelled; the holder's heartbeat fail-closes and aborts its child (do not `kill` an unrelated process); comment `stopped`; delete the claim, follow-up, and conflict state files
-- `unassigned` when the bot remains among multiple assignees → no cancel
-- `X-Gitea-Event: issue_comment` / `pull_request_comment` with action `created` on an open jumi closing PR or an assigned foreign PR (human sender, non-empty body, not a jumi sticky) → enqueue follow-up keyed by the closed issue or the PR number
-- `X-Gitea-Event: pull_request_rejected` on an open jumi closing PR or assigned foreign PR → enqueue follow-up
-- `X-Gitea-Event: push` on `refs/heads/<repository.default_branch>` → mechanical HTTP filter (list open managed jumi closers and assigned foreign PRs; no git, no OpenCode). Enqueue `mode: "conflict"` keyed by the issue or PR number. Tags, deletes, and non-default branches skip.
-- `X-Gitea-Event: workflow_job` → wake only (202 immediately; no git, no OpenCode). Malformed / not-ours → 202 skip, never 400. Do not use `status` (also fires for Jumi reviews). The job re-reads **live** commit statuses for `pr.head.sha`, ignores `jumi/opencode-review`, skips if any other context is `pending`, and on a non-jumi `failure` injects a capped log tail (`JUMI_CI.md`) then follow-up on the existing branch.
-- `X-Gitea-Event: pull_request` / `pull_request_assign` with action `assigned` (bot still assigned) → enqueue follow-up keyed by the PR number. `unassigned` when the bot is no longer an assignee → cancel that PR. Any other `pull_request` action → `202` skip, never 400 (reviewer still owns opened/synchronize).
-- `X-Gitea-Event: ping` → `200 {"ok":true}`
+- `issues` / `issue_assign` with `assigned` / `opened` / `reopened` (bot assigned) → enqueue first-run implement
+- `unassigned` when the bot is no longer an assignee → cancel queued and leased worker jobs; heartbeat fail-closes and aborts its child (do not `kill` an unrelated process); comment `stopped`; delete claim/follow-up/conflict state files. Bot still among multiple assignees → no cancel
+- `issue_comment` / `pull_request_comment` `created` on an open jumi closing PR or an assigned foreign PR (human sender, non-empty body, not a jumi sticky) → enqueue follow-up
+- `pull_request_rejected` on an open jumi closing PR or assigned foreign PR → enqueue follow-up
+- `push` on `refs/heads/<repository.default_branch>` → mechanical HTTP filter (list open managed jumi closers and assigned foreign PRs; no git, no OpenCode). Enqueue `mode: "conflict"`. Tags, deletes, and non-default branches skip
+- `workflow_job` → wake only (202 immediately). Malformed / not-ours → 202 skip, never 400. Do not use `status` (also fires for Jumi reviews). Re-reads **live** commit statuses for `pr.head.sha`, ignores `jumi/opencode-review`, skips if any other context is `pending`, and on a non-jumi `failure` injects `JUMI_CI.md` then follow-up
+- `pull_request` / `pull_request_assign` `assigned` (bot still assigned) → enqueue follow-up keyed by the PR number. `unassigned` when the bot is no longer an assignee → cancel that PR. Other `pull_request` actions: reviewer owns opened/synchronize; the rest `202` skip, never 400
+- `ping` → `200 {"ok":true}`
 - other events → `202` skip
 
-Skip follow-up when the sender is `jumi`, the comment was `edited`/`deleted`, the body is empty or contains `<!-- jumi-worker:` / `<!-- jumi-check:`, the PR is a fork/draft/`WIP:`, the closing issue is not assigned to the bot, or a foreign PR is not assigned to the bot.
+Skip follow-up when the sender is the bot, the comment was `edited`/`deleted`, the body is empty or contains `<!-- jumi-worker:` / `<!-- jumi-check:`, the PR is a fork/draft/`WIP:`, the closing issue is not assigned to the bot, or a foreign PR is not assigned to the bot.
 
-Without `DATABASE_URL`, on enqueue the parent claims the issue with a PID/heartbeat file under `{HOME}/worker/jobs/{owner}/{repo}/{number}.json`. A claim is live only while that PID is alive **and** the heartbeat is newer than two minutes. With `DATABASE_URL`, the Postgres lease is the identity (no JSON claim as source of truth; HOME claims are not the cross-replica lock). Heartbeat fail-closes if the row is no longer leased by that owner (cancelled, stolen, expired) so a cancelled job does not burn the rest of the implement timeout. The parent clones a bare cache and worktree from the default branch, writes `JUMI_TASK.md`, and runs `opencode run` with `.gitea/opencode-implement.json`. The OpenCode child is started with `sanitizeOpenCodeEnv: true` and does not receive `GITEA_BOT_TOKEN` or webhook secrets. After OpenCode, the **parent** reads `JUMI_PR.md` when present, commits, pushes a `jumi/issue-{n}-{slug}` branch (never the default branch, never force-push), and opens a PR whose body always includes `Fixes #n`. If the tree is clean it comments `no changes` and clears the live claim without unassigning. The first implement job row stays in the ledger after the PR opens.
+The service also exposes:
 
-Follow-up does not open a second PR. It checks out the existing `pr.head.ref`, merges `origin/<default>` into that branch, writes `JUMI_TASK.md` plus `JUMI_FEEDBACK.md`, and when the current head has a failed non-jumi check writes `JUMI_CI.md` (parent-injected log tail: last `##[error]` plus ~80 lines, 32–64 KiB, unpack noise dropped). The OpenCode child has git push creds only — no bot token, no `tea`, no Actions fetch. Runs OpenCode for 60 minutes, and pushes to that same branch (merge + review fixes can share one push). Stickies go on the PR (`Jumi is addressing review comments.` / `Jumi is addressing CI failure.` → `Pushed follow-up to {url}` / `no follow-up changes` / `stuck: too many follow-up rounds`). The parent also compares successive follow-up/review artifacts and job errors (no LLM critic): same finding 4×, same error 3×, or A→B→A ping-pong comments `stuck: …`, skips OpenCode that round, and leaves assignment in place. Empty/missing/incomplete/stub artifacts do not count. Existing max-round caps stay as the backstop. At most 3 review-comment follow-up rounds per issue. CI follow-up is one OpenCode per `{head SHA, failed check name}` unless the log hash changes; that budget is not shared with review-comment rounds. Known infra flakes (GitHub `140.82` checkout/cache timeout or unreachable, Helm remote-schema timeout/429, GARM `Invalid cross-device link` on dpkg, tofu S3 state lock) comment for a human and do not burn an OpenCode round. Unknown red → OpenCode. If the default-branch merge is stuck, follow-up does not run the feedback OpenCode that round.
+```text
+GET /healthz
+GET /metrics
+```
 
-Conflict jobs also stay on the existing branch: `git merge --no-ff origin/<default>` (never rebase, never force-push, never a second PR). A clean merge of default is a no-op (no commit, no push, no sticky, no OpenCode); already-up-to-date is the same. Git (unmerged paths / conflict markers after merging default into the PR head) is the gate, not Gitea `mergeable`. OpenCode runs only if those remain after the merge and Chart.lock regen (`helm dependency update`). Timeout is 60 minutes. At most 3 conflict rounds per issue. Success comments `Pushed merge of {default}.` on the PR; unresolved markers comment `stuck: cannot resolve conflicts` without unassigning.
+`GET /healthz` is `200 {"ok":true}`. `GET /metrics` is Prometheus text (`ai_tokens_total`, `ai_tokens`, `ai_sessions`, `jumi_review_jobs`) from **in-process** counters. After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums, then deletes the workspace. Totals reset on process restart; Grafana `increase()` handles that. This is not a durable OpenCode DB on `HOME`.
 
-There is no periodic assigned-issue scan. Pickup, follow-up, CI, and conflict are webhook + Postgres only. If Jumi is assigned an issue that already has an open jumi closer, that first-run job collects existing human comments, live non-jumi commit statuses, and mergeable, and runs follow-up or conflict instead of skipping. A human-only closing PR still skips first-run and does not conflict-follow unless that PR itself is assigned to jumi. After the parent pushes (first-run, follow-up, or conflict), it GETs mergeable; `false` enqueues conflict on the same issue; omitted/`null` mergeable does not. Assigned foreign PRs (open, not draft/`WIP:`, not a fork; author and branch name do not matter) use the PR number as the job identity and never open a second PR or `jumi/issue-*` branch. Green tip (no in-scope comments, no current-head failure trailer, no red non-jumi check, mergeable) is a no-op. Unhandled human review comments or a current-head Jumi reviewer sticky with `<!-- jumi-check: failure -->` enqueue follow-up (which prefixes the default-branch merge); else a red non-jumi Actions check on the current head with no other non-jumi context still `pending` enqueues the same CI follow-up via `workflow_job`; else `mergeable === false` enqueues a conflict job. Missing trailer / stub / `success` is not a finding. Do not grep 🔴. Do not treat the Jumi review commit status as a trailer substitute. An assigned foreign PR is the one jumi job in that repo (do not also first-run another assigned issue). Unassign remains the kill switch. Max follow-up rounds stay 3. A new head SHA cancels queued predecessor follow-up/conflict for that PR; if HEAD moved mid-job, skip that round. Never amend someone else's commit, force-push, rebase, or merge the PR.
-
-The worker image is separate from the reviewer: `gitea.kirmanak.stream/personal/jumi-worker` built with `--target worker` and `CMD ["bun", "run", "src/worker_server.ts"]`. `GET /healthz` is `200 {"ok":true}`. `GET /metrics` is the same unauthenticated Prometheus token exporter as the reviewer (`runOpenCode` already calls `recordOpenCodeDb`). The worker image sets `AGENT_INSTANCE=jumi-worker` so series do not collide with the reviewer. It copies a pinned Temurin 21 JDK (`JAVA_HOME=/opt/java/openjdk`). The sanitized OpenCode child gets `JAVA_HOME`, `JAVA_TOOL_OPTIONS=-Djava.io.tmpdir` on the workspace under `/work` (HotSpot ignores `TMPDIR`; pod `/tmp` is a 256Mi memory emptyDir), `GRADLE_USER_HOME` on `/work` (not the HOME PVC), and `GRADLE_OPTS` with the daemon disabled. The reviewer image has no JVM.
+When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs an OpenInference trace (OTLP HTTP protobuf) to in-cluster Phoenix: one `AGENT` root per job (`input.value` = this job's initial user prompt), `TOOL` children with full tool input, and `LLM` children with model/provider/token counts and this-turn `output.value` only (no conversation reprint, no `llm.input_messages`). Encoded body is capped at 4 MiB. Unset skips export. Timeout (15s), over-cap after shrinking, or an unreadable DB increments `ai_trace_exporter_errors` and does not fail the job. Phoenix **project** is `AGENT_INSTANCE`.
 
 ## Image
 
-The reviewer image workflow publishes:
-
-```text
-gitea.kirmanak.stream/personal/jumi-reviewer:<commit-sha>
-gitea.kirmanak.stream/personal/jumi-reviewer:latest
-gitea.kirmanak.stream/personal/jumi-reviewer:vX.Y.Z
-```
-
-The worker image workflow publishes:
-
-```text
-gitea.kirmanak.stream/personal/jumi-worker:<commit-sha>
-gitea.kirmanak.stream/personal/jumi-worker:latest
-gitea.kirmanak.stream/personal/jumi-worker:vX.Y.Z
-```
-
-Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA). GitOps pin/changelog wiring is a follow-up in `server_configuration`, not this repo.
+This repository’s image workflows publish `jumi-reviewer` and `jumi-worker` with tags `<commit-sha>`, `latest`, and `vX.Y.Z`. Point GitOps at the registry **you** push to. Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA).
 
 Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml` and `.gitea/workflows/jumi-worker-image.yml`:
 
 | Name | Description |
 |------|-------------|
-| `CONTAINER_REGISTRY_PASS` | Gitea token or password with package write access |
+| `CONTAINER_REGISTRY_PASS` | Token or password with package write access |
 
 Required repository variables:
 
 | Name | Description |
 |------|-------------|
-| `CONTAINER_REGISTRY_USER` | Gitea user that can push packages for `personal` |
+| `CONTAINER_REGISTRY_USER` | User that can push packages |
 
 Pull requests run the same lint/typecheck/test gate and build the image without publishing it.
 
-## Runtime Configuration
-
-Required environment variables:
-
-| Name | Description |
-|------|-------------|
-| `GITEA_URL` | Trusted Gitea base URL, e.g. `https://gitea.kirmanak.stream` |
-| `GITEA_BOT_TOKEN` | Bot token used by the service to fetch PR data and post comments |
-| `GITEA_WEBHOOK_SECRET` | Secret used to verify `X-Gitea-Signature`. Required for `monolith`/`router`; not required for `engine` |
-
-Optional environment variables:
-
-| Name | Default | Description |
-|------|---------|-------------|
-| `HOST` | `0.0.0.0` | HTTP bind host |
-| `PORT` | `3000` | HTTP bind port |
-| `GITEA_WEBHOOK_AUTH_TOKEN` | unset | Optional exact or bearer `Authorization` header value |
-| `GITEA_ALLOWED_ORGS` | `kirmanak` | Comma-separated allowed owners. Include `*` to accept every repository owner |
-| `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
-| `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment |
-| `FOLLOWUP_IGNORE_LOGINS` | unset | Optional comma-separated logins skipped for follow-up in addition to `BOT_USERNAME` (trim, drop empty tokens). Unset or empty keeps today's skip of the bot plus jumi-internal bodies |
-| `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
-| `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`; only `gitops-apply-review` is allowed (`skills.paths`); other skills denied; external_directory is last-match star deny then allow `/app/review-skills`; task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
-| `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. The service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy. |
-| `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
-| `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
-| `HOME` | `/data` in the image | OpenCode auth storage root |
-| `WORKDIR` | `/work` in the image | Temporary review workspace root |
-| `QUEUE_CONCURRENCY` | `1` | Review worker concurrency |
-| `MAX_FILES` | `100` | Max changed files sent to OpenCode |
-| `MAX_PATCH_BYTES` | `500000` | Max patch bytes sent to OpenCode |
-| `MAX_OUTPUT_BYTES` | `80000` | Max OpenCode stdout bytes and max `JUMI_REVIEW.md` bytes; oversized artifacts fail closed without a sticky |
-| `MAX_WEBHOOK_BYTES` | `1048576` | Max accepted webhook payload bytes |
-| `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout |
-| `FOLLOWUP_TIMEOUT_MS` | `3600000` | Follow-up OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
-| `CONFLICT_TIMEOUT_MS` | `3600000` | Conflict OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
-| `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per issue |
-| `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
-| `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics`. Phoenix project name for OpenCode traces |
-| `PHOENIX_OTLP_ENDPOINT` | unset | In-cluster Phoenix OTLP HTTP base URL (app port, `/v1/traces`). Unset skips export. Never `phoenix.kirmanak.stream` |
-| `JUMI_ROLE` | `monolith` | `monolith` (in-process queue, current behaviour), `router` (org-hook mailbox + PG enqueue/reclaim; no OpenCode), or `engine` (lease + OpenCode). Unset is `monolith`. |
-| `DATABASE_URL` | unset | Postgres URL. Required for `router`/`engine`; ignored by `monolith`. GitOps must set it on the worker; process start stays fail-closed if unset (first-run assign uses the in-memory queue). When set, implement/follow-up/conflict use the shared `review_jobs` ledger |
-| `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
-| `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine or implementing worker aborts OpenCode and requeues the same job without consuming an attempt. Crash/OOM still uses reclaim. |
-
-
-## Review diagnostics (Loki)
+## Review diagnostics
 
 During each review the service emits single-line structured logs prefixed with `[diag]`:
 
@@ -162,7 +210,7 @@ During each review the service emits single-line structured logs prefixed with `
 
 OpenCode session SQLite is forced to a temp path under the review workspace (`OPENCODE_DB=…/opencode-session.db`) so it does not accumulate on `HOME` across runs.
 
-These are intentionally process-level so a cgroup OOM still leaves a trail of samples before death. Grep Loki with `{namespace="jumi-reviewer"} |= "[diag]"`.
+These are intentionally process-level so a cgroup OOM still leaves a trail of samples before death. Grep logs for `[diag]`.
 
 ## OpenCode Auth
 
@@ -172,13 +220,13 @@ Mount a volume at `/data` and seed OpenCode auth at:
 /data/.local/share/opencode/auth.json
 ```
 
-Use an existing `opencode /connect` login from this machine or run `opencode /connect` with `HOME=/data` during setup. The service relies on the persisted OAuth refresh/access state, not provider API keys in env vars.
+Use an existing `opencode /connect` login or run `opencode /connect` with `HOME=/data` during setup. The service relies on the persisted OAuth refresh/access state, not provider API keys in env vars.
 
-On startup, Jumi also preserves the existing auth file and adds this entry when it is missing:
+On startup, Jumi preserves the existing auth file and adds a well-known entry when it is missing (key = `OPENCODE_WELLKNOWN_URL`):
 
 ```json
 {
-  "https://kirmanak.stream": {
+  "https://<your-well-known-origin>": {
     "type": "wellknown",
     "key": "OPENCODE_WELLKNOWN_TOKEN",
     "token": "unused"
@@ -186,36 +234,10 @@ On startup, Jumi also preserves the existing auth file and adds this entry when 
 }
 ```
 
-That makes OpenCode load shared defaults from `https://kirmanak.stream/.well-known/opencode` before this repository's local review policy, without requiring deployment-specific init-container wiring.
+That makes OpenCode load shared defaults from `<origin>/.well-known/opencode` before this repository's local review policy, without requiring deployment-specific init-container wiring.
 
 The service runs OpenCode with a sanitized environment. Gitea tokens and webhook secrets are not passed to the OpenCode child process.
 The container runtime process runs as non-root UID/GID `10001:10001`.
-
-## Webhook Setup
-
-Create a Gitea webhook that can reach the repos you want reviewed. For one org, use an organization webhook. For the whole instance, use a **system webhook** (Site Administration → Webhooks):
-
-| Setting | Value |
-|---------|-------|
-| Target URL | `https://<traefik-host>/webhooks/gitea` |
-| HTTP Method | `POST` |
-| POST Content Type | `application/json` |
-| Secret | Same value as `GITEA_WEBHOOK_SECRET` |
-| Trigger On | Pull request events |
-| Active | Checked |
-
-The router processes `opened`, `reopened`, and new-commit synchronization as reviews. Assign, unassign, comments, red CI (`workflow_job`), and default-branch `push` write worker ledger jobs (or cancel in-flight worker rows). PR description edits and other unknown events are acknowledged and skipped. Org-hook checkboxes are GitOps, not this repo.
-
-The service also exposes:
-
-```text
-GET /healthz
-GET /metrics
-```
-
-`GET /metrics` is Prometheus text (`ai_tokens_total`, `ai_tokens`, `ai_sessions`) from **in-process** counters. After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums, then deletes the workspace as today. Totals reset on process restart; Grafana `increase()` handles that. Optional `AGENT_INSTANCE` (default `jumi`) is the series label. This is not a durable OpenCode DB on `HOME`.
-
-When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs an OpenInference trace (OTLP HTTP protobuf) to in-cluster Phoenix: one `AGENT` root per job (`input.value` = this job's initial user prompt), `TOOL` children with full tool input (webfetch URL, file bodies / bash stdout), and `LLM` children with model/provider/token counts and this-turn `output.value` only (no conversation reprint, no `llm.input_messages`). Attributes include `openinference.span.kind`, `kind`, owner/repo, SHA, job id, OpenInference `session.id` (the same `job_id` string so Phoenix Sessions lists one session per job), and `agent_instance`. Encoded body is capped at 4 MiB (largest string attributes shrunk first, 64 KiB ceiling while shrinking). Not attached to the Gitea sticky. Unset skips export. Timeout (15s), the public Phoenix hostname, over-cap after shrinking, or an unreadable DB increments `ai_trace_exporter_errors` and does not fail the job. Phoenix **project** is `AGENT_INSTANCE` so reviewer (`jumi`) and worker (`jumi-worker`) do not mix.
 
 ## Security Model
 
@@ -231,7 +253,7 @@ The service rejects requests that fail any of these checks:
 | Scope | Repository owner must be in `GITEA_ALLOWED_ORGS`, or that list must include `*` |
 | Repo allowlist | `GITEA_ALLOWED_REPOS` is enforced when set |
 
-OpenCode permissions live in `.gitea/opencode-review.json`. Edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`. External directory access is last-match: star deny, then allow the baked `/app/review-skills` tree so Read can load the skill and its house-miss references. Every other external path stays denied. Tasks, questions, and LSP stay denied. Only `gitops-apply-review` is allowed; other skills denied so the reviewer can load that baked skill (Helm/K8s/`k3s/` first-apply pitfalls) from `/app/review-skills` via `skills.paths` in that JSON — not `OPENCODE_CONFIG_DIR`, which would npm-install into a config directory. Documentation lookup is allowed through OpenCode web fetch/search. Bash is **allow-by-default** (no command allowlist / no dump denylist). The image `entrypoint.sh` copies `GITEA_BOT_TOKEN` / webhook secrets to a 0600 tmpfs file, unsets them, and `exec`s bun so `/proc/<pid>/environ` is the cleaned execve image (`unsetenv` does **not** rewrite that file). `loadConfig` then reads the file and unlinks it; secrets stay in process memory only. The OpenCode child gets `XDG_CONFIG_HOME` under the ephemeral workspace so a review cannot persist a loosened `opencode.json` on the `/data` PVC. `/app` stays root-owned; only `/data` and `/work` are writable by uid 10001. xAI credentials stay in OpenCode `auth.json` on `/data` because the child needs them. Reviewer `reasoningEffort` is pinned `high` for grok-4.5, grok-4.6, and gpt-5.5. The image ships `git`, `ripgrep`, `jq`, `file`, `python3`, and pinned `helm` (no `kubectl`).
+OpenCode permissions live in `.gitea/opencode-review.json`. Edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`. External directory access is last-match: star deny, then allow the baked `/app/review-skills` tree so Read can load the skill and its house-miss references. Every other external path stays denied. Tasks, questions, and LSP stay denied. Only `gitops-apply-review` is allowed; other skills denied so the reviewer can load that baked skill (Helm/K8s/`k3s/` first-apply pitfalls) from `/app/review-skills` via `skills.paths` in that JSON — not `OPENCODE_CONFIG_DIR`, which would npm-install into a config directory. Documentation lookup is allowed through OpenCode web fetch/search. Bash is **allow-by-default** (no command allowlist / no dump denylist). The image `entrypoint.sh` copies `GITEA_BOT_TOKEN` / webhook secrets to a 0600 tmpfs file, unsets them, and `exec`s bun so `/proc/<pid>/environ` is the cleaned execve image (`unsetenv` does **not** rewrite that file). `loadConfig` then reads the file and unlinks it; secrets stay in process memory only. The OpenCode child gets `XDG_CONFIG_HOME` under the ephemeral workspace so a review cannot persist a loosened `opencode.json` on the `/data` PVC. `/app` stays root-owned; only `/data` and `/work` are writable by uid 10001. Provider credentials stay in OpenCode `auth.json` on `/data` because the child needs them. Reviewer `reasoningEffort` is pinned `high` for grok-4.5, grok-4.6, and gpt-5.5. The image ships `git`, `ripgrep`, `jq`, `file`, `python3`, and pinned `helm` (no `kubectl`).
 
 ## Local Development
 
@@ -246,9 +268,11 @@ bun run ci
 Run the service locally:
 
 ```bash
-GITEA_URL=https://gitea.kirmanak.stream \
+GITEA_URL=https://gitea.example \
 GITEA_BOT_TOKEN=... \
 GITEA_WEBHOOK_SECRET=... \
+GITEA_ALLOWED_ORGS=your-org \
+OPENCODE_WELLKNOWN_URL=https://opencode.example \
 OPENCODE_CONFIG=$PWD/../../.gitea/opencode-review.json \
 HOME=/path/to/persisted/opencode-home \
 WORKDIR=/tmp/jumi-reviewer \
@@ -273,7 +297,7 @@ review-skills/
   gitops-apply-review/       # Baked reviewer skill (copied to /app/review-skills)
 scripts/
   opencode/
-    src/                     # Bun/TypeScript reviewer and issue worker
+    src/                     # Bun/TypeScript control plane (router, engine, worker)
 Dockerfile
 renovate.json
 ```
