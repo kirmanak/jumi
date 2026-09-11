@@ -486,10 +486,34 @@ describe("shouldEnqueuePullRejectedFollowUp", () => {
   });
 });
 
+function assignedCloserPayload(overrides: Parameters<typeof makePR>[0] = {}): ReturnType<typeof makePayload> {
+  const repository = makeRepo();
+  return makePayload({
+    action: "assigned",
+    pull_request: makePR({
+      number: 127,
+      title: "Fix the thing",
+      body: "Fixes #12",
+      user: makeUser({ login: "jumi" }),
+      assignee: makeUser({ login: "jumi" }),
+      assignees: [makeUser({ login: "jumi" })],
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      head: {
+        label: "kirmanak:jumi/issue-12-fix-the-thing",
+        ref: "jumi/issue-12-fix-the-thing",
+        sha: "headsha",
+        repo: repository,
+        repo_id: repository.id,
+      },
+      ...overrides,
+    }),
+  });
+}
+
 describe("shouldEnqueuePullAssign", () => {
-  test("enqueues follow-up when the bot is assigned", () => {
+  test("enqueues follow-up when the bot is assigned", async () => {
     const repository = makeRepo();
-    const decision = shouldEnqueuePullAssign(
+    const decision = await shouldEnqueuePullAssign(
       makePayload({
         action: "assigned",
         pull_request: makePR({
@@ -516,9 +540,9 @@ describe("shouldEnqueuePullAssign", () => {
     }
   });
 
-  test("cancels when the bot is unassigned", () => {
+  test("cancels when the bot is unassigned", async () => {
     const repository = makeRepo();
-    const decision = shouldEnqueuePullAssign(
+    const decision = await shouldEnqueuePullAssign(
       makePayload({
         action: "unassigned",
         pull_request: makePR({
@@ -540,15 +564,112 @@ describe("shouldEnqueuePullAssign", () => {
     expect(decision).toEqual({ type: "cancel", owner: "kirmanak", repo: "demo", issueNumber: 50 });
   });
 
-  test("skips opened and synchronize", () => {
-    expect(shouldEnqueuePullAssign(makePayload({ action: "opened" }), policy)).toEqual({
+  test("skips opened and synchronize", async () => {
+    expect(await shouldEnqueuePullAssign(makePayload({ action: "opened" }), policy)).toEqual({
       type: "skip",
       reason: "unsupported action opened",
     });
-    expect(shouldEnqueuePullAssign(makePayload({ action: "synchronize" }), policy)).toEqual({
+    expect(await shouldEnqueuePullAssign(makePayload({ action: "synchronize" }), policy)).toEqual({
       type: "skip",
       reason: "unsupported action synchronize",
     });
+  });
+
+  test("skips when the closing issue is open and assigned to the bot", async () => {
+    const loaded: number[] = [];
+    const decision = await shouldEnqueuePullAssign(assignedCloserPayload(), policy, {
+      getIssue: async (_owner, _repo, index) => {
+        loaded.push(index);
+        return makeIssue();
+      },
+    });
+    expect(decision).toEqual({ type: "skip", reason: "closing issue already assigned" });
+    expect(loaded).toEqual([12]);
+  });
+
+  test("enqueues adopt-PR when the closing issue is not assigned to the bot", async () => {
+    const decision = await shouldEnqueuePullAssign(assignedCloserPayload(), policy, {
+      getIssue: async () => makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [] }),
+    });
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(127);
+      expect(decision.job.prNumber).toBe(127);
+    }
+  });
+
+  test("enqueues adopt-PR when the closing issue is closed", async () => {
+    const decision = await shouldEnqueuePullAssign(assignedCloserPayload(), policy, {
+      getIssue: async () => makeIssue({ state: "closed" }),
+    });
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(127);
+      expect(decision.job.prNumber).toBe(127);
+    }
+  });
+
+  test("skips when getIssue fails", async () => {
+    const decision = await shouldEnqueuePullAssign(assignedCloserPayload(), policy, {
+      getIssue: async () => {
+        throw new Error("gitea 502");
+      },
+    });
+    expect(decision).toEqual({ type: "skip", reason: "failed to load issue: gitea 502" });
+  });
+
+  test("skips a closer PR when getIssue is unavailable", async () => {
+    expect(await shouldEnqueuePullAssign(assignedCloserPayload(), policy)).toEqual({
+      type: "skip",
+      reason: "failed to load issue",
+    });
+  });
+
+  test("skips a human closer whose issue is assigned to the bot", async () => {
+    const repository = makeRepo();
+    const decision = await shouldEnqueuePullAssign(
+      makePayload({
+        action: "assigned",
+        pull_request: makePR({
+          number: 80,
+          title: "Fix the thing",
+          body: "Fixes #12",
+          user: makeUser({ login: "alice" }),
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" })],
+          head: {
+            label: "kirmanak:fix-the-thing",
+            ref: "fix-the-thing",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+      }),
+      policy,
+      { getIssue: async () => makeIssue() }
+    );
+    expect(decision).toEqual({ type: "skip", reason: "closing issue already assigned" });
+  });
+
+  test("does not treat a jumi branch without a close-keyword as a closer", async () => {
+    const loaded: number[] = [];
+    const decision = await shouldEnqueuePullAssign(
+      assignedCloserPayload({ body: "no closer here", title: "WIP-free title" }),
+      policy,
+      {
+        getIssue: async (_owner, _repo, index) => {
+          loaded.push(index);
+          return makeIssue();
+        },
+      }
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(127);
+      expect(decision.job.prNumber).toBe(127);
+    }
+    expect(loaded).toEqual([]);
   });
 });
 

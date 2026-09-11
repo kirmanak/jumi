@@ -1,6 +1,7 @@
 import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
 import {
   extractClosingIssueNumber,
+  type IssueApi,
   isEligibleWorkerPR,
   isInScopeJumiPR,
   isJumiPrIdentity,
@@ -316,10 +317,11 @@ export function shouldEnqueuePullRejectedFollowUp(
   };
 }
 
-export function shouldEnqueuePullAssign(
+export async function shouldEnqueuePullAssign(
   payload: GiteaPRPayload,
-  policy: FollowUpWebhookPolicy
-): PullAssignWebhookDecision {
+  policy: FollowUpWebhookPolicy,
+  api?: Pick<IssueApi, "getIssue">
+): Promise<PullAssignWebhookDecision> {
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   const pr = payload.pull_request;
 
@@ -340,6 +342,22 @@ export function shouldEnqueuePullAssign(
 
   const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername);
   if (skip) return { type: "skip", reason: skip };
+
+  const closer = extractClosingIssueNumber(pr);
+  if (closer !== undefined) {
+    if (!api) return { type: "skip", reason: "failed to load issue" };
+    try {
+      const issue = await api.getIssue(owner, repo, closer);
+      if (issue.state === "open" && isAssignedToBot(issue, policy.botUsername)) {
+        return { type: "skip", reason: "closing issue already assigned" };
+      }
+    } catch (err) {
+      return {
+        type: "skip",
+        reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
 
   return {
     type: "enqueue",

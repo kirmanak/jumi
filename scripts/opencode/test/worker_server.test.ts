@@ -164,6 +164,97 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs[0]?.prNumber).toBe(50);
   });
 
+  test("skips PR-assign when the closing issue is already assigned to the bot", async () => {
+    const queue = makeQueue();
+    const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
+    const loaded: number[] = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        getIssue: async (_owner, _repo, index) => {
+          loaded.push(index);
+          return makeIssue();
+        },
+      },
+      cancel: async (owner, repo, issueNumber) => {
+        cancelled.push({ owner, repo, issueNumber });
+        return { key: `${owner}/${repo}#${issueNumber}`, cancelled: true };
+      },
+    });
+    const repository = makePayload().repository;
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "assigned",
+          pull_request: makePR({
+            number: 127,
+            title: "Fix the thing",
+            body: "Fixes #12",
+            user: makeUser({ login: "jumi" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix-the-thing",
+              ref: "jumi/issue-12-fix-the-thing",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "closing issue already assigned" });
+    expect(queue.jobs).toHaveLength(0);
+    expect(cancelled).toEqual([]);
+    expect(loaded).toEqual([12]);
+  });
+
+  test("skips PR-assign when getIssue of the closer fails", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        getIssue: async () => {
+          throw new Error("gitea 502");
+        },
+      },
+    });
+    const repository = makePayload().repository;
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "assigned",
+          pull_request: makePR({
+            number: 127,
+            title: "Fix the thing",
+            body: "Fixes #12",
+            user: makeUser({ login: "jumi" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix-the-thing",
+              ref: "jumi/issue-12-fix-the-thing",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "failed to load issue: gitea 502" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
   test("cancels when a foreign PR is unassigned from the bot", async () => {
     const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {

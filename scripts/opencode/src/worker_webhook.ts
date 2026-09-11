@@ -145,7 +145,7 @@ export async function handleWorkerWebhookEvent(
       );
     }
     try {
-      const decision = shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy);
+      const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       if (decision.type === "cancel") {
         const result = deps.cancel

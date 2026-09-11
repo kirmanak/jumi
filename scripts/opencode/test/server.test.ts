@@ -499,6 +499,26 @@ describe("createFetchHandler router mailbox", () => {
     expect(store.rows[0]?.kind).toBe("follow-up");
   });
 
+  test("pull_request assigned skips when the closer issue is already assigned", async () => {
+    const { handler, store } = mailboxHandler();
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "assigned",
+          pull_request: makePR({
+            ...jumiPr(),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+          }),
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "closing issue already assigned" });
+    expect(store.rows).toHaveLength(0);
+  });
+
   test("unknown events 202-skip", async () => {
     const { handler, logs } = mailboxHandler();
     const response = await handler(await signedRequest(makePayload(), { event: "status" }));

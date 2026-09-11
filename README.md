@@ -119,7 +119,7 @@ The trailer is kept as the last non-empty line of the sticky comment so the work
 
 ## Worker jobs
 
-Work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`). Pull-request issues (`issue.pull_request` present) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead.
+Work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`). Pull-request issues (`issue.pull_request` present) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead, except a closer whose related issue is already open and assigned to the bot — that assign is skipped so the issue job owns the work.
 
 When `DATABASE_URL` is set, webhooks only enqueue (202) into the shared Postgres envelope and the worker leases with `FOR UPDATE SKIP LOCKED` (distinct owner per process; never the same row twice). First-run keeps that job row after the PR opens. Unassign cancels queued and leased worker rows; the running worker aborts when its lease is gone. The router does not kill processes. Without `DATABASE_URL`, a PID/heartbeat file under `{HOME}/worker/jobs/{owner}/{repo}/{number}.json` claims the issue (live only while that PID is alive **and** the heartbeat is newer than two minutes). With Postgres, the lease is the identity.
 
@@ -160,7 +160,7 @@ Event map (router mailbox):
 - `pull_request_rejected` on an open jumi closing PR or assigned foreign PR → enqueue follow-up
 - `push` on `refs/heads/<repository.default_branch>` → mechanical HTTP filter (list open managed jumi closers and assigned foreign PRs; no git, no OpenCode). Enqueue `mode: "conflict"`. Tags, deletes, and non-default branches skip
 - `workflow_job` → wake only (202 immediately). Malformed / not-ours → 202 skip, never 400. Do not use `status` (also fires for Jumi reviews). Re-reads **live** commit statuses for `pr.head.sha`, ignores `jumi/opencode-review`, skips if any other context is `pending`, and on a non-jumi `failure` injects `JUMI_CI.md` then follow-up
-- `pull_request` / `pull_request_assign` `assigned` (bot still assigned) → enqueue follow-up keyed by the PR number. `unassigned` when the bot is no longer an assignee → cancel that PR. Other `pull_request` actions: reviewer owns opened/synchronize; the rest `202` skip, never 400
+- `pull_request` / `pull_request_assign` `assigned` (bot still assigned) → enqueue follow-up keyed by the PR number, except when the PR closes a same-repo issue that is open and assigned to the bot: skip (202), live GET, fail closed on GET failure; the issue job owns the work. `unassigned` when the bot is no longer an assignee → cancel that PR. Other `pull_request` actions: reviewer owns opened/synchronize; the rest `202` skip, never 400
 - `ping` → `200 {"ok":true}`
 - other events → `202` skip
 
