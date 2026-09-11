@@ -1,6 +1,6 @@
 ---
 name: gitops-apply-review
-description: Use when the diff touches Helm, Kubernetes, k3s/, Chart.yaml, or values.yaml, or when the PR is a Renovate docker bump of jumi-reviewer / jumi-worker. Catch first-apply explosions visible in the diff: checksum/rollout, Service DNS host keys vs names, Velero vs generic-ephemeral, sibling memory limits, hook comm vs argv. Parse PR body ## GitOps notes on Jumi image bumps. Do not read charts/*.tgz.
+description: Use only for PRs that change k3s/, Chart.yaml, or values.yaml, or a Renovate docker bump of jumi-reviewer / jumi-worker. Do not use for app/TypeScript, kirillbench tasks, or any PR without those paths. Catch first-apply explosions in the diff: checksum/rollout, Service DNS host keys vs names, Velero vs generic-ephemeral, sibling memory limits, hook comm vs argv. Parse PR body ## GitOps on Jumi image bumps. Do not read charts/*.tgz.
 ---
 
 # gitops-apply-review

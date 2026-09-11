@@ -17,6 +17,14 @@ describe("gitops-apply-review skill", () => {
     expect(skill).not.toContain("/app/review-skills");
   });
 
+  test("description says when not to load", () => {
+    const frontmatter = skill.slice(skill.indexOf("---"), skill.indexOf("---", 3));
+    const description = frontmatter.match(/^description:\s*(.*)$/m)?.[1] ?? "";
+    expect(description).toContain("Use only for PRs that change k3s/, Chart.yaml, or values.yaml");
+    expect(description).toContain("Renovate docker bump of jumi-reviewer / jumi-worker");
+    expect(description).toContain("Do not use for app/TypeScript, kirillbench tasks, or any PR without those paths");
+  });
+
   test("parses Renovate ## GitOps notes for jumi image bumps", () => {
     expect(skill).toContain("## Jumi image bumps");
     expect(skill).toContain("jumi-reviewer");
