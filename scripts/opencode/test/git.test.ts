@@ -450,6 +450,31 @@ printf 'CONFIG=%s\n' "$OPENCODE_CONFIG"
   });
 });
 
+describe("worker prompts", () => {
+  const prompts = [IMPLEMENT_PROMPT, FOLLOWUP_PROMPT, CONFLICT_PROMPT];
+
+  test("keep the child in the worktree on the injected brief", () => {
+    for (const prompt of prompts) {
+      expect(prompt).toContain("Stay in this clone");
+      expect(prompt).toContain("do not glob **/*");
+      expect(prompt).toContain("Do not webfetch this Gitea host");
+      expect(prompt).toContain("Do not call tea or the forge API");
+      expect(prompt).toContain("Public upstream docs are fine");
+      expect(prompt).toContain("Grep is ripgrep syntax, not JavaScript");
+      expect(prompt).toContain("Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt");
+      expect(prompt).toContain("Verify once at the end");
+      expect(prompt).toContain("Do not ask questions");
+      expect(prompt).not.toContain("denied");
+      expect(prompt).not.toContain("Do not run git");
+    }
+  });
+
+  test("conflict stays on the injected conflicted paths", () => {
+    expect(CONFLICT_PROMPT).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
+    expect(CONFLICT_PROMPT).toContain("One adjacent file is allowed only if the resolution truly requires it");
+  });
+});
+
 describe("resolveOpenCodePrompt", () => {
   test("prefers an explicit prompt", async () => {
     expect(await resolveOpenCodePrompt({ prompt: "explicit", model: "m", workdir: "/tmp" })).toBe("explicit");

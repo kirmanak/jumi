@@ -72,5 +72,8 @@ describe("implement prompt", () => {
     expect(IMPLEMENT_PROMPT).not.toContain("Do not run git");
     expect(IMPLEMENT_PROMPT).toContain("JUMI_PR.md");
     expect(IMPLEMENT_PROMPT).toContain("Do not open the pull request");
+    expect(IMPLEMENT_PROMPT).toContain("Stay in this clone");
+    expect(IMPLEMENT_PROMPT).toContain("Do not webfetch this Gitea host");
+    expect(IMPLEMENT_PROMPT).toContain("Do not call tea or the forge API");
   });
 });

@@ -37,14 +37,22 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
   configPath?: string;
 }
 
+const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
+Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
+Grep is ripgrep syntax, not JavaScript.
+Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, and JUMI_CI.md at the repository root.
+Verify once at the end, not after every edit.`;
+
 export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
+${WORKER_SCOPE}
 Edit, write, commit, and push as needed. Incremental commits are fine.
 Do not force-push. Do not ask questions.
 When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
 Then stop.`;
 
 export const FOLLOWUP_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
-If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too. Do not call tea, the forge API, or fetch Actions yourself.
+If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.
+${WORKER_SCOPE}
 Address the feedback in this repository on the current branch.
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Do not force-push. Do not ask questions. Do not open a pull request.
@@ -52,7 +60,8 @@ When the feedback is addressed, stop.`;
 
 export const CONFLICT_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_CONFLICT.md (merge vs the default branch).
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head.
-Resolve only conflicted regions on the current branch.
+${WORKER_SCOPE}
+Resolve only the conflicted paths listed in JUMI_CONFLICT.md. Do not explore unrelated files first. One adjacent file is allowed only if the resolution truly requires it.
 Keep both the issue intent and the default-branch changes when they are orthogonal.
 Do not drop either side to “win.” Do not reopen product decisions in JUMI_TASK.md.
 Do not force-push. Do not ask questions. Do not open a pull request.
