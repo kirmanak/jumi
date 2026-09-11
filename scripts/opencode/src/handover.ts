@@ -1,10 +1,11 @@
 import { isAssignedToBot } from "./assignee.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractClosingIssueNumber } from "./gitea_issues.ts";
+import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
-import type { ReviewApi, ReviewResult } from "./review.ts";
+import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
-import type { GiteaIssue, GiteaPR, GiteaRepo, IssueJob } from "./types.ts";
+import type { IssueJob } from "./types.ts";
 import { parseReviewOutput } from "./verdict.ts";
 
 export function isCurrentHeadFailureTrailer(markdown: string | null | undefined): boolean {
@@ -21,9 +22,9 @@ export function shouldHandoverFollowUp(opts: { published: ReviewResult; markdown
 function followUpJobFrom(
   owner: string,
   repo: string,
-  issue: GiteaIssue,
-  pr: GiteaPR,
-  repository: Pick<GiteaRepo, "default_branch" | "clone_url">,
+  issue: Task,
+  pr: Pull,
+  repository: Pick<Repo, "default_branch" | "clone_url">,
   delivery: string
 ): IssueJob {
   return {

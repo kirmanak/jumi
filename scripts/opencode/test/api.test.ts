@@ -226,4 +226,71 @@ describe("GiteaAPI", () => {
       "500: nope"
     );
   });
+
+  test("maps Gitea JSON to host-agnostic Task and Pull refs", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/issues/12")) {
+        return Response.json({
+          id: 200,
+          number: 12,
+          title: "Fix the thing",
+          body: "Please implement this.",
+          state: "open",
+          html_url: "https://gitea.example.test/owner/repo/issues/12",
+          user: { id: 1, login: "alice", full_name: "Alice", email: "a@b.c", avatar_url: "https://x" },
+          assignee: { login: "jumi" },
+          assignees: [{ login: "jumi" }],
+          updated_at: "2026-05-23T00:00:00Z",
+          created_at: "2026-05-23T00:00:00Z",
+        });
+      }
+      return Response.json({
+        id: 100,
+        number: 7,
+        title: "Add feature",
+        body: "PR body",
+        state: "open",
+        html_url: "https://gitea.example.test/owner/repo/pulls/7",
+        user: { login: "alice" },
+        head: {
+          label: "alice:feature",
+          ref: "feature",
+          sha: "abc123",
+          repo: { full_name: "owner/repo", clone_url: "https://gitea.example.test/owner/repo.git" },
+          repo_id: 10,
+        },
+        base: { ref: "main", sha: "def456" },
+        merged: false,
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:00Z",
+      });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const task = await api.getIssue("owner", "repo", 12);
+    expect(task).toEqual({
+      trackerRef: "12",
+      number: 12,
+      title: "Fix the thing",
+      body: "Please implement this.",
+      state: "open",
+      html_url: "https://gitea.example.test/owner/repo/issues/12",
+      user: { login: "alice" },
+      assignee: { login: "jumi" },
+      assignees: [{ login: "jumi" }],
+      updated_at: "2026-05-23T00:00:00Z",
+      created_at: "2026-05-23T00:00:00Z",
+    });
+    expect("avatar_url" in task.user).toBe(false);
+
+    const pull = await api.getPR("owner", "repo", 7);
+    expect(pull.forgeRef).toBe("7");
+    expect(pull.number).toBe(7);
+    expect(pull.head).toEqual({
+      ref: "feature",
+      sha: "abc123",
+      repo: { full_name: "owner/repo", clone_url: "https://gitea.example.test/owner/repo.git" },
+    });
+    expect("label" in pull.head).toBe(false);
+  });
 });

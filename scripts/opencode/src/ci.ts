@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { ciStatePath, deleteClaim } from "./claim.ts";
-import type { IssueApi } from "./gitea_issues.ts";
-import type { GiteaActionJob, GiteaCommitStatus, GiteaCommitStatusState } from "./types.ts";
+import type { ActionJob, Check, CheckState, Forge } from "./ports.ts";
+
+type CiApi = Pick<Forge, "listCommitStatuses" | "listActionJobs" | "getActionJobLogs">;
 
 export const JUMI_REVIEW_CONTEXT = "jumi/opencode-review";
 export const CI_LOG_FILE = "JUMI_CI.md";
@@ -25,7 +26,7 @@ export interface CiFollowUpState {
 
 export interface FailedCheck {
   name: string;
-  state: Extract<GiteaCommitStatusState, "failure" | "error">;
+  state: Extract<CheckState, "failure" | "error">;
   description: string;
   targetUrl?: string;
   jobId?: number;
@@ -48,7 +49,7 @@ function emptyInspection(sha: string): CiInspection {
   return { sha, pending: false, failed: [], unhandled: [] };
 }
 
-export function commitStatusState(status: GiteaCommitStatus): GiteaCommitStatusState | undefined {
+export function commitStatusState(status: Check): CheckState | undefined {
   return status.state ?? status.status;
 }
 
@@ -60,8 +61,8 @@ export function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-export function latestStatuses(statuses: GiteaCommitStatus[]): GiteaCommitStatus[] {
-  const byContext = new Map<string, GiteaCommitStatus>();
+export function latestStatuses(statuses: Check[]): Check[] {
+  const byContext = new Map<string, Check>();
   for (const status of statuses) {
     const context = status.context ?? "";
     if (!context) continue;
@@ -162,7 +163,7 @@ export function infraFlakeReason(log: string): string | undefined {
   return undefined;
 }
 
-export function jobMatchesCheck(job: GiteaActionJob, checkName: string, sha: string): boolean {
+export function jobMatchesCheck(job: ActionJob, checkName: string, sha: string): boolean {
   if ((job.head_sha ?? "").toLowerCase() !== sha.toLowerCase()) return false;
   const name = job.name ?? "";
   if (!name) return false;
@@ -293,12 +294,12 @@ export function flakeComment(checks: FailedCheck[]): string {
 }
 
 async function logsForCheck(
-  api: IssueApi,
+  api: CiApi,
   owner: string,
   repo: string,
   sha: string,
-  status: GiteaCommitStatus,
-  jobs: GiteaActionJob[]
+  status: Check,
+  jobs: ActionJob[]
 ): Promise<{ text: string; jobId?: number }> {
   const name = status.context ?? "";
   const jobId = jobIdFromTargetUrl(status.target_url) ?? jobs.find((job) => jobMatchesCheck(job, name, sha))?.id;
@@ -316,7 +317,7 @@ async function logsForCheck(
 }
 
 export async function inspectCi(opts: {
-  api: IssueApi;
+  api: CiApi;
   owner: string;
   repo: string;
   sha: string;
@@ -324,7 +325,7 @@ export async function inspectCi(opts: {
   issueNumber: number;
 }): Promise<CiInspection> {
   if (!opts.sha) return emptyInspection(opts.sha);
-  let statuses: GiteaCommitStatus[];
+  let statuses: Check[];
   try {
     statuses = latestStatuses(await opts.api.listCommitStatuses(opts.owner, opts.repo, opts.sha));
   } catch {
@@ -338,7 +339,7 @@ export async function inspectCi(opts: {
   });
   if (red.length === 0) return { sha: opts.sha, pending, failed: [], unhandled: [] };
 
-  let jobs: GiteaActionJob[] = [];
+  let jobs: ActionJob[] = [];
   try {
     jobs = await opts.api.listActionJobs(opts.owner, opts.repo, { status: "failure" });
   } catch {
@@ -369,7 +370,7 @@ export async function inspectCi(opts: {
 }
 
 export async function needsCiFollowUp(opts: {
-  api: IssueApi;
+  api: CiApi;
   owner: string;
   repo: string;
   sha: string;

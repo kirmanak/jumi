@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
-import type { GiteaPR, GiteaRepo, ReviewJob } from "./types.ts";
+import type { Pull, Repo } from "./ports.ts";
+import type { ReviewJob } from "./types.ts";
 
 interface GitAuth {
   giteaUrl: string;
@@ -16,8 +17,8 @@ export type GitRunner = (
 
 export interface CheckoutPullRequestWorkspaceOptions {
   workdir: string;
-  repo: GiteaRepo;
-  pr: GiteaPR;
+  repo: Repo;
+  pr: Pull;
   giteaUrl: string;
   username: string;
   token: string;

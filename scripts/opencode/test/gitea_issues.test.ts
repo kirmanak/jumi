@@ -180,8 +180,7 @@ describe("isEligibleWorkerPR", () => {
     expect(isEligibleWorkerPR({ ...base, merged: true }, "kirmanak", "demo")).toBe(false);
     expect(
       isEligibleWorkerPR(
-        {
-          ...base,
+        makePR({
           head: {
             label: "alice:feature",
             ref: "feature",
@@ -189,7 +188,7 @@ describe("isEligibleWorkerPR", () => {
             repo: makeRepo({ full_name: "alice/demo" }),
             repo_id: 99,
           },
-        },
+        }),
         "kirmanak",
         "demo"
       )

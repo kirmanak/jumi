@@ -1,8 +1,8 @@
 import { isJumiDockerBump } from "./gitops_notes.ts";
+import type { Pull, PullFile, Repo } from "./ports.ts";
 import { formatLinkedIssuesXml, formatPrCommentsXml, type ReviewThread } from "./review_context.ts";
-import type { GiteaPR, GiteaPRFile, GiteaRepo } from "./types.ts";
 
-export function touchesGitOpsApplyReview(files: GiteaPRFile[]): boolean {
+export function touchesGitOpsApplyReview(files: PullFile[]): boolean {
   return files.some((file) => {
     const name = file.filename.replaceAll("\\", "/");
     return (
@@ -17,7 +17,7 @@ export function touchesGitOpsApplyReview(files: GiteaPRFile[]): boolean {
   });
 }
 
-export function shouldLoadGitOpsApplyReview(opts: { files: GiteaPRFile[]; title: string; body: string }): boolean {
+export function shouldLoadGitOpsApplyReview(opts: { files: PullFile[]; title: string; body: string }): boolean {
   return touchesGitOpsApplyReview(opts.files) || isJumiDockerBump(opts.title, opts.body);
 }
 
@@ -40,7 +40,7 @@ function escapeCdata(str: string): string {
   return str.replace(/]]>/g, "]]]]><![CDATA[>");
 }
 
-function formatPRFiles(files: GiteaPRFile[]): string {
+function formatPRFiles(files: PullFile[]): string {
   return files
     .map((f) => {
       const patch = f.patch ? `\n      <patch><![CDATA[${escapeCdata(f.patch)}]]></patch>` : "";
@@ -83,9 +83,9 @@ Do not comment on style, naming, formatting, or nits. Do not write "great work",
 // ── PR opened (auto-review) prompt ──────────────────────────────────────────
 
 export interface PROpenedPromptOptions {
-  repo: GiteaRepo;
-  pr: GiteaPR;
-  prFiles: GiteaPRFile[];
+  repo: Repo;
+  pr: Pull;
+  prFiles: PullFile[];
   reviewNotes?: string[];
   thread?: ReviewThread;
 }

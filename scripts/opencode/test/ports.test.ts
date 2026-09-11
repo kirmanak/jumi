@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { GiteaAPI } from "../src/api.ts";
 import type { Engine, EngineRunOptions } from "../src/engine.ts";
 import { resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
-import type { Forge } from "../src/forge.ts";
+import type { Forge, Tracker } from "../src/forge.ts";
 import { createGiteaForge, FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "../src/forge.ts";
 import { openCodeEngine, runOpenCode } from "../src/git.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { implementIssue } from "../src/implement.ts";
+import { forgeRefOf, trackerRefOf } from "../src/ports.ts";
 import { reviewPullRequest } from "../src/review.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
@@ -38,7 +39,7 @@ function stripGitConfigArgs(args: string[]): string[] {
   return result;
 }
 
-function makeFakeForge(overrides: Partial<Forge> = {}): Forge & {
+function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & Forge) & {
   comments: string[];
   pulls: Array<{ title: string; body: string; head: string; base: string }>;
   statuses: Array<{ sha: string; state: string; context?: string; description?: string }>;
@@ -46,7 +47,7 @@ function makeFakeForge(overrides: Partial<Forge> = {}): Forge & {
   const comments: string[] = [];
   const pulls: Array<{ title: string; body: string; head: string; base: string }> = [];
   const statuses: Array<{ sha: string; state: string; context?: string; description?: string }> = [];
-  const defaults: Forge = {
+  const defaults: Tracker & Forge = {
     getRepo: async () => makeRepo(),
     getPR: async () => makePR(),
     getPRFiles: async () => [makeFile()],
@@ -93,13 +94,51 @@ async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
   }
 }
 
-describe("Engine and Forge ports", () => {
-  test("OpenCode is the Engine impl and Gitea is the Forge impl", () => {
+describe("Engine, Tracker, and Forge ports", () => {
+  test("OpenCode is the Engine impl and Gitea is Tracker+Forge impl #0", () => {
     expect(openCodeEngine).toBe(runOpenCode);
-    const forge = createGiteaForge("https://gitea.example.test", "token-1");
-    expect(forge).toBeInstanceOf(GiteaAPI);
+    const host = createGiteaForge("https://gitea.example.test", "token-1");
+    expect(host).toBeInstanceOf(GiteaAPI);
     expect(FORGE_COMMITTER_NAME).toBe("jumi");
     expect(FORGE_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
+  });
+
+  test("Tracker and Forge are separate method bags", () => {
+    const tracker: Tracker = {
+      getIssue: async () => makeIssue(),
+      listIssueComments: async () => [],
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
+      updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
+    };
+    const forge: Forge = {
+      getRepo: async () => makeRepo(),
+      getPR: async () => makePR(),
+      getPRFiles: async () => [makeFile()],
+      listOpenPulls: async () => [],
+      createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
+      updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
+      listIssueComments: async () => [],
+      listPullReviewComments: async () => [],
+      listPullReviews: async () => [],
+      ...emptyCiMethods(),
+      createCommitStatus: async (_owner, _repo, _sha, status) => status,
+    };
+    expect(Object.keys(tracker).sort()).toEqual([
+      "createIssueComment",
+      "findStickyIssueComment",
+      "getIssue",
+      "listIssueComments",
+      "updateIssueComment",
+    ]);
+    expect("getPR" in tracker).toBe(false);
+    expect("getIssue" in forge).toBe(false);
+    expect("createPullRequest" in forge).toBe(true);
+    expect("createCommitStatus" in forge).toBe(true);
+    expect(trackerRefOf(makeIssue({ number: 12 }))).toBe("12");
+    expect(forgeRefOf(makePR({ number: 7 }))).toBe("7");
   });
 
   test("resolveEngine prefers engine over openCodeRunner", () => {

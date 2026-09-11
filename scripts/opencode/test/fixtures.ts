@@ -59,8 +59,8 @@ export function makeBranch(overrides: Partial<GiteaPRBranch> = {}): GiteaPRBranc
   };
 }
 
-export function makePR(overrides: Partial<GiteaPR> = {}): GiteaPR {
-  return {
+export function makePR(overrides: Partial<GiteaPR> = {}): GiteaPR & { forgeRef: string } {
+  const pr: GiteaPR = {
     id: 100,
     number: 7,
     title: "Add feature",
@@ -75,6 +75,7 @@ export function makePR(overrides: Partial<GiteaPR> = {}): GiteaPR {
     html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
     ...overrides,
   };
+  return { ...pr, forgeRef: String(pr.number) };
 }
 
 export function makeFile(overrides: Partial<GiteaPRFile> = {}): GiteaPRFile {
@@ -113,8 +114,8 @@ export function makePayload(overrides: Partial<GiteaPRPayload> = {}): GiteaPRPay
   };
 }
 
-export function makeIssue(overrides: Partial<GiteaIssue> = {}): GiteaIssue {
-  return {
+export function makeIssue(overrides: Partial<GiteaIssue> = {}): GiteaIssue & { trackerRef: string } {
+  const issue: GiteaIssue = {
     id: 200,
     number: 12,
     title: "Fix the thing",
@@ -128,6 +129,7 @@ export function makeIssue(overrides: Partial<GiteaIssue> = {}): GiteaIssue {
     created_at: "2026-05-23T00:00:00Z",
     ...overrides,
   };
+  return { ...issue, trackerRef: String(issue.number) };
 }
 
 export function makeIssueCommentPayload(overrides: Partial<GiteaIssueCommentPayload> = {}): GiteaIssueCommentPayload {

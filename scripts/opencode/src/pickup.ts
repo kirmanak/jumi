@@ -1,14 +1,15 @@
 import { needsCiFollowUp } from "./ci.ts";
 import { type ConflictResult, implementConflict, needsConflict } from "./conflict.ts";
 import { type FollowUpResult, implementFollowUp, needsFollowUp } from "./followup.ts";
-import { extractClosingIssueNumber, type IssueApi, isInScopeJumiPR } from "./gitea_issues.ts";
+import { extractClosingIssueNumber, isInScopeJumiPR } from "./gitea_issues.ts";
 import type { ImplementOptions } from "./implement.ts";
-import type { GiteaPR, IssueJob } from "./types.ts";
+import type { Forge, IssueApi, Pull } from "./ports.ts";
+import type { IssueJob } from "./types.ts";
 
 export type CloserWorkMode = "follow-up" | "conflict";
 
 export function isJumiCloserForIssue(
-  pr: GiteaPR,
+  pr: Pull,
   owner: string,
   repo: string,
   issueNumber: number,
@@ -21,7 +22,7 @@ export async function classifyCloserWork(opts: {
   api: IssueApi;
   owner: string;
   repo: string;
-  pr: GiteaPR;
+  pr: Pull;
   issueNumber: number;
   botUsername: string;
   home: string;
@@ -64,7 +65,7 @@ export async function classifyCloserWork(opts: {
 
 export async function runCloserWork(
   opts: ImplementOptions,
-  pr: GiteaPR
+  pr: Pull
 ): Promise<FollowUpResult | ConflictResult | { status: "skipped"; reason: string }> {
   const mode = await classifyCloserWork({
     api: opts.api,
@@ -93,12 +94,12 @@ export async function runCloserWork(
 }
 
 export async function conflictJobIfUnmergeable(
-  api: Pick<IssueApi, "getPR">,
+  api: Pick<Forge, "getPR">,
   job: IssueJob,
   prNumber: number,
   logger?: (message: string) => void
 ): Promise<IssueJob | undefined> {
-  let pr: GiteaPR;
+  let pr: Pull;
   try {
     pr = await api.getPR(job.owner, job.repo, prNumber);
   } catch (err) {

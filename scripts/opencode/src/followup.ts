@@ -29,6 +29,7 @@ import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
+import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
   appendStuckFingerprint,
   evaluateStuck,
@@ -38,7 +39,7 @@ import {
   readStuckState,
   stuckComment,
 } from "./stuck.ts";
-import type { GiteaComment, GiteaPR, GiteaPullReview, GiteaPullReviewComment, IssueJob } from "./types.ts";
+import type { IssueJob } from "./types.ts";
 import { parseCheckLine } from "./verdict.ts";
 import { gitConfigArgs, gitEnv, runGit, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
 
@@ -247,7 +248,7 @@ export function isInScopeFollowUpComment(
   return isJumiReviewFinding(comment, headSha) || isInScopeHumanComment(comment, botUsername, ignoreLogins);
 }
 
-export function isRequestChangesReview(review: GiteaPullReview): boolean {
+export function isRequestChangesReview(review: PullReview): boolean {
   const blob = `${review.state ?? ""} ${review.type ?? ""}`.toLowerCase();
   return (
     blob.includes("request") ||
@@ -257,7 +258,7 @@ export function isRequestChangesReview(review: GiteaPullReview): boolean {
   );
 }
 
-export function isCommentReview(review: GiteaPullReview): boolean {
+export function isCommentReview(review: PullReview): boolean {
   const blob = `${review.state ?? ""} ${review.type ?? ""}`.toLowerCase();
   return blob.includes("comment");
 }
@@ -270,11 +271,11 @@ export async function collectFollowUpItems(
   botUsername: string,
   headSha: string,
   ignoreLogins: readonly string[] = []
-): Promise<{ comments: GiteaComment[]; inlines: GiteaPullReviewComment[]; reviews: GiteaPullReview[] }> {
+): Promise<{ comments: Comment[]; inlines: InlineComment[]; reviews: PullReview[] }> {
   const [rawComments, rawReviews, rawInlines] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
     api.listPullReviews(owner, repo, prNumber),
-    api.listPullReviewComments(owner, repo, prNumber).catch((err: unknown): GiteaPullReviewComment[] => {
+    api.listPullReviewComments(owner, repo, prNumber).catch((err: unknown): InlineComment[] => {
       logDefault(
         `inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${
           err instanceof Error ? err.message : String(err)
@@ -307,7 +308,7 @@ function reviewFindingFromComment(comment: { id: number; body?: string | null })
 }
 
 function hasUnhandledFollowUpItems(
-  items: { comments: GiteaComment[]; inlines: GiteaPullReviewComment[]; reviews: GiteaPullReview[] },
+  items: { comments: Comment[]; inlines: InlineComment[]; reviews: PullReview[] },
   state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds" | "handledReviewFindings">
 ): boolean {
   const handledComments = new Set(state.handledCommentIds);
@@ -329,7 +330,7 @@ export async function needsFollowUp(opts: {
   api: IssueApi;
   owner: string;
   repo: string;
-  pr: GiteaPR;
+  pr: Pull;
   issueNumber: number;
   botUsername: string;
   home: string;
@@ -362,12 +363,12 @@ interface FeedbackItem {
 }
 
 export function buildFeedbackMarkdown(opts: {
-  pr: GiteaPR;
+  pr: Pull;
   trigger?: IssueJob["trigger"];
   triggerBody?: string;
-  comments: GiteaComment[];
-  inlines: GiteaPullReviewComment[];
-  reviews: GiteaPullReview[];
+  comments: Comment[];
+  inlines: InlineComment[];
+  reviews: PullReview[];
 }): { markdown: string; commentIds: number[]; reviewIds: number[] } {
   const header = [
     `# Review feedback`,
@@ -458,7 +459,7 @@ export function buildFeedbackMarkdown(opts: {
 
 function triggerBodyFromItems(
   trigger: IssueJob["trigger"] | undefined,
-  items: { comments: GiteaComment[]; inlines: GiteaPullReviewComment[]; reviews: GiteaPullReview[] }
+  items: { comments: Comment[]; inlines: InlineComment[]; reviews: PullReview[] }
 ): string {
   if (!trigger) return "";
   if (typeof trigger.body === "string" && trigger.body.trim()) return trigger.body;

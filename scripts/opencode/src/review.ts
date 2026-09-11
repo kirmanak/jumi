@@ -4,6 +4,7 @@ import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnost
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
+import type { CheckPayload, Comment, Pull, PullFile, Repo, ReviewApi, Task } from "./ports.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
 import {
   CONTRACT_PATH,
@@ -24,15 +25,7 @@ import {
   stuckComment,
   upsertStuckComment,
 } from "./stuck.ts";
-import type {
-  GiteaComment,
-  GiteaCommitStatusPayload,
-  GiteaIssue,
-  GiteaPR,
-  GiteaPRFile,
-  GiteaRepo,
-  ReviewJob,
-} from "./types.ts";
+import type { ReviewJob } from "./types.ts";
 import { parseReviewOutput } from "./verdict.ts";
 import { checkoutPullRequestWorkspace, type GitRunner, runGit } from "./workspace.ts";
 
@@ -51,34 +44,13 @@ async function logParentDiag(
   });
 }
 
-export interface ReviewApi {
-  getRepo(owner: string, repo: string): Promise<GiteaRepo>;
-  getPR(owner: string, repo: string, index: number): Promise<GiteaPR>;
-  getPRFiles(owner: string, repo: string, index: number): Promise<GiteaPRFile[]>;
-  getIssue(owner: string, repo: string, index: number): Promise<GiteaIssue>;
-  listIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]>;
-  findStickyIssueComment(
-    owner: string,
-    repo: string,
-    index: number,
-    botUsername: string,
-    marker: string
-  ): Promise<{ id: number } | undefined>;
-  createIssueComment(owner: string, repo: string, index: number, body: string): Promise<GiteaComment>;
-  updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment>;
-  createCommitStatus(
-    owner: string,
-    repo: string,
-    sha: string,
-    status: GiteaCommitStatusPayload
-  ): Promise<GiteaCommitStatusPayload>;
-}
+export type { ReviewApi } from "./ports.ts";
 
 export type OpenCodeRunner = Engine;
 export type WorkspacePreparer = (opts: {
   workdir: string;
-  repo: GiteaRepo;
-  pr: GiteaPR;
+  repo: Repo;
+  pr: Pull;
   giteaUrl: string;
   username: string;
   token: string;
@@ -244,7 +216,7 @@ async function postReviewStatus(
   owner: string,
   repo: string,
   headSha: string,
-  state: GiteaCommitStatusPayload["state"],
+  state: CheckPayload["state"],
   description: string,
   targetUrl?: string
 ): Promise<void> {
@@ -262,8 +234,8 @@ function statusDescriptionForSkip(result: ReviewResult): string {
 
 function statusForResult(
   result: ReviewResult,
-  verdict?: { state: GiteaCommitStatusPayload["state"]; description: string }
-): { state: GiteaCommitStatusPayload["state"]; description: string } {
+  verdict?: { state: CheckPayload["state"]; description: string }
+): { state: CheckPayload["state"]; description: string } {
   if (result.status === "skipped") {
     if (result.reason?.startsWith("Incomplete review:")) {
       return { state: "failure", description: result.reason };
@@ -307,7 +279,7 @@ async function gatePersonalJumiContractEnv(
   }
 }
 
-function skipReasonForPR(pr: GiteaPR): string | undefined {
+function skipReasonForPR(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
   if (/\[(skip review|no review)\]/i.test(pr.title) || /^\s*(wip|\[wip\])/i.test(pr.title)) {
@@ -315,7 +287,7 @@ function skipReasonForPR(pr: GiteaPR): string | undefined {
   }
 }
 
-export function skipReasonForHeadChange(pr: GiteaPR, expectedHeadSha: string): string | undefined {
+export function skipReasonForHeadChange(pr: Pull, expectedHeadSha: string): string | undefined {
   if (pr.head.sha === expectedHeadSha) return undefined;
   return `PR head changed from ${expectedHeadSha} to ${pr.head.sha}`;
 }
@@ -326,10 +298,10 @@ export function isTerminalSkipReason(reason: string | null | undefined): boolean
 }
 
 function prepareFiles(
-  files: GiteaPRFile[],
+  files: PullFile[],
   maxFiles: number,
   maxPatchBytes: number
-): { files: GiteaPRFile[]; notes: string[] } {
+): { files: PullFile[]; notes: string[] } {
   const notes: string[] = [];
   const selected = files.slice(0, maxFiles);
   if (files.length > selected.length) {
@@ -368,7 +340,7 @@ async function loadPrComments(
   owner: string,
   repo: string,
   prNumber: number
-): Promise<{ comments: GiteaComment[]; note?: string }> {
+): Promise<{ comments: Comment[]; note?: string }> {
   try {
     return { comments: await api.listIssueComments(owner, repo, prNumber) };
   } catch (err) {
@@ -381,7 +353,7 @@ async function loadLinkedIssue(
   owner: string,
   repo: string,
   id: number
-): Promise<{ issue: GiteaIssue; comments: GiteaComment[] } | { note: string }> {
+): Promise<{ issue: Task; comments: Comment[] } | { note: string }> {
   try {
     const [issue, comments] = await Promise.all([
       api.getIssue(owner, repo, id),
@@ -507,7 +479,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(opts.api, opts.owner, opts.repo, id)));
     const notes: string[] = [];
     if (prCommentResult.note) notes.push(prCommentResult.note);
-    const linkedIssues: Array<{ issue: GiteaIssue; comments: GiteaComment[] }> = [];
+    const linkedIssues: Array<{ issue: Task; comments: Comment[] }> = [];
     for (const result of linkedResults) {
       if ("note" in result) {
         notes.push(result.note);

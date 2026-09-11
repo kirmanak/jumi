@@ -24,8 +24,9 @@ import {
   type ImplementOptions,
   type OpenCodeRunner,
 } from "./implement.ts";
+import type { Pull } from "./ports.ts";
 import { appendStuckFingerprint, evaluateStuck, fingerprintError, readStuckState, stuckComment } from "./stuck.ts";
-import type { GiteaPR, IssueJob } from "./types.ts";
+import type { IssueJob } from "./types.ts";
 import {
   type GitRunner,
   gitConfigArgs,
@@ -74,7 +75,7 @@ export interface MergeDefaultIntoWorktreeOpts {
   defaultBranch: string;
   headRef: string;
   job: IssueJob;
-  pr: GiteaPR;
+  pr: Pull;
   model: string;
   home: string;
   sanitizeOpenCodeEnv?: boolean;
@@ -161,7 +162,7 @@ export async function deleteConflictState(
 }
 
 export async function needsConflict(opts: {
-  pr: GiteaPR;
+  pr: Pull;
   owner: string;
   repo: string;
   issueNumber: number;
@@ -272,7 +273,7 @@ async function buildConflictMarkdown(opts: {
   git: GitRunner;
   env: Record<string, string | undefined>;
   worktree: string;
-  pr: GiteaPR;
+  pr: Pull;
   headSha: string;
   headRef: string;
   defaultBranch: string;

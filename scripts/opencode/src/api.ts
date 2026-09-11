@@ -1,4 +1,16 @@
 import type {
+  ActionJob,
+  Check,
+  CheckPayload,
+  Comment,
+  InlineComment,
+  Pull,
+  PullFile,
+  PullReview,
+  Repo,
+  Task,
+} from "./ports.ts";
+import type {
   GiteaActionJob,
   GiteaComment,
   GiteaCommitStatus,
@@ -9,7 +21,146 @@ import type {
   GiteaPullReview,
   GiteaPullReviewComment,
   GiteaRepo,
+  GiteaUser,
 } from "./types.ts";
+
+function actor(user: GiteaUser | { login?: string } | null | undefined): { login: string } {
+  return { login: user?.login ?? "" };
+}
+
+export function toRepo(repo: GiteaRepo): Repo {
+  return {
+    name: repo.name,
+    full_name: repo.full_name,
+    html_url: repo.html_url,
+    clone_url: repo.clone_url,
+    default_branch: repo.default_branch,
+    owner: actor(repo.owner),
+  };
+}
+
+export function toTask(issue: GiteaIssue): Task {
+  return {
+    trackerRef: String(issue.number),
+    number: issue.number,
+    title: issue.title,
+    body: issue.body,
+    state: issue.state,
+    html_url: issue.html_url,
+    user: actor(issue.user),
+    assignee: issue.assignee ? actor(issue.assignee) : issue.assignee,
+    assignees: issue.assignees?.map(actor) ?? issue.assignees,
+    updated_at: issue.updated_at,
+    created_at: issue.created_at,
+    pull_request: issue.pull_request,
+    is_pull: issue.is_pull,
+  };
+}
+
+export function toPull(pr: GiteaPR): Pull {
+  return {
+    forgeRef: String(pr.number),
+    number: pr.number,
+    title: pr.title,
+    body: pr.body,
+    state: pr.state,
+    html_url: pr.html_url,
+    user: actor(pr.user),
+    head: {
+      ref: pr.head.ref,
+      sha: pr.head.sha,
+      repo: pr.head.repo ? { full_name: pr.head.repo.full_name, clone_url: pr.head.repo.clone_url } : pr.head.repo,
+    },
+    base: { ref: pr.base.ref, sha: pr.base.sha },
+    merged: pr.merged,
+    draft: pr.draft,
+    mergeable: pr.mergeable,
+    assignee: pr.assignee ? actor(pr.assignee) : pr.assignee,
+    assignees: pr.assignees?.map(actor) ?? pr.assignees,
+    created_at: pr.created_at,
+    updated_at: pr.updated_at,
+  };
+}
+
+export function toComment(comment: GiteaComment): Comment {
+  return {
+    id: comment.id,
+    body: comment.body,
+    user: actor(comment.user),
+    created_at: comment.created_at,
+    updated_at: comment.updated_at,
+  };
+}
+
+export function toPullFile(file: GiteaPRFile): PullFile {
+  return {
+    filename: file.filename,
+    status: file.status,
+    additions: file.additions,
+    deletions: file.deletions,
+    changes: file.changes,
+    patch: file.patch,
+  };
+}
+
+export function toCheck(status: GiteaCommitStatus): Check {
+  return {
+    id: status.id,
+    context: status.context,
+    state: status.state,
+    status: status.status,
+    description: status.description,
+    target_url: status.target_url,
+    created_at: status.created_at,
+    updated_at: status.updated_at,
+    url: status.url,
+  };
+}
+
+export function toCheckPayload(status: GiteaCommitStatusPayload): CheckPayload {
+  return {
+    state: status.state,
+    context: status.context,
+    description: status.description,
+    target_url: status.target_url,
+  };
+}
+
+export function toPullReview(review: GiteaPullReview): PullReview {
+  return {
+    id: review.id,
+    body: review.body,
+    content: review.content,
+    user: review.user ? actor(review.user) : review.user,
+    state: review.state,
+    type: review.type,
+    submitted_at: review.submitted_at,
+    updated_at: review.updated_at,
+    created_at: review.created_at,
+  };
+}
+
+export function toInlineComment(comment: GiteaPullReviewComment): InlineComment {
+  return {
+    ...toComment(comment),
+    path: comment.path,
+    pull_request_review_id: comment.pull_request_review_id,
+    html_url: comment.html_url,
+  };
+}
+
+export function toActionJob(job: GiteaActionJob): ActionJob {
+  return {
+    id: job.id,
+    name: job.name,
+    status: job.status,
+    conclusion: job.conclusion,
+    head_sha: job.head_sha,
+    head_branch: job.head_branch,
+    html_url: job.html_url,
+    run_id: job.run_id,
+  };
+}
 
 function isNotFoundError(err: unknown): boolean {
   return err instanceof Error && /→ 404\b/.test(err.message);
@@ -113,40 +264,44 @@ export class GiteaAPI {
 
   // ── Repositories ───────────────────────────────────────────────────────────
 
-  async getRepo(owner: string, repo: string): Promise<GiteaRepo> {
-    return this.get<GiteaRepo>(`/repos/${this.repoPath(owner, repo)}`);
+  async getRepo(owner: string, repo: string): Promise<Repo> {
+    return toRepo(await this.get<GiteaRepo>(`/repos/${this.repoPath(owner, repo)}`));
   }
 
   // ── Pull Requests ─────────────────────────────────────────────────────────────
 
-  async getPR(owner: string, repo: string, index: number): Promise<GiteaPR> {
-    return this.get<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`);
+  async getPR(owner: string, repo: string, index: number): Promise<Pull> {
+    return toPull(await this.get<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`));
   }
 
-  async listOpenPulls(owner: string, repo: string): Promise<GiteaPR[]> {
-    return this.getAll<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls?state=open`);
+  async listOpenPulls(owner: string, repo: string): Promise<Pull[]> {
+    const pulls = await this.getAll<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls?state=open`);
+    return pulls.map(toPull);
   }
 
   async createPullRequest(
     owner: string,
     repo: string,
     pull: { title: string; body: string; head: string; base: string }
-  ): Promise<GiteaPR> {
-    return this.post<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls`, pull);
+  ): Promise<Pull> {
+    return toPull(await this.post<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls`, pull));
   }
 
-  async getIssue(owner: string, repo: string, index: number): Promise<GiteaIssue> {
-    return this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`);
+  async getIssue(owner: string, repo: string, index: number): Promise<Task> {
+    return toTask(await this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
   }
 
-  async getPRFiles(owner: string, repo: string, index: number): Promise<GiteaPRFile[]> {
-    return this.getAll<GiteaPRFile>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/files`);
+  async getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]> {
+    const files = await this.getAll<GiteaPRFile>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/files`);
+    return files.map(toPullFile);
   }
 
   // ── Issues / Comments ─────────────────────────────────────────────────────────
 
-  async createIssueComment(owner: string, repo: string, index: number, body: string): Promise<GiteaComment> {
-    return this.post<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`, { body });
+  async createIssueComment(owner: string, repo: string, index: number, body: string): Promise<Comment> {
+    return toComment(
+      await this.post<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`, { body })
+    );
   }
 
   /**
@@ -179,12 +334,15 @@ export class GiteaAPI {
     return undefined;
   }
 
-  async updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment> {
-    return this.patch<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/comments/${commentId}`, { body });
+  async updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment> {
+    return toComment(
+      await this.patch<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/comments/${commentId}`, { body })
+    );
   }
 
-  async listIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]> {
-    return this.getPages<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`);
+  async listIssueComments(owner: string, repo: string, index: number): Promise<Comment[]> {
+    const comments = await this.getPages<GiteaComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`);
+    return comments.map(toComment);
   }
 
   async listPullReviewCommentsByReview(
@@ -192,15 +350,16 @@ export class GiteaAPI {
     repo: string,
     index: number,
     reviewId: number
-  ): Promise<GiteaPullReviewComment[]> {
-    return this.getPages<GiteaPullReviewComment>(
+  ): Promise<InlineComment[]> {
+    const comments = await this.getPages<GiteaPullReviewComment>(
       `/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews/${reviewId}/comments`
     );
+    return comments.map(toInlineComment);
   }
 
-  async listPullReviewComments(owner: string, repo: string, index: number): Promise<GiteaPullReviewComment[]> {
+  async listPullReviewComments(owner: string, repo: string, index: number): Promise<InlineComment[]> {
     const reviews = await this.listPullReviews(owner, repo, index);
-    const comments: GiteaPullReviewComment[] = [];
+    const comments: InlineComment[] = [];
     for (const review of reviews) {
       if (typeof review.id !== "number" || !Number.isFinite(review.id)) continue;
       try {
@@ -213,32 +372,31 @@ export class GiteaAPI {
     return comments;
   }
 
-  async listPullReviews(owner: string, repo: string, index: number): Promise<GiteaPullReview[]> {
-    return this.getPages<GiteaPullReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews`);
+  async listPullReviews(owner: string, repo: string, index: number): Promise<PullReview[]> {
+    const reviews = await this.getPages<GiteaPullReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews`);
+    return reviews.map(toPullReview);
   }
 
   // ── Commit statuses ───────────────────────────────────────────────────────────
 
-  async createCommitStatus(
-    owner: string,
-    repo: string,
-    sha: string,
-    status: GiteaCommitStatusPayload
-  ): Promise<GiteaCommitStatusPayload> {
-    return this.post<GiteaCommitStatusPayload>(
-      `/repos/${this.repoPath(owner, repo)}/statuses/${encodeURIComponent(sha)}`,
-      status
+  async createCommitStatus(owner: string, repo: string, sha: string, status: CheckPayload): Promise<CheckPayload> {
+    return toCheckPayload(
+      await this.post<GiteaCommitStatusPayload>(
+        `/repos/${this.repoPath(owner, repo)}/statuses/${encodeURIComponent(sha)}`,
+        status
+      )
     );
   }
 
-  async listCommitStatuses(owner: string, repo: string, sha: string): Promise<GiteaCommitStatus[]> {
-    return this.getAll<GiteaCommitStatus>(
+  async listCommitStatuses(owner: string, repo: string, sha: string): Promise<Check[]> {
+    const statuses = await this.getAll<GiteaCommitStatus>(
       `/repos/${this.repoPath(owner, repo)}/commits/${encodeURIComponent(sha)}/statuses`
     );
+    return statuses.map(toCheck);
   }
 
-  async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<GiteaActionJob[]> {
-    const results: GiteaActionJob[] = [];
+  async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]> {
+    const results: ActionJob[] = [];
     let page = 1;
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
     while (page <= 40) {
@@ -246,7 +404,7 @@ export class GiteaAPI {
         `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}${statusQ}`
       );
       const batch = Array.isArray(body?.jobs) ? body.jobs : [];
-      results.push(...batch);
+      results.push(...batch.map(toActionJob));
       if (batch.length !== 50) break;
       page += 1;
     }

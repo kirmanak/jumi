@@ -21,12 +21,12 @@ import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import {
   closesIssuePattern,
-  type IssueApi,
   isAssignedForeignPR,
   pullRequestClosesIssue,
   upsertWorkerComment,
 } from "./gitea_issues.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
+import type { IssueApi } from "./ports.ts";
 import {
   appendStuckFingerprint,
   deleteStuckState,

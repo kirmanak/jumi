@@ -1,41 +1,7 @@
 import { isAssignedToBot } from "./assignee.ts";
-import type {
-  GiteaActionJob,
-  GiteaComment,
-  GiteaCommitStatus,
-  GiteaIssue,
-  GiteaPR,
-  GiteaPullReview,
-  GiteaPullReviewComment,
-  GiteaRepo,
-} from "./types.ts";
+import type { Forge, Pull, Tracker } from "./ports.ts";
 
-export interface IssueApi {
-  getRepo(owner: string, repo: string): Promise<GiteaRepo>;
-  getIssue(owner: string, repo: string, index: number): Promise<GiteaIssue>;
-  getPR(owner: string, repo: string, index: number): Promise<GiteaPR>;
-  listOpenPulls(owner: string, repo: string): Promise<GiteaPR[]>;
-  createPullRequest(
-    owner: string,
-    repo: string,
-    pull: { title: string; body: string; head: string; base: string }
-  ): Promise<GiteaPR>;
-  findStickyIssueComment(
-    owner: string,
-    repo: string,
-    index: number,
-    botUsername: string,
-    marker: string
-  ): Promise<{ id: number } | undefined>;
-  createIssueComment(owner: string, repo: string, index: number, body: string): Promise<GiteaComment>;
-  updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<GiteaComment>;
-  listIssueComments(owner: string, repo: string, index: number): Promise<GiteaComment[]>;
-  listPullReviewComments(owner: string, repo: string, index: number): Promise<GiteaPullReviewComment[]>;
-  listPullReviews(owner: string, repo: string, index: number): Promise<GiteaPullReview[]>;
-  listCommitStatuses(owner: string, repo: string, sha: string): Promise<GiteaCommitStatus[]>;
-  listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<GiteaActionJob[]>;
-  getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
-}
+export type { IssueApi, Tracker } from "./ports.ts";
 
 export function workerMarker(owner: string, repo: string, issueNumber: number): string {
   return `<!-- jumi-worker:${owner}/${repo}#${issueNumber} -->`;
@@ -127,32 +93,32 @@ export function isWipOrDraft(pr: { title: string; draft?: boolean }): boolean {
   return pr.title.trim().toLowerCase().startsWith("wip:");
 }
 
-export function isEligibleWorkerPR(pr: GiteaPR, owner: string, repo: string): boolean {
+export function isEligibleWorkerPR(pr: Pull, owner: string, repo: string): boolean {
   if (pr.state !== "open" || pr.merged) return false;
   if (isWipOrDraft(pr)) return false;
   if (!pr.head?.repo || pr.head.repo.full_name !== `${owner}/${repo}`) return false;
   return true;
 }
 
-export function isInScopeJumiPR(pr: GiteaPR, owner: string, repo: string, botUsername: string): boolean {
+export function isInScopeJumiPR(pr: Pull, owner: string, repo: string, botUsername: string): boolean {
   if (!isEligibleWorkerPR(pr, owner, repo)) return false;
   if (!isJumiPrIdentity(pr, botUsername)) return false;
   return extractClosingIssueNumber(pr) !== undefined;
 }
 
-export function isAssignedForeignPR(pr: GiteaPR, owner: string, repo: string, botUsername: string): boolean {
+export function isAssignedForeignPR(pr: Pull, owner: string, repo: string, botUsername: string): boolean {
   if (!isEligibleWorkerPR(pr, owner, repo)) return false;
   if (isInScopeJumiPR(pr, owner, repo, botUsername)) return false;
   return isAssignedToBot(pr, botUsername);
 }
 
 export async function findOpenClosingPullRequest(
-  api: Pick<IssueApi, "listOpenPulls">,
+  api: Pick<Forge, "listOpenPulls">,
   owner: string,
   repo: string,
   issueNumber: number,
   botUsername?: string
-): Promise<GiteaPR | undefined> {
+): Promise<Pull | undefined> {
   const pulls = await api.listOpenPulls(owner, repo);
   return pulls.find((pr) => {
     if (!pullRequestClosesIssue(pr, issueNumber)) return false;
@@ -162,12 +128,12 @@ export async function findOpenClosingPullRequest(
 }
 
 export async function findOpenJumiClosingPullRequest(
-  api: Pick<IssueApi, "listOpenPulls">,
+  api: Pick<Forge, "listOpenPulls">,
   owner: string,
   repo: string,
   issueNumber: number,
   botUsername: string
-): Promise<GiteaPR | undefined> {
+): Promise<Pull | undefined> {
   const pulls = await api.listOpenPulls(owner, repo);
   return pulls.find(
     (pr) => isInScopeJumiPR(pr, owner, repo, botUsername) && extractClosingIssueNumber(pr) === issueNumber
@@ -175,13 +141,13 @@ export async function findOpenJumiClosingPullRequest(
 }
 
 export async function resolveWorkerPullRequest(
-  api: Pick<IssueApi, "listOpenPulls">,
+  api: Pick<Forge, "listOpenPulls">,
   owner: string,
   repo: string,
   issueNumber: number,
   botUsername: string,
   prNumber?: number
-): Promise<GiteaPR | undefined> {
+): Promise<Pull | undefined> {
   const pulls = await api.listOpenPulls(owner, repo);
   if (prNumber !== undefined) {
     const byNumber = pulls.find((pr) => pr.number === prNumber);
@@ -193,7 +159,7 @@ export async function resolveWorkerPullRequest(
 }
 
 export async function upsertWorkerComment(
-  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">,
+  api: Pick<Tracker, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">,
   owner: string,
   repo: string,
   issueNumber: number,

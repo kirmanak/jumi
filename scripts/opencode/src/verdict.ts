@@ -1,7 +1,7 @@
-import type { GiteaCommitStatusState } from "./types.ts";
+import type { CheckState } from "./ports.ts";
 
 export interface ReviewVerdict {
-  state: Extract<GiteaCommitStatusState, "success" | "failure">;
+  state: Extract<CheckState, "success" | "failure">;
   description: string;
   incomplete: boolean;
 }

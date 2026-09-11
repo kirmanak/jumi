@@ -1,5 +1,5 @@
 import { byteLength } from "./diagnostics.ts";
-import type { GiteaComment, GiteaIssue } from "./types.ts";
+import type { Comment, Task } from "./ports.ts";
 
 export const DEFAULT_MAX_THREAD_BYTES = 200_000;
 export const MAX_COMMENT_BODY_BYTES = 32_768;
@@ -45,7 +45,7 @@ export function escapeXml(str: string): string {
     .replace(/'/g, "&apos;");
 }
 
-export function mapReviewComment(comment: GiteaComment): ReviewComment {
+export function mapReviewComment(comment: Comment): ReviewComment {
   return {
     id: comment.id,
     author: comment.user?.login ?? "",
@@ -55,8 +55,8 @@ export function mapReviewComment(comment: GiteaComment): ReviewComment {
 }
 
 export function mapReviewThread(opts: {
-  prComments: GiteaComment[];
-  linkedIssues: Array<{ issue: GiteaIssue; comments: GiteaComment[] }>;
+  prComments: Comment[];
+  linkedIssues: Array<{ issue: Task; comments: Comment[] }>;
 }): ReviewThread {
   return {
     comments: opts.prComments.map(mapReviewComment),
