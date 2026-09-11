@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runOpenCode } from "../src/git.ts";
+import { CONFLICT_PROMPT, FOLLOWUP_PROMPT, IMPLEMENT_PROMPT, resolveOpenCodePrompt, runOpenCode } from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
@@ -384,5 +384,88 @@ time.sleep(30)
         expect(result.message).toContain("opencode exited with code");
       }
     );
+  });
+
+  test("synthesizes implement stdin when the kernel omits prompt", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+cat
+`,
+      async (_binDir, workdir) => {
+        await writeFile(join(workdir, "JUMI_TASK.md"), "# Fix the thing\n");
+        const result = await runOpenCode({
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toBe(IMPLEMENT_PROMPT);
+      }
+    );
+  });
+
+  test("feeds the review task file as OpenCode stdin", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+cat
+`,
+      async (_binDir, workdir) => {
+        await writeFile(join(workdir, "JUMI_TASK.md"), "review-context-xml");
+        const result = await runOpenCode({
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "review", owner: "kirmanak", repo: "demo" },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toBe("review-context-xml");
+      }
+    );
+  });
+
+  test("reads OPENCODE_CONFIG from the environment when configPath is omitted", async () => {
+    const previous = process.env.OPENCODE_CONFIG;
+    process.env.OPENCODE_CONFIG = "/from-env.json";
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'CONFIG=%s\n' "$OPENCODE_CONFIG"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({
+            prompt: "prompt",
+            model: "model",
+            workdir,
+            sanitizeEnv: true,
+          });
+          expect(result.status).toBe("ok");
+          expect(result.stdout).toContain("CONFIG=/from-env.json");
+        }
+      );
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG;
+      else process.env.OPENCODE_CONFIG = previous;
+    }
+  });
+});
+
+describe("resolveOpenCodePrompt", () => {
+  test("prefers an explicit prompt", async () => {
+    expect(await resolveOpenCodePrompt({ prompt: "explicit", model: "m", workdir: "/tmp" })).toBe("explicit");
+  });
+
+  test("uses workspace files when prompt is omitted", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-prompt-"));
+    try {
+      await writeFile(join(dir, "JUMI_TASK.md"), "task");
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toBe(IMPLEMENT_PROMPT);
+      await writeFile(join(dir, "JUMI_FEEDBACK.md"), "feedback");
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toBe(FOLLOWUP_PROMPT);
+      await writeFile(join(dir, "JUMI_CONFLICT.md"), "conflict");
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toBe(CONFLICT_PROMPT);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

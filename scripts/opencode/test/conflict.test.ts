@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
-import { CONFLICT_PROMPT, CONFLICT_TIMEOUT_MS, implementConflict, writeConflictState } from "../src/conflict.ts";
+import { CONFLICT_TIMEOUT_MS, implementConflict, writeConflictState } from "../src/conflict.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -397,10 +397,10 @@ describe("implementConflict", () => {
     });
   });
 
-  test("remaining markers → writes JUMI_CONFLICT.md, uses CONFLICT_PROMPT, timeout 3600000", async () => {
+  test("remaining markers → writes JUMI_CONFLICT.md, runs conflict engine, timeout 3600000", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
-      let prompt = "";
+      let kind: string | undefined;
       let timeoutMs: number | undefined;
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -423,8 +423,9 @@ describe("implementConflict", () => {
         heartbeatIntervalMs: 0,
         gitRunner,
         openCodeRunner: async (opts) => {
-          prompt = opts.prompt;
+          kind = opts.trace?.kind;
           timeoutMs = opts.timeoutMs;
+          expect("prompt" in opts).toBe(false);
           const conflict = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CONFLICT.md"), "utf8");
           expect(conflict).toContain("pulls/127");
           expect(conflict).toContain("jumi/issue-12-fix-the-thing");
@@ -433,7 +434,7 @@ describe("implementConflict", () => {
         },
         logger: () => undefined,
       });
-      expect(prompt).toBe(CONFLICT_PROMPT);
+      expect(kind).toBe("conflict");
       expect(timeoutMs).toBe(CONFLICT_TIMEOUT_MS);
       expect(timeoutMs).toBe(3_600_000);
       expect(result).toEqual({ status: "stuck" });

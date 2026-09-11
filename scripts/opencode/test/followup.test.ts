@@ -11,12 +11,11 @@ import {
   readClaim,
   stuckStatePath,
 } from "../src/claim.ts";
-import { CONFLICT_PROMPT, readConflictState, writeConflictState } from "../src/conflict.ts";
+import { readConflictState, writeConflictState } from "../src/conflict.ts";
 import {
   buildFeedbackMarkdown,
   collectFollowUpItems,
   FEEDBACK_MAX_BYTES,
-  FOLLOWUP_PROMPT,
   FOLLOWUP_TIMEOUT_MS,
   implementFollowUp,
   needsFollowUp,
@@ -350,10 +349,10 @@ describe("implementFollowUp", () => {
     });
   });
 
-  test("writes JUMI_FEEDBACK.md and uses FOLLOWUP_PROMPT", async () => {
+  test("writes JUMI_FEEDBACK.md and runs the follow-up engine", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
-      let prompt = "";
+      let kind: string | undefined;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -373,7 +372,8 @@ describe("implementFollowUp", () => {
         heartbeatIntervalMs: 0,
         gitRunner,
         openCodeRunner: async (opts) => {
-          prompt = opts.prompt;
+          kind = opts.trace?.kind;
+          expect("prompt" in opts).toBe(false);
           const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
           expect(feedback).toContain("please fix the tests");
           expect(feedback).toContain("pulls/127");
@@ -382,7 +382,7 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(prompt).toBe(FOLLOWUP_PROMPT);
+      expect(kind).toBe("follow-up");
     });
   });
 
@@ -1196,7 +1196,7 @@ describe("implementFollowUp", () => {
         heartbeatIntervalMs: 0,
         gitRunner,
         openCodeRunner: async (opts) => {
-          events.push(opts.prompt === FOLLOWUP_PROMPT ? "feedback" : "other");
+          events.push(opts.trace?.kind === "follow-up" ? "feedback" : "other");
           return { status: "ok" };
         },
         logger: () => undefined,
@@ -1208,7 +1208,7 @@ describe("implementFollowUp", () => {
 
   test("merge stuck → no feedback OpenCode", async () => {
     await withDirs(async (home, workdir) => {
-      const prompts: string[] = [];
+      const kinds: string[] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
@@ -1232,12 +1232,12 @@ describe("implementFollowUp", () => {
         heartbeatIntervalMs: 0,
         gitRunner,
         openCodeRunner: async (opts) => {
-          prompts.push(opts.prompt);
+          kinds.push(opts.trace?.kind ?? "");
           return { status: "ok" };
         },
         logger: () => undefined,
       });
-      expect(prompts).toEqual([CONFLICT_PROMPT]);
+      expect(kinds).toEqual(["conflict"]);
       expect(result).toEqual({ status: "skipped", reason: "stuck: cannot resolve conflicts" });
       const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
       expect(conflict.round).toBe(1);
@@ -1313,7 +1313,7 @@ describe("implementFollowUp", () => {
           heartbeatIntervalMs: 0,
           gitRunner,
           openCodeRunner: async (opts) => {
-            if (opts.prompt === CONFLICT_PROMPT) throw new Error("opencode crashed");
+            if (opts.trace?.kind === "conflict") throw new Error("opencode crashed");
             throw new Error("feedback should not run");
           },
           logger: () => undefined,
@@ -1433,7 +1433,7 @@ describe("implementFollowUp", () => {
         heartbeatIntervalMs: 0,
         gitRunner,
         openCodeRunner: async (opts) => {
-          if (opts.prompt === CONFLICT_PROMPT) conflictDone = true;
+          if (opts.trace?.kind === "conflict") conflictDone = true;
           return { status: "ok" };
         },
         logger: () => undefined,
@@ -1475,7 +1475,7 @@ describe("implementFollowUp", () => {
           heartbeatIntervalMs: 0,
           gitRunner,
           openCodeRunner: async (opts) => {
-            if (opts.prompt === CONFLICT_PROMPT) {
+            if (opts.trace?.kind === "conflict") {
               conflictDone = true;
               return { status: "ok" };
             }
@@ -1622,7 +1622,7 @@ describe("implementFollowUp", () => {
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
         getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
       });
-      let prompt = "";
+      let kind: string | undefined;
       const result = await implementFollowUp({
         api,
         job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
@@ -1641,7 +1641,7 @@ describe("implementFollowUp", () => {
           return "";
         },
         openCodeRunner: async (opts) => {
-          prompt = opts.prompt;
+          kind = opts.trace?.kind;
           const ci = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
           expect(ci).toContain("platforms;android-37");
           expect(ci).toContain("Do not call tea");
@@ -1652,7 +1652,7 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(prompt).toBe(FOLLOWUP_PROMPT);
+      expect(kind).toBe("follow-up");
       expect(result.status).toBe("no-changes");
       expect(api.comments.some((body) => body.includes("Jumi is addressing CI failure."))).toBe(true);
       const followState = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));

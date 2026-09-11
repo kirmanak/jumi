@@ -178,6 +178,8 @@ describe("Engine and Forge ports", () => {
       expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(true);
       expect(engineOpts?.sanitizeEnv).toBe(true);
+      expect("prompt" in (engineOpts ?? {})).toBe(false);
+      expect("configPath" in (engineOpts ?? {})).toBe(false);
       expect(engineOpts?.extraEnv?.GITEA_BOT_TOKEN).toBeUndefined();
       expect(engineOpts?.extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
       expect(engineOpts?.extraEnv?.GIT_COMMITTER_EMAIL).toBe(FORGE_COMMITTER_EMAIL);
@@ -194,9 +196,15 @@ describe("Engine and Forge ports", () => {
       const gitRunner: GitRunner = async (args) => {
         if (args[0] === "rev-parse") return sha;
         if (args[0] === "status") return "?? JUMI_REVIEW.md";
+        if (args[0] === "ls-files") return "";
+        if (args[0] === "checkout") return "";
         throw new Error(`unexpected git ${args.join(" ")}`);
       };
-      const engine: Engine = async () => {
+      const engine: Engine = async (opts) => {
+        expect("prompt" in opts).toBe(false);
+        expect("configPath" in opts).toBe(false);
+        const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
+        expect(task).toContain("Write JUMI_REVIEW.md");
         await writeFile(join(workspace, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
         return { status: "ok" };
       };

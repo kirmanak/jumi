@@ -42,16 +42,11 @@ import type { GiteaComment, GiteaPR, GiteaPullReview, GiteaPullReviewComment, Is
 import { parseCheckLine } from "./verdict.ts";
 import { gitConfigArgs, gitEnv, runGit, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
 
+export { FOLLOWUP_PROMPT } from "./git.ts";
+
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_FOLLOWUP_ROUNDS = 3;
 export const FEEDBACK_MAX_BYTES = 32 * 1024;
-
-export const FOLLOWUP_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
-If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too. Do not call tea, the forge API, or fetch Actions yourself.
-Address the feedback in this repository on the current branch.
-Do not reopen product decisions already specified in JUMI_TASK.md.
-Do not force-push. Do not ask questions. Do not open a pull request.
-When the feedback is addressed, stop.`;
 
 export type FollowUpResult =
   | { status: "pushed"; prNumber: number; htmlUrl: string }
@@ -829,7 +824,6 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
       pr,
       model: opts.model,
       home: opts.home,
-      opencodeConfig: opts.opencodeConfig,
       sanitizeOpenCodeEnv: sanitizeEnv,
       extraEnv: workerOpenCodeChildEnv(
         {
@@ -933,10 +927,8 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     followUpEngineRan = true;
     throwIfEngineFailed(
       await engine({
-        prompt: FOLLOWUP_PROMPT,
         model: opts.model,
         workdir: worktree,
-        configPath: opts.opencodeConfig,
         home: opts.home,
         sanitizeEnv,
         extraEnv: workerOpenCodeChildEnv(

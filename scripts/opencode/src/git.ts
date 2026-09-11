@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   byteLength,
@@ -28,11 +28,60 @@ function stripAnsi(str: string): string {
  * Stdout is logs (ANSI stripped), not the deliverable. Timeout and non-zero
  * exit are returned for the parent to fail closed. Abort still throws.
  *
- * The prompt is written to a temp file and fed to `opencode run` via stdin to
- * avoid OS ARG_MAX limits for large PR diffs. Both stdout and stderr are
- * consumed concurrently to prevent pipe-buffer deadlocks (64KB on Linux).
+ * Argv/stdin/`OPENCODE_CONFIG` stay inside this impl. The kernel Engine port is
+ * the workspace: the parent writes task/feedback files and reads artifacts.
+ * When `prompt` is omitted, stdin is synthesized from those files / `trace.kind`.
  */
-export type OpenCodeRunOptions = EngineRunOptions;
+export interface OpenCodeRunOptions extends EngineRunOptions {
+  prompt?: string;
+  configPath?: string;
+}
+
+export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
+Edit, write, commit, and push as needed. Incremental commits are fine.
+Do not force-push. Do not ask questions.
+When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
+Then stop.`;
+
+export const FOLLOWUP_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
+If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too. Do not call tea, the forge API, or fetch Actions yourself.
+Address the feedback in this repository on the current branch.
+Do not reopen product decisions already specified in JUMI_TASK.md.
+Do not force-push. Do not ask questions. Do not open a pull request.
+When the feedback is addressed, stop.`;
+
+export const CONFLICT_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_CONFLICT.md (merge vs the default branch).
+If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head.
+Resolve only conflicted regions on the current branch.
+Keep both the issue intent and the default-branch changes when they are orthogonal.
+Do not drop either side to “win.” Do not reopen product decisions in JUMI_TASK.md.
+Do not force-push. Do not ask questions. Do not open a pull request.
+When conflicts are resolved and no <<<<<<< markers remain, stop.`;
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function resolveOpenCodePrompt(opts: OpenCodeRunOptions): Promise<string> {
+  if (opts.prompt != null) return opts.prompt;
+  const kind = opts.trace?.kind;
+  if (kind === "review") return await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+  if (kind === "follow-up") return FOLLOWUP_PROMPT;
+  if (kind === "conflict") return CONFLICT_PROMPT;
+  if (kind === "implement") return IMPLEMENT_PROMPT;
+  if (await pathExists(join(opts.workdir, "JUMI_CONFLICT.md"))) return CONFLICT_PROMPT;
+  if (await pathExists(join(opts.workdir, "JUMI_FEEDBACK.md"))) return FOLLOWUP_PROMPT;
+  return IMPLEMENT_PROMPT;
+}
+
+function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined {
+  return opts.configPath ?? process.env.OPENCODE_CONFIG;
+}
 
 function buildEnv(
   opts: OpenCodeRunOptions,
@@ -41,9 +90,10 @@ function buildEnv(
 ): Record<string, string> | undefined {
   // Per-review SQLite path under the workspace temp dir so session DB does not
   // accumulate on HOME across runs (OOM trail: 1.5GiB shared opencode.db).
+  const configPath = resolveOpenCodeConfigPath(opts);
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: tempRoot, OPENCODE_DB: openCodeDbPath } as Record<string, string>;
-    if (opts.configPath) env.OPENCODE_CONFIG = opts.configPath;
+    if (configPath) env.OPENCODE_CONFIG = configPath;
     return env;
   }
 
@@ -57,7 +107,7 @@ function buildEnv(
     OPENCODE_DB: openCodeDbPath,
   };
 
-  if (opts.configPath) env.OPENCODE_CONFIG = opts.configPath;
+  if (configPath) env.OPENCODE_CONFIG = configPath;
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
       if (key.startsWith("GITEA_")) continue;
@@ -168,7 +218,7 @@ function engineExitMessage(exitCode: number | null, stderr: string): string {
 
 export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
-  const prompt = opts.prompt;
+  const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
 

@@ -41,6 +41,8 @@ function frozenGit(): GitRunner {
   return async (args) => {
     if (args[0] === "rev-parse") return "headsha";
     if (args[0] === "status") return "?? JUMI_REVIEW.md";
+    if (args[0] === "ls-files") return "";
+    if (args[0] === "checkout") return "";
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
 }

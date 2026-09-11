@@ -1,4 +1,4 @@
-import { lstat, readFile, rm } from "node:fs/promises";
+import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
@@ -96,7 +96,6 @@ export interface ReviewOptions {
   giteaUrl: string;
   giteaToken: string;
   botUsername: string;
-  opencodeConfig?: string;
   home?: string;
   sanitizeOpenCodeEnv?: boolean;
   timeoutMs?: number;
@@ -583,13 +582,29 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       model: opts.model,
     });
 
+    const git = opts.gitRunner ?? runGit;
+    const gitCmdEnv: Record<string, string | undefined> = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      LANG: process.env.LANG,
+      LC_ALL: process.env.LC_ALL,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    let taskTracked = false;
+    try {
+      taskTracked =
+        (await git(["ls-files", "--", "JUMI_TASK.md"], { cwd: opts.workspace, env: gitCmdEnv })).trim() !== "";
+    } catch {
+      taskTracked = false;
+    }
+
+    await writeFile(join(opts.workspace, "JUMI_TASK.md"), prompt);
+
     log(`Running OpenCode for ${repoFullName}#${pr.number}`);
     throwIfAborted(opts.abortSignal);
     const engineResult = await engine({
-      prompt,
       model: opts.model,
       workdir: opts.workspace,
-      configPath: opts.opencodeConfig,
       home: opts.home,
       sanitizeEnv: opts.sanitizeOpenCodeEnv,
       timeoutMs: opts.timeoutMs,
@@ -614,6 +629,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     });
 
     await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
+    if (taskTracked) {
+      await git(["checkout", "--", "JUMI_TASK.md"], { cwd: opts.workspace, env: gitCmdEnv });
+    } else {
+      await rm(join(opts.workspace, "JUMI_TASK.md"), { force: true }).catch(() => undefined);
+    }
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
     const persistSkipAndStatus = async (reason: string, htmlUrl?: string): Promise<ReviewResult> => {
       const result: ReviewResult = { status: "skipped", reason };
@@ -628,14 +648,6 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
       if (currentSkipReason) return await persistSkipAndStatus(currentSkipReason, currentPR.html_url);
 
-      const git = opts.gitRunner ?? runGit;
-      const gitCmdEnv: Record<string, string | undefined> = {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        LANG: process.env.LANG,
-        LC_ALL: process.env.LC_ALL,
-        GIT_TERMINAL_PROMPT: "0",
-      };
       const headAfter = (await git(["rev-parse", "HEAD"], { cwd: opts.workspace, env: gitCmdEnv })).trim();
       if (headAfter !== reviewedHeadSha) {
         return await persistSkipAndStatus("Incomplete review: HEAD moved", currentPR.html_url);

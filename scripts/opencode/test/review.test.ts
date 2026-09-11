@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reviewStuckStatePath } from "../src/claim.ts";
@@ -53,6 +53,8 @@ function frozenGit(opts: { head?: string; porcelain?: string } = {}): GitRunner 
   return async (args) => {
     if (args[0] === "rev-parse") return head;
     if (args[0] === "status") return porcelain;
+    if (args[0] === "ls-files") return "";
+    if (args[0] === "checkout") return "";
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
 }
@@ -231,6 +233,7 @@ describe("reviewPullRequest", () => {
       expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(false);
       expect(persisted).toEqual([{ kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->" }]);
       await expect(access(join(workspace, "JUMI_REVIEW.md"))).rejects.toThrow();
+      await expect(access(join(workspace, "JUMI_TASK.md"))).rejects.toThrow();
       expect(statuses).toEqual([
         {
           sha: REVIEW_SHA,
@@ -597,6 +600,36 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("restores a tracked JUMI_TASK.md after the engine instead of deleting it", async () => {
+    await withWorkspace(async (workspace) => {
+      const original = "# original task from the PR\n";
+      await writeFile(join(workspace, "JUMI_TASK.md"), original);
+      const gitRunner: GitRunner = async (args) => {
+        if (args[0] === "ls-files") return args.includes("JUMI_TASK.md") ? "JUMI_TASK.md" : "";
+        if (args[0] === "checkout" && args.includes("JUMI_TASK.md")) {
+          await writeFile(join(workspace, "JUMI_TASK.md"), original);
+          return "";
+        }
+        if (args[0] === "rev-parse") return "headsha";
+        if (args[0] === "status") return "?? JUMI_REVIEW.md";
+        throw new Error(`unexpected git ${args.join(" ")}`);
+      };
+      let engineSaw = "";
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace, gitRunner),
+        api: makeApi(),
+        openCodeRunner: async () => {
+          engineSaw = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result.status).toBe("posted");
+      expect(engineSaw).toContain("Write JUMI_REVIEW.md");
+      expect(await readFile(join(workspace, "JUMI_TASK.md"), "utf8")).toBe(original);
+    });
+  });
+
   test("monolith posts failure status when sticky write fails after a good review", async () => {
     await withWorkspace(async (workspace) => {
       const statuses: Array<{ state: string; description?: string }> = [];
@@ -729,80 +762,86 @@ describe("reviewPullRequest", () => {
   });
 
   test("interrupt does not persist an error or post a sticky", async () => {
-    const statuses: Array<{ state: string; description?: string }> = [];
-    const persisted: PersistReviewResult[] = [];
-    const abort = new AbortController();
-    const err = new Error("cancelled");
-    err.name = "AbortError";
-    await expect(
-      reviewPullRequest({
-        ...skipOptions,
-        api: makeApi({
-          createCommitStatus: async (_owner, _repo, _sha, status) => {
-            statuses.push(status);
-            return status;
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const persisted: PersistReviewResult[] = [];
+      const abort = new AbortController();
+      const err = new Error("cancelled");
+      err.name = "AbortError";
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+            createIssueComment: async () => {
+              throw new Error("should not post sticky");
+            },
+          }),
+          persistResult: async (value) => {
+            persisted.push(value);
           },
-          createIssueComment: async () => {
-            throw new Error("should not post sticky");
+          abortSignal: abort.signal,
+          openCodeRunner: async () => {
+            abort.abort();
+            throw err;
           },
-        }),
-        persistResult: async (value) => {
-          persisted.push(value);
-        },
-        abortSignal: abort.signal,
-        openCodeRunner: async () => {
-          abort.abort();
-          throw err;
-        },
-      })
-    ).rejects.toMatchObject({ name: "AbortError", message: "cancelled" });
+        })
+      ).rejects.toMatchObject({ name: "AbortError", message: "cancelled" });
 
-    expect(persisted).toEqual([]);
-    expect(statuses.map((status) => status.state)).toEqual(["pending"]);
+      expect(persisted).toEqual([]);
+      expect(statuses.map((status) => status.state)).toEqual(["pending"]);
+    });
   });
 
   test("marks the commit status failed when the review crashes", async () => {
-    const statuses: Array<{ state: string; description?: string }> = [];
-    await expect(
-      reviewPullRequest({
-        ...skipOptions,
-        api: makeApi({
-          createCommitStatus: async (_owner, _repo, _sha, status) => {
-            statuses.push(status);
-            return status;
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          openCodeRunner: async () => {
+            throw new Error("model unavailable");
           },
-        }),
-        openCodeRunner: async () => {
-          throw new Error("model unavailable");
-        },
-      })
-    ).rejects.toThrow("model unavailable");
+        })
+      ).rejects.toThrow("model unavailable");
 
-    expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
-    expect(statuses[1].description).toBe("Jumi review failed: model unavailable");
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(statuses[1].description).toBe("Jumi review failed: model unavailable");
+    });
   });
 
   test("truncates long status descriptions without splitting UTF-8 characters", async () => {
-    const statuses: Array<{ state: string; description?: string }> = [];
-    const message = "€".repeat(200);
-    await expect(
-      reviewPullRequest({
-        ...skipOptions,
-        api: makeApi({
-          createCommitStatus: async (_owner, _repo, _sha, status) => {
-            statuses.push(status);
-            return status;
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const message = "€".repeat(200);
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          openCodeRunner: async () => {
+            throw new Error(message);
           },
-        }),
-        openCodeRunner: async () => {
-          throw new Error(message);
-        },
-      })
-    ).rejects.toThrow(message);
+        })
+      ).rejects.toThrow(message);
 
-    expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
-    expect(statuses[1].description?.endsWith("…")).toBe(true);
-    expect(new TextEncoder().encode(statuses[1].description ?? "").byteLength).toBeLessThanOrEqual(255);
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(statuses[1].description?.endsWith("…")).toBe(true);
+      expect(new TextEncoder().encode(statuses[1].description ?? "").byteLength).toBeLessThanOrEqual(255);
+    });
   });
 
   test("skips stale jobs before OpenCode runs", async () => {
@@ -821,33 +860,35 @@ describe("reviewPullRequest", () => {
   });
 
   test("skips posting when the PR head changes during review", async () => {
-    let getPRCalls = 0;
-    let stickyLookup = false;
-    let created = false;
-    const result = await reviewPullRequest({
-      ...skipOptions,
-      api: makeApi({
-        getPR: async () => {
-          getPRCalls++;
-          return makePR({ head: makeBranch({ sha: getPRCalls === 1 ? "oldsha" : "newsha" }) });
-        },
-        findStickyIssueComment: async () => {
-          stickyLookup = true;
-          return undefined;
-        },
-        createIssueComment: async (_owner, _repo, _index, body) => {
-          created = true;
-          return makeComment({ body });
-        },
-      }),
-      expectedHeadSha: "oldsha",
-      openCodeRunner: async () => ({ status: "ok" }),
-    });
+    await withWorkspace(async (workspace) => {
+      let getPRCalls = 0;
+      let stickyLookup = false;
+      let created = false;
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          getPR: async () => {
+            getPRCalls++;
+            return makePR({ head: makeBranch({ sha: getPRCalls === 1 ? "oldsha" : "newsha" }) });
+          },
+          findStickyIssueComment: async () => {
+            stickyLookup = true;
+            return undefined;
+          },
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            created = true;
+            return makeComment({ body });
+          },
+        }),
+        expectedHeadSha: "oldsha",
+        openCodeRunner: async () => ({ status: "ok" }),
+      });
 
-    expect(result).toEqual({ status: "skipped", reason: "PR head changed from oldsha to newsha" });
-    expect(getPRCalls).toBe(2);
-    expect(stickyLookup).toBe(false);
-    expect(created).toBe(false);
+      expect(result).toEqual({ status: "skipped", reason: "PR head changed from oldsha to newsha" });
+      expect(getPRCalls).toBe(2);
+      expect(stickyLookup).toBe(false);
+      expect(created).toBe(false);
+    });
   });
 
   test("checks out the repository before running OpenCode and tells it the target branch", async () => {
@@ -872,7 +913,7 @@ describe("reviewPullRequest", () => {
           };
         },
         openCodeRunner: async (opts) => {
-          prompt = opts.prompt;
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
           runnerWorkdir = opts.workdir;
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -913,7 +954,7 @@ describe("reviewPullRequest", () => {
         maxFiles: 1,
         maxPatchBytes: 3,
         openCodeRunner: async (opts) => {
-          prompt = opts.prompt;
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
           return { status: "ok" };
         },
@@ -965,7 +1006,7 @@ describe("reviewPullRequest", () => {
           },
         }),
         openCodeRunner: async (opts) => {
-          prompt = opts.prompt;
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
           return { status: "ok" };
         },
@@ -997,7 +1038,7 @@ describe("reviewPullRequest", () => {
           ],
         }),
         openCodeRunner: async (opts) => {
-          prompt = opts.prompt;
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
           await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
           return { status: "ok" };
         },

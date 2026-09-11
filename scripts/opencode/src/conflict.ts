@@ -35,18 +35,12 @@ import {
   workerOpenCodeChildEnv,
 } from "./workspace.ts";
 
+export { CONFLICT_PROMPT } from "./git.ts";
+
 export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_CONFLICT_ROUNDS = 3;
 
 const GENERATED_LOCKS = new Set(["Chart.lock", "requirements.lock"]);
-
-export const CONFLICT_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_CONFLICT.md (merge vs the default branch).
-If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head.
-Resolve only conflicted regions on the current branch.
-Keep both the issue intent and the default-branch changes when they are orthogonal.
-Do not drop either side to “win.” Do not reopen product decisions in JUMI_TASK.md.
-Do not force-push. Do not ask questions. Do not open a pull request.
-When conflicts are resolved and no <<<<<<< markers remain, stop.`;
 
 export type ConflictResult =
   | { status: "pushed"; prNumber: number; htmlUrl: string }
@@ -83,7 +77,6 @@ export interface MergeDefaultIntoWorktreeOpts {
   pr: GiteaPR;
   model: string;
   home: string;
-  opencodeConfig?: string;
   sanitizeOpenCodeEnv?: boolean;
   extraEnv: Record<string, string>;
   maxOutputBytes?: number;
@@ -454,10 +447,8 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     openCodeRan = true;
     throwIfEngineFailed(
       await opts.openCodeRunner({
-        prompt: CONFLICT_PROMPT,
         model: opts.model,
         workdir: worktree,
-        configPath: opts.opencodeConfig,
         home: opts.home,
         sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
         extraEnv: opts.extraEnv,
@@ -740,7 +731,6 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       pr,
       model: opts.model,
       home: opts.home,
-      opencodeConfig: opts.opencodeConfig,
       sanitizeOpenCodeEnv: sanitizeEnv,
       extraEnv: workerOpenCodeChildEnv(
         {

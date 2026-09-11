@@ -9,10 +9,8 @@ export interface TraceContext {
 }
 
 export interface EngineRunOptions {
-  prompt: string;
   model: string;
   workdir: string;
-  configPath?: string;
   home?: string;
   sanitizeEnv?: boolean;
   timeoutMs?: number;

@@ -98,7 +98,6 @@ export async function runReviewJob(
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
       botUsername: config.botUsername,
-      opencodeConfig: config.opencodeConfig,
       home: config.home,
       sanitizeOpenCodeEnv: true,
       timeoutMs: config.opencodeTimeoutMs,

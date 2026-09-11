@@ -45,6 +45,8 @@ import {
   workerOpenCodeChildEnv,
 } from "./workspace.ts";
 
+export { IMPLEMENT_PROMPT } from "./git.ts";
+
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 const PR_BODY_MAX_CHARS = 8000;
 const PR_DESCRIPTION_FILE = "JUMI_PR.md";
@@ -69,7 +71,6 @@ export interface ImplementOptions {
   model: string;
   home: string;
   workdir: string;
-  opencodeConfig?: string;
   timeoutMs?: number;
   followupTimeoutMs?: number;
   conflictTimeoutMs?: number;
@@ -140,12 +141,6 @@ async function pathExists(path: string): Promise<boolean> {
 export function buildTaskMarkdown(job: IssueJob): string {
   return `# ${job.title}\n\n${job.body}\n\n${job.htmlUrl}\n`;
 }
-
-export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
-Edit, write, commit, and push as needed. Incremental commits are fine.
-Do not force-push. Do not ask questions.
-When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
-Then stop.`;
 
 export function buildPullRequestBody(issueNumber: number, fileContents: string | null | undefined): string {
   const fallback = `Fixes #${issueNumber}`;
@@ -368,10 +363,8 @@ export async function implementIssue(
     log(`Running OpenCode for ${owner}/${repo}#${issueNumber}`);
     throwIfEngineFailed(
       await engine({
-        prompt: IMPLEMENT_PROMPT,
         model: opts.model,
         workdir: worktree,
-        configPath: opts.opencodeConfig,
         home: opts.home,
         sanitizeEnv,
         extraEnv: workerOpenCodeChildEnv(
