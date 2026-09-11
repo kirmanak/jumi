@@ -18,7 +18,9 @@ import {
   FEEDBACK_MAX_BYTES,
   FOLLOWUP_TIMEOUT_MS,
   implementFollowUp,
+  isPointerStubBody,
   needsFollowUp,
+  pickLatestJumiReview,
   writeFollowUpState,
 } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
@@ -48,6 +50,24 @@ function jumiPr() {
       repo,
       repo_id: repo.id,
     },
+  });
+}
+
+function jumiReviewSticky(opts: { id?: number; sha?: string; finding?: string; createdAt?: string } = {}) {
+  const sha = opts.sha ?? "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  return makeComment({
+    id: opts.id ?? 38022,
+    body: [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi OpenCode review",
+      "",
+      `Reviewed commit: \`${sha}\``,
+      "",
+      opts.finding ?? "🟡 risk: guard the null deref in `connectToServer`",
+      "<!-- jumi-check: failure -->",
+    ].join("\n"),
+    user: makeUser({ login: "jumi" }),
+    created_at: opts.createdAt ?? "2026-09-11T00:00:00Z",
   });
 }
 
@@ -1706,6 +1726,150 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("CI-only wake injects the last jumi review into JUMI_FEEDBACK.md", async () => {
+    await withDirs(async (home, workdir) => {
+      const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const sticky = jumiReviewSticky({ sha });
+      const pr = jumiPr();
+      pr.head.sha = sha;
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: sha,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [{ id: sticky.id, sha }],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi({
+        listOpenPulls: async () => [pr],
+        listIssueComments: async () => [sticky],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: sha }],
+        getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "gitea" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return sha;
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).toContain("## Last review");
+          expect(feedback).toContain("🟡 risk: guard the null deref in `connectToServer`");
+          expect(feedback).toContain("Event: workflow_job");
+          const ci = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
+          expect(ci).toContain("platforms;android-37");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("no-changes");
+      expect(openCode).toBe(1);
+      expect(api.comments.some((body) => body.includes("Jumi is addressing CI failure."))).toBe(true);
+      const followState = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      expect(followState.round).toBe(1);
+    });
+  });
+
+  test("address-the-earlier-review stub injects the last jumi review", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [
+          jumiReviewSticky({ sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }),
+          makeComment({
+            id: 88,
+            body: "Address the earlier review",
+            user: makeUser({ login: "alice" }),
+          }),
+        ],
+      });
+      let openCode = 0;
+      await implementFollowUp({
+        api,
+        job: followUpJob({
+          trigger: { event: "issue_comment", commentId: 88, sender: "alice" },
+        }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).toContain("## Last review");
+          expect(feedback).toContain("🟡 risk: guard the null deref in `connectToServer`");
+          expect(feedback).toContain("Address the earlier review");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(openCode).toBe(1);
+      expect(api.comments.some((body) => body.includes("Jumi is addressing review comments."))).toBe(true);
+    });
+  });
+
+  test("address-the-earlier-review stub without findings or CI skips OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api: makeApi({
+          listIssueComments: async () => [
+            makeComment({
+              id: 88,
+              body: "Address the earlier review",
+              user: makeUser({ login: "alice" }),
+            }),
+          ],
+        }),
+        job: followUpJob({
+          trigger: { event: "issue_comment", commentId: 88, sender: "alice" },
+        }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "no unhandled feedback" });
+      expect(openCode).toBe(0);
+    });
+  });
+
   test("clone/fetch failure before OpenCode does not record CI handled", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi({
@@ -1915,6 +2079,69 @@ describe("buildFeedbackMarkdown", () => {
     expect(result.markdown).toContain("Comment id: 55");
     expect(result.commentIds).toContain(55);
     expect(result.commentIds).not.toContain(1);
+  });
+
+  test("keeps last jumi review when extras exceed the byte cap", () => {
+    const huge = "x".repeat(FEEDBACK_MAX_BYTES);
+    const lastReview = jumiReviewSticky();
+    const result = buildFeedbackMarkdown({
+      pr: jumiPr(),
+      trigger: { event: "workflow_job", sender: "gitea" },
+      comments: [
+        makeComment({
+          id: 1,
+          body: huge,
+          created_at: "2026-01-01T00:00:00Z",
+          user: makeUser({ login: "bob" }),
+        }),
+        lastReview,
+      ],
+      inlines: [],
+      reviews: [],
+      lastReview,
+    });
+    expect(result.markdown).toContain("## Last review");
+    expect(result.markdown).toContain("🟡 risk: guard the null deref in `connectToServer`");
+    expect(result.markdown).not.toContain("### Comment 1");
+    expect(result.commentIds).toContain(38022);
+    expect(result.commentIds).not.toContain(1);
+  });
+});
+
+describe("isPointerStubBody", () => {
+  test("treats empty and address-earlier one-liners as stubs", () => {
+    expect(isPointerStubBody("")).toBe(true);
+    expect(isPointerStubBody("   ")).toBe(true);
+    expect(isPointerStubBody("Address the earlier review")).toBe(true);
+    expect(isPointerStubBody("please address the earlier review.")).toBe(true);
+    expect(isPointerStubBody("please fix the tests")).toBe(false);
+    expect(isPointerStubBody("please fix the tests from the earlier review")).toBe(false);
+  });
+});
+
+describe("pickLatestJumiReview", () => {
+  const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const staleSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  test("prefers current-head sticky over a newer stale one", () => {
+    const stale = jumiReviewSticky({
+      id: 1,
+      sha: staleSha,
+      finding: "stale finding",
+      createdAt: "2026-09-12T00:00:00Z",
+    });
+    const current = jumiReviewSticky({ id: 2, sha: head, createdAt: "2026-09-11T00:00:00Z" });
+    expect(pickLatestJumiReview([stale, current], head)?.id).toBe(2);
+  });
+
+  test("falls back to the latest sticky when none match head", () => {
+    const older = jumiReviewSticky({ id: 1, sha: staleSha, createdAt: "2026-09-10T00:00:00Z" });
+    const newer = jumiReviewSticky({
+      id: 2,
+      sha: "cccccccccccccccccccccccccccccccccccccccc",
+      createdAt: "2026-09-11T00:00:00Z",
+    });
+    expect(pickLatestJumiReview([older, newer], head)?.id).toBe(2);
   });
 });
 
@@ -2167,6 +2394,28 @@ describe("collectFollowUpItems", () => {
     });
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
     expect(items.comments).toEqual([]);
+    expect(items.jumiStickies.map((comment) => comment.id)).toEqual([38022]);
+  });
+
+  test("keeps jumi inlines for the brief without treating them as human feedback", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviewComments: async () => [
+        makeComment({
+          id: 11,
+          body: "🟡 risk: guard the null deref\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+          user: makeUser({ login: "jumi" }),
+        }),
+        makeComment({
+          id: 12,
+          body: "please rename this helper",
+          user: makeUser({ login: "alice" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
+    expect(items.inlines.map((comment) => comment.id)).toEqual([12]);
+    expect(items.jumiInlines.map((comment) => comment.id)).toEqual([11]);
   });
 
   test("excludes jumi review sticky with success trailer", async () => {
