@@ -66,6 +66,7 @@ function makeApi(
       pulls.push(pull);
       return makePR({ number: 3, title: pull.title, body: pull.body });
     },
+    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, index, body) => {
       commentIndexes.push(index);
@@ -464,6 +465,51 @@ describe("implementFollowUp", () => {
       ]);
       expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
       expect(api.comments.at(-1)).toContain("Pushed follow-up to");
+      expect(api.commentIndexes.at(-1)).toBe(127);
+    });
+  });
+
+  test("closes the existing closer and does not push when the issue is closed after OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const closed: number[] = [];
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          return gets >= 3 ? makeIssue({ state: "closed" }) : makeIssue();
+        },
+        closePullRequest: async (_owner, _repo, index) => {
+          closed.push(index);
+          return makePR({ number: index, state: "closed" });
+        },
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "issue is closed" });
+      expect(closed).toEqual([127]);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
+      expect(api.comments.at(-1)).toContain("Closing this PR because the issue was closed.");
       expect(api.commentIndexes.at(-1)).toBe(127);
     });
   });

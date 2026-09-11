@@ -34,6 +34,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
     getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [],
     createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
+    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
     findStickyIssueComment: async () => ({ id: 9 }),
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);

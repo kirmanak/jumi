@@ -62,6 +62,39 @@ describe("GiteaAPI", () => {
     });
   });
 
+  test("closes a pull request with state closed", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      return Response.json({
+        id: 100,
+        number: 127,
+        title: "Fix",
+        body: "Fixes #12",
+        state: "closed",
+        html_url: "https://gitea.example.test/owner/repo/pulls/127",
+        user: { login: "jumi" },
+        head: { ref: "jumi/issue-12-fix", sha: "abc", repo: { full_name: "owner/repo" }, repo_id: 10 },
+        base: { ref: "main", sha: "def" },
+        merged: false,
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:00Z",
+      });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const pull = await api.closePullRequest("owner", "repo", 127);
+    expect(pull.state).toBe("closed");
+    expect(pull.merged).toBe(false);
+    expect(requests).toEqual([
+      {
+        url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/127",
+        method: "PATCH",
+        body: JSON.stringify({ state: "closed" }),
+      },
+    ]);
+  });
+
   test("findStickyIssueComment returns only the matching id", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {

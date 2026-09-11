@@ -25,6 +25,7 @@ import {
   pullRequestClosesIssue,
   upsertWorkerComment,
 } from "./gitea_issues.ts";
+import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
 import {
@@ -359,47 +360,73 @@ export async function implementIssue(
     await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(opts.job));
     await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, "Jumi is implementing this issue.");
 
-    throwIfAborted(opts.abortSignal);
-    log(`Running OpenCode for ${owner}/${repo}#${issueNumber}`);
-    throwIfEngineFailed(
-      await engine({
-        model: opts.model,
-        workdir: worktree,
-        home: opts.home,
-        sanitizeEnv,
-        extraEnv: workerOpenCodeChildEnv(
-          {
-            giteaUrl: opts.giteaUrl,
-            username: opts.botUsername,
-            token: opts.giteaToken,
+    const runEngine = async (label: string, kind: "implement" | "follow-up" = "implement") => {
+      throwIfAborted(opts.abortSignal);
+      log(label);
+      throwIfEngineFailed(
+        await engine({
+          model: opts.model,
+          workdir: worktree,
+          home: opts.home,
+          sanitizeEnv,
+          extraEnv: workerOpenCodeChildEnv(
+            {
+              giteaUrl: opts.giteaUrl,
+              username: opts.botUsername,
+              token: opts.giteaToken,
+            },
+            worktree
+          ),
+          timeoutMs: opts.timeoutMs,
+          maxOutputBytes: opts.maxOutputBytes,
+          reviewLabel: `${owner}/${repo}#${issueNumber}`,
+          trace: {
+            kind,
+            owner,
+            repo,
+            sha: headSha,
+            jobId: opts.jobId ?? opts.job.delivery,
           },
-          worktree
-        ),
-        timeoutMs: opts.timeoutMs,
-        maxOutputBytes: opts.maxOutputBytes,
-        reviewLabel: `${owner}/${repo}#${issueNumber}`,
-        trace: {
-          kind: "implement",
-          owner,
-          repo,
-          sha: headSha,
-          jobId: opts.jobId ?? opts.job.delivery,
-        },
-        logger: log,
-        abortSignal: opts.abortSignal,
-        onPid: async (pid) => {
-          await opts.onPid?.(pid);
-          await serializeClaim(async () => {
-            if (heartbeatStopped || !useClaim) return;
-            const current = await readClaim(claimPath);
-            if (heartbeatStopped || !current || current.terminal) return;
-            current.pid = pid;
-            current.heartbeatAt = now().toISOString();
-            await writeClaim(claimPath, current);
-          });
-        },
-      })
-    );
+          logger: log,
+          abortSignal: opts.abortSignal,
+          onPid: async (pid) => {
+            await opts.onPid?.(pid);
+            await serializeClaim(async () => {
+              if (heartbeatStopped || !useClaim) return;
+              const current = await readClaim(claimPath);
+              if (heartbeatStopped || !current || current.terminal) return;
+              current.pid = pid;
+              current.heartbeatAt = now().toISOString();
+              await writeClaim(claimPath, current);
+            });
+          },
+        })
+      );
+    };
+
+    await runEngine(`Running OpenCode for ${owner}/${repo}#${issueNumber}`);
+
+    const gate = await gateShipAfterOpenCode({
+      api: opts.api,
+      owner,
+      repo,
+      issueNumber,
+      botUsername: opts.botUsername,
+      snapshot: snapshotFromJob(opts.job),
+      continueOpenCode: async (issue) => {
+        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
+        await runEngine(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`, "follow-up");
+      },
+    });
+    if (gate.action === "skip") {
+      await stopHeartbeat();
+      await serializeClaim(async () => {
+        await forgetClaim();
+      });
+      if (!gate.keepLocalWork) await detachWorktree();
+      return { status: "skipped", reason: gate.reason };
+    }
+    const liveJob = jobWithIssue(opts.job, gate.issue);
 
     throwIfAborted(opts.abortSignal);
     const prFileContents = await readPullRequestDescription(worktree);
@@ -437,7 +464,7 @@ export async function implementIssue(
         GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
       };
       await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
-      await runConfiguredGit(["commit", "-m", `Implement #${issueNumber}: ${opts.job.title}`], {
+      await runConfiguredGit(["commit", "-m", `Implement #${issueNumber}: ${liveJob.title}`], {
         cwd: worktree,
         env: commitEnv,
       });
@@ -447,7 +474,7 @@ export async function implementIssue(
     throwIfAborted(opts.abortSignal);
 
     const pr = await opts.api.createPullRequest(owner, repo, {
-      title: opts.job.title,
+      title: liveJob.title,
       body: buildPullRequestBody(issueNumber, prFileContents),
       head: branch,
       base: opts.job.defaultBranch,

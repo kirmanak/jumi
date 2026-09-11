@@ -24,6 +24,7 @@ import {
   type ImplementOptions,
   type OpenCodeRunner,
 } from "./implement.ts";
+import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
 import { appendStuckFingerprint, evaluateStuck, fingerprintError, readStuckState, stuckComment } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
@@ -783,6 +784,91 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       });
       await detachWorktree();
       return { status: "stuck" };
+    }
+
+    const gate = await gateShipAfterOpenCode({
+      api: opts.api,
+      owner,
+      repo,
+      issueNumber,
+      botUsername: opts.botUsername,
+      snapshot: snapshotFromJob(taskJob),
+      closerPrNumber: pr.number,
+      continueOpenCode: async (issue) => {
+        throwIfAborted(opts.abortSignal);
+        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+        log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
+        throwIfEngineFailed(
+          await engine({
+            model: opts.model,
+            workdir: worktree,
+            home: opts.home,
+            sanitizeEnv,
+            extraEnv: workerOpenCodeChildEnv(
+              {
+                giteaUrl: opts.giteaUrl,
+                username: opts.botUsername,
+                token: opts.giteaToken,
+              },
+              worktree
+            ),
+            timeoutMs,
+            maxOutputBytes: opts.maxOutputBytes,
+            reviewLabel: `${owner}/${repo}#${issueNumber}`,
+            trace: {
+              kind: "follow-up",
+              owner,
+              repo,
+              sha: mergeResult.headSha,
+              jobId: opts.jobId ?? opts.job.delivery,
+            },
+            logger: log,
+            abortSignal: opts.abortSignal,
+            onPid: async (pid) => {
+              await opts.onPid?.(pid);
+              await serializeClaim(async () => {
+                if (heartbeatStopped || !useClaim) return;
+                const current = await readClaim(claimPath);
+                if (heartbeatStopped || !current || current.terminal) return;
+                current.pid = pid;
+                current.heartbeatAt = now().toISOString();
+                await writeClaim(claimPath, current);
+              });
+            },
+          })
+        );
+        await rm(join(worktree, "JUMI_PR.md"), { recursive: true, force: true }).catch(() => undefined);
+        await rm(join(worktree, "JUMI_TASK.md"), { force: true });
+        await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
+      },
+    });
+    if (gate.action === "skip") {
+      await stopHeartbeat();
+      await serializeClaim(async () => {
+        await forgetClaim();
+      });
+      if (!gate.keepLocalWork) await detachWorktree();
+      return { status: "skipped", reason: gate.reason };
+    }
+    if (gate.continued) {
+      await rm(join(worktree, "JUMI_PR.md"), { recursive: true, force: true }).catch(() => undefined);
+      await rm(join(worktree, "JUMI_TASK.md"), { force: true });
+      await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
+      const porcelain = (await runConfiguredGit(["status", "--porcelain"], { cwd: worktree, env })).trim();
+      if (porcelain) {
+        const commitEnv = {
+          ...env,
+          GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
+          GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
+          GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
+          GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
+        };
+        await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
+        await runConfiguredGit(["commit", "-m", `Implement #${issueNumber}: ${gate.snapshot.title}`], {
+          cwd: worktree,
+          env: commitEnv,
+        });
+      }
     }
 
     try {

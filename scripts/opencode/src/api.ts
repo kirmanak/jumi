@@ -287,6 +287,12 @@ export class GiteaAPI {
     return toPull(await this.post<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls`, pull));
   }
 
+  async closePullRequest(owner: string, repo: string, index: number): Promise<Pull> {
+    return toPull(
+      await this.patch<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { state: "closed" })
+    );
+  }
+
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {
     return toTask(await this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
   }

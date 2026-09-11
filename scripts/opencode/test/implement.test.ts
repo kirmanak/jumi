@@ -42,6 +42,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
         html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/3",
       });
     },
+    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
@@ -942,6 +943,292 @@ describe("implementIssue", () => {
       expect(api.pulls[0]).toMatchObject({ body: "Fixes #12" });
       expect(statusSawPrDir).toBe(false);
       await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
+    });
+  });
+
+  test("does not open a PR when the issue is closed after OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          return gets === 1 ? makeIssue() : makeIssue({ state: "closed" });
+        },
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "issue is closed" });
+      expect(api.pulls).toHaveLength(0);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "remove")).toBe(false);
+      expect(api.comments.at(-1)).toContain("Not opening a PR because the issue was closed.");
+    });
+  });
+
+  test("re-runs OpenCode once when title or body changed after the first run", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          if (gets === 1) return makeIssue();
+          return makeIssue({ title: "Rewritten title", body: "Do this instead." });
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const tasks: string[] = [];
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          tasks.push(await readFile(join(workdir, "kirmanak/demo/12/JUMI_TASK.md"), "utf8"));
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      expect(tasks).toHaveLength(2);
+      expect(tasks[0]).toContain("Fix the thing");
+      expect(tasks[1]).toContain("Rewritten title");
+      expect(tasks[1]).toContain("Do this instead.");
+      expect(api.pulls[0]).toMatchObject({ title: "Rewritten title" });
+    });
+  });
+
+  test("continue OpenCode uses a no-push follow-up prompt instead of implement", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const kinds: string[] = [];
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          if (gets === 1) return makeIssue();
+          return makeIssue({ title: "Rewritten title", body: "Do this instead." });
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (opts) => {
+          kinds.push(opts.trace?.kind ?? "");
+          expect("prompt" in opts).toBe(false);
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      expect(kinds).toEqual(["implement", "follow-up"]);
+    });
+  });
+
+  test("does not treat updated_at churn as a rewrite", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        getIssue: async () => makeIssue({ updated_at: "2026-06-01T00:00:00Z" }),
+      });
+      let openCode = 0;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      expect(openCode).toBe(1);
+      expect(api.pulls).toHaveLength(1);
+    });
+  });
+
+  test("skips shipping when re-GET fails after OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          if (gets === 1) return makeIssue();
+          throw new Error("gitea 502");
+        },
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("skipped");
+      if (result.status === "skipped") expect(result.reason).toContain("failed to re-check issue");
+      expect(api.pulls).toHaveLength(0);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(api.comments.at(-1)).toContain("failed to re-check issue");
+    });
+  });
+
+  test("does not open a PR on the old text when continue OpenCode fails", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          if (gets === 1) return makeIssue();
+          return makeIssue({ title: "Rewritten title" });
+        },
+      });
+      let openCode = 0;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      await expect(
+        implementIssue({
+          api,
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async () => {
+            openCode++;
+            if (openCode === 2) return { status: "exit", exitCode: 1, message: "opencode exited with code 1" };
+            return { status: "ok" };
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("opencode exited with code 1");
+      expect(openCode).toBe(2);
+      expect(api.pulls).toHaveLength(0);
+      expect(api.comments.at(-1)).toContain("Jumi failed:");
+    });
+  });
+
+  test("does not loop OpenCode when the issue keeps changing", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          if (gets === 1) return makeIssue();
+          return makeIssue({ title: `Edit ${gets}` });
+        },
+      });
+      let openCode = 0;
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "issue title or body changed again after a continue round",
+      });
+      expect(openCode).toBe(2);
+      expect(api.pulls).toHaveLength(0);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
     });
   });
 

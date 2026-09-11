@@ -29,6 +29,7 @@ import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
+import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
   appendStuckFingerprint,
@@ -923,48 +924,74 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     }
     await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
-    throwIfAborted(opts.abortSignal);
-    log(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
-    followUpEngineRan = true;
-    throwIfEngineFailed(
-      await engine({
-        model: opts.model,
-        workdir: worktree,
-        home: opts.home,
-        sanitizeEnv,
-        extraEnv: workerOpenCodeChildEnv(
-          {
-            giteaUrl: opts.giteaUrl,
-            username: opts.botUsername,
-            token: opts.giteaToken,
+    const runEngine = async (label: string) => {
+      throwIfAborted(opts.abortSignal);
+      log(label);
+      followUpEngineRan = true;
+      throwIfEngineFailed(
+        await engine({
+          model: opts.model,
+          workdir: worktree,
+          home: opts.home,
+          sanitizeEnv,
+          extraEnv: workerOpenCodeChildEnv(
+            {
+              giteaUrl: opts.giteaUrl,
+              username: opts.botUsername,
+              token: opts.giteaToken,
+            },
+            worktree
+          ),
+          timeoutMs,
+          maxOutputBytes: opts.maxOutputBytes,
+          reviewLabel: `${owner}/${repo}#${issueNumber}`,
+          trace: {
+            kind: "follow-up",
+            owner,
+            repo,
+            sha: pr.head.sha,
+            jobId: opts.jobId ?? opts.job.delivery,
           },
-          worktree
-        ),
-        timeoutMs,
-        maxOutputBytes: opts.maxOutputBytes,
-        reviewLabel: `${owner}/${repo}#${issueNumber}`,
-        trace: {
-          kind: "follow-up",
-          owner,
-          repo,
-          sha: pr.head.sha,
-          jobId: opts.jobId ?? opts.job.delivery,
-        },
-        logger: log,
-        abortSignal: opts.abortSignal,
-        onPid: async (pid) => {
-          await opts.onPid?.(pid);
-          await serializeClaim(async () => {
-            if (heartbeatStopped || !useClaim) return;
-            const current = await readClaim(claimPath);
-            if (heartbeatStopped || !current || current.terminal) return;
-            current.pid = pid;
-            current.heartbeatAt = now().toISOString();
-            await writeClaim(claimPath, current);
-          });
-        },
-      })
-    );
+          logger: log,
+          abortSignal: opts.abortSignal,
+          onPid: async (pid) => {
+            await opts.onPid?.(pid);
+            await serializeClaim(async () => {
+              if (heartbeatStopped || !useClaim) return;
+              const current = await readClaim(claimPath);
+              if (heartbeatStopped || !current || current.terminal) return;
+              current.pid = pid;
+              current.heartbeatAt = now().toISOString();
+              await writeClaim(claimPath, current);
+            });
+          },
+        })
+      );
+    };
+
+    await runEngine(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
+
+    const gate = await gateShipAfterOpenCode({
+      api: opts.api,
+      owner,
+      repo,
+      issueNumber,
+      botUsername: opts.botUsername,
+      snapshot: snapshotFromJob(taskJob),
+      closerPrNumber: pr.number,
+      continueOpenCode: async (issue) => {
+        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+        await runEngine(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
+      },
+    });
+    if (gate.action === "skip") {
+      await stopHeartbeat();
+      await serializeClaim(async () => {
+        await forgetClaim();
+      });
+      if (!gate.keepLocalWork) await detachWorktree();
+      return { status: "skipped", reason: gate.reason };
+    }
 
     throwIfAborted(opts.abortSignal);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
@@ -1002,7 +1029,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
       };
       await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
-      await runConfiguredGit(["commit", "-m", `Address review on #${pr.number}: ${opts.job.title}`], {
+      await runConfiguredGit(["commit", "-m", `Address review on #${pr.number}: ${gate.snapshot.title}`], {
         cwd: worktree,
         env: commitEnv,
       });

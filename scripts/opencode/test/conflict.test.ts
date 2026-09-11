@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
@@ -55,6 +55,7 @@ function makeApi(
       pulls.push(pull);
       return makePR({ number: 3, title: pull.title, body: pull.body });
     },
+    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, index, body) => {
       commentIndexes.push(index);
@@ -352,6 +353,133 @@ describe("implementConflict", () => {
       expect(result.status).toBe("pushed");
       expect(helmCalls).toEqual([["dependency", "update"]]);
       expect(api.comments.at(-1)).toContain("Pushed merge of main.");
+    });
+  });
+
+  test("closes the existing closer and does not push when the issue is closed after OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const closed: number[] = [];
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          return gets >= 3 ? makeIssue({ state: "closed" }) : makeIssue();
+        },
+        closePullRequest: async (_owner, _repo, index) => {
+          closed.push(index);
+          return makePR({ number: index, state: "closed" });
+        },
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner = conflictThenResolvedGit(async (args) => {
+        gitCalls.push(stripGitConfigArgs(args));
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "issue is closed" });
+      expect(closed).toEqual([127]);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(api.comments.at(-1)).toContain("Closing this PR because the issue was closed.");
+      expect(api.commentIndexes.at(-1)).toBe(127);
+    });
+  });
+
+  test("continue OpenCode uses a no-push follow-up prompt instead of implement", async () => {
+    await withDirs(async (home, workdir) => {
+      let gets = 0;
+      const kinds: string[] = [];
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          if (gets >= 3) return makeIssue({ title: "Rewritten title", body: "Do this instead." });
+          return makeIssue();
+        },
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: conflictThenResolvedGit(),
+        openCodeRunner: async (opts) => {
+          kinds.push(opts.trace?.kind ?? "");
+          expect("prompt" in opts).toBe(false);
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(kinds).toEqual(["conflict", "follow-up"]);
+    });
+  });
+
+  test("removes JUMI_PR.md before porcelain after continue", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      let gets = 0;
+      let openCode = 0;
+      let statusSawPrFile = false;
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          if (gets >= 3) return makeIssue({ title: "Rewritten title", body: "Do this instead." });
+          return makeIssue();
+        },
+      });
+      const gitRunner = conflictThenResolvedGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "status") {
+          try {
+            await access(join(worktree, "JUMI_PR.md"));
+            statusSawPrFile = true;
+            return "?? JUMI_PR.md";
+          } catch {
+            return " M src/demo.ts";
+          }
+        }
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          await mkdir(worktree, { recursive: true });
+          if (openCode === 2) await writeFile(join(worktree, "JUMI_PR.md"), "Should not land.");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(openCode).toBe(2);
+      expect(statusSawPrFile).toBe(false);
+      await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
     });
   });
 
