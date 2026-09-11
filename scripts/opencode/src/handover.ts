@@ -5,8 +5,11 @@ import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
+import { upsertStuckText } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import { parseReviewOutput } from "./verdict.ts";
+
+export const TOO_MANY_FOLLOWUP_ROUNDS = "stuck: too many follow-up rounds";
 
 export function isCurrentHeadFailureTrailer(markdown: string | null | undefined): boolean {
   if (!markdown) return false;
@@ -17,6 +20,15 @@ export function isCurrentHeadFailureTrailer(markdown: string | null | undefined)
 export function shouldHandoverFollowUp(opts: { published: ReviewResult; markdown?: string | null }): boolean {
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return false;
   return isCurrentHeadFailureTrailer(opts.markdown);
+}
+
+function persistInsertSkipReason(markdown: string | null | undefined): string | undefined {
+  if (!markdown) return "incomplete";
+  const parsed = parseReviewOutput(markdown);
+  if (parsed.verdict.incomplete) return "incomplete";
+  if (parsed.verdict.state === "success") return "success trailer";
+  if (parsed.verdict.state !== "failure") return "incomplete";
+  return undefined;
 }
 
 function followUpJobFrom(
@@ -49,29 +61,50 @@ function followUpJobFrom(
 
 export async function enqueueFollowUpFromReview(opts: {
   store: ReviewJobStore;
-  api: Pick<ReviewApi, "getPR" | "getIssue" | "getRepo">;
+  api: Pick<
+    ReviewApi,
+    "getPR" | "getIssue" | "getRepo" | "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"
+  >;
   row: ReviewJobRecord;
   botUsername: string;
   published: ReviewResult;
   markdown?: string | null;
   maxFollowupRounds?: number;
+  logger?: (message: string) => void;
 }): Promise<EnqueueResult | undefined> {
-  if (!shouldHandoverFollowUp({ published: opts.published, markdown: opts.markdown })) return undefined;
+  const logSkip = (reason: string): undefined => {
+    opts.logger?.(`persist-insert skipped: ${reason}`);
+    return undefined;
+  };
+
+  if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
+  const trailerSkip = persistInsertSkipReason(opts.markdown);
+  if (trailerSkip) return logSkip(trailerSkip);
 
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
-  if (pr.head.sha !== opts.row.headSha) return undefined;
+  if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
   const issueNumber = extractClosingIssueNumber(pr);
-  if (issueNumber === undefined) return undefined;
+  if (issueNumber === undefined) return logSkip("no closer");
 
   const [issue, repo] = await Promise.all([
     opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber),
     opts.api.getRepo(opts.row.owner, opts.row.repo),
   ]);
-  if (issue.state !== "open" || !isAssignedToBot(issue, opts.botUsername)) return undefined;
+  if (issue.state !== "open" || !isAssignedToBot(issue, opts.botUsername)) return logSkip("unassigned");
 
   const followUpSucceeded = await opts.store.countSucceeded("follow-up", opts.row.owner, opts.row.repo, issueNumber);
-  if (followUpSucceeded >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return undefined;
+  if (followUpSucceeded >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) {
+    await upsertStuckText(
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      pr.number,
+      opts.botUsername,
+      TOO_MANY_FOLLOWUP_ROUNDS
+    );
+    return logSkip("round cap");
+  }
 
   return opts.store.enqueueIssue(
     followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `review-failure-${opts.row.id}`)

@@ -30,6 +30,7 @@ export interface ServiceConfig {
   databaseUrl?: string;
   leaseMs: number;
   maxJobAttempts: number;
+  maxFollowupRounds: number;
   phoenixOtlpEndpoint?: string;
 }
 
@@ -103,6 +104,8 @@ export function parseJumiRole(value: string | undefined): JumiRole {
   throw new Error(`Invalid JUMI_ROLE: ${value}`);
 }
 
+const MAX_FOLLOWUP_ROUNDS_ENV = "MAX_FOLLOWUP_ROUNDS";
+
 export function loadConfig(env: Env = process.env): ServiceConfig {
   const resolved = overlaySecretsFromFile(env);
   const role = parseJumiRole(resolved.JUMI_ROLE);
@@ -137,6 +140,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     databaseUrl: role === "monolith" ? undefined : requireEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
+    maxFollowupRounds: intEnv(resolved, MAX_FOLLOWUP_ROUNDS_ENV, 3),
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
   };
 }

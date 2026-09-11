@@ -279,6 +279,7 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
     role: "monolith",
     leaseMs: 1_500_000,
     maxJobAttempts: 2,
+    maxFollowupRounds: 3,
     ...overrides,
   };
 }

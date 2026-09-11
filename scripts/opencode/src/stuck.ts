@@ -184,30 +184,43 @@ export async function deleteStuckState(home: string, owner: string, repo: string
   await deleteClaim(stuckStatePath(home, owner, repo, issueNumber));
 }
 
-export async function upsertStuckComment(
-  api: {
-    findStickyIssueComment(
-      owner: string,
-      repo: string,
-      index: number,
-      botUsername: string,
-      marker: string
-    ): Promise<{ id: number } | undefined>;
-    createIssueComment(owner: string, repo: string, index: number, body: string): Promise<unknown>;
-    updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<unknown>;
-  },
+type StuckCommentApi = {
+  findStickyIssueComment(
+    owner: string,
+    repo: string,
+    index: number,
+    botUsername: string,
+    marker: string
+  ): Promise<{ id: number } | undefined>;
+  createIssueComment(owner: string, repo: string, index: number, body: string): Promise<unknown>;
+  updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<unknown>;
+};
+
+export async function upsertStuckText(
+  api: StuckCommentApi,
   owner: string,
   repo: string,
   index: number,
   botUsername: string,
-  reason: StuckReason
+  body: string
 ): Promise<void> {
   const marker = stuckMarker(owner, repo, index);
-  const text = `${marker}\n${stuckComment(reason)}`;
+  const text = `${marker}\n${body}`;
   const existing = await api.findStickyIssueComment(owner, repo, index, botUsername, marker);
   if (existing) {
     await api.updateIssueComment(owner, repo, existing.id, text);
     return;
   }
   await api.createIssueComment(owner, repo, index, text);
+}
+
+export async function upsertStuckComment(
+  api: StuckCommentApi,
+  owner: string,
+  repo: string,
+  index: number,
+  botUsername: string,
+  reason: StuckReason
+): Promise<void> {
+  await upsertStuckText(api, owner, repo, index, botUsername, stuckComment(reason));
 }

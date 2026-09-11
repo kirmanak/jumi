@@ -27,7 +27,15 @@ describe("loadConfig", () => {
     expect(config.databaseUrl).toBeUndefined();
     expect(config.leaseMs).toBe(900_000 + 10 * 60 * 1000);
     expect(config.maxJobAttempts).toBe(2);
+    expect(config.maxFollowupRounds).toBe(3);
     expect(config.phoenixOtlpEndpoint).toBeUndefined();
+  });
+
+  test("MAX_FOLLOWUP_ROUNDS unset or empty is 3; invalid fail-closed", () => {
+    expect(loadConfig({ ...required, MAX_FOLLOWUP_ROUNDS: "" }).maxFollowupRounds).toBe(3);
+    expect(loadConfig({ ...required, MAX_FOLLOWUP_ROUNDS: "5" }).maxFollowupRounds).toBe(5);
+    expect(() => loadConfig({ ...required, MAX_FOLLOWUP_ROUNDS: "0" })).toThrow("Invalid positive integer");
+    expect(() => loadConfig({ ...required, MAX_FOLLOWUP_ROUNDS: "abc" })).toThrow("Invalid positive integer");
   });
 
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {

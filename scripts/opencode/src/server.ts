@@ -359,6 +359,8 @@ async function handoverFollowUp(
       botUsername: config.botUsername,
       published,
       markdown: current?.resultMarkdown ?? row.resultMarkdown,
+      maxFollowupRounds: config.maxFollowupRounds,
+      logger,
     });
     if (result?.queued) logger(`handover follow-up ${result.key}`);
   } catch (err) {
