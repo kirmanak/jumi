@@ -1,4 +1,4 @@
-import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
+import { isAssignedToBot, isIssuePickedUp, isPullRequestIssue, type PickupPolicy } from "./assignee.ts";
 import { DEPENDENCY_GRAPH_CAP } from "./dependencies.ts";
 import type { LinkedIssue, Repo, Task } from "./ports.ts";
 import type { GiteaIssuePayload, IssueJob } from "./types.ts";
@@ -39,7 +39,7 @@ export function parseIssuesPayload(rawBody: Uint8Array): GiteaIssuePayload {
   return parsed as unknown as GiteaIssuePayload;
 }
 
-export type IssueWebhookPolicy = WebhookPolicy & { botUsername: string };
+export type IssueWebhookPolicy = WebhookPolicy & PickupPolicy;
 
 export type IssueWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
@@ -127,7 +127,7 @@ export async function blockedIssueJobsToEnqueue(
       return;
     }
     if (isPullRequestIssue(issue) || issue.state !== "open") return;
-    if (!isAssignedToBot(issue, policy.botUsername)) return;
+    if (!isIssuePickedUp(issue, policy)) return;
 
     let repository: { default_branch: string; clone_url: string };
     if (row.owner === owner && row.repo === repo) {

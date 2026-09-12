@@ -27,6 +27,7 @@ export interface Task {
   created_at: string;
   pull_request?: unknown;
   is_pull?: boolean;
+  labels?: Array<string | { name?: string }> | null;
 }
 
 /** Gitea issue dependency / blocks row, possibly in another repo. */

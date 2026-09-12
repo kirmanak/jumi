@@ -1,5 +1,6 @@
 import { access, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { PickupPolicy } from "./assignee.ts";
 import {
   ciStatePath,
   claimFilePath,
@@ -71,12 +72,11 @@ export type ImplementResult =
   | { status: "skipped"; reason: string }
   | { status: "cancelled" };
 
-export interface ImplementOptions {
+export interface ImplementOptions extends PickupPolicy {
   api: IssueApi;
   job: IssueJob;
   giteaUrl: string;
   giteaToken: string;
-  botUsername: string;
   followupIgnoreLogins?: readonly string[];
   model: string;
   home: string;

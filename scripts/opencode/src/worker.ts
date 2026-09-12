@@ -12,6 +12,7 @@ import { implementConflict } from "./conflict.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
+import { pickupPolicyForForge } from "./github_webhook.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
@@ -55,7 +56,7 @@ export function createIssueQueue(
           job,
           giteaUrl: config.giteaUrl,
           giteaToken: config.giteaToken,
-          botUsername: config.botUsername,
+          ...pickupPolicyForForge(config.forge, config.botUsername),
           followupIgnoreLogins: config.followupIgnoreLogins,
           model: config.model,
           home: config.home,
@@ -305,7 +306,7 @@ export async function processWorkerTick(
       job,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
-      botUsername: config.botUsername,
+      ...pickupPolicyForForge(config.forge, config.botUsername),
       followupIgnoreLogins: config.followupIgnoreLogins,
       model: config.model,
       home: config.home,

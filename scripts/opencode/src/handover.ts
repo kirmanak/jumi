@@ -1,4 +1,4 @@
-import { isAssignedToBot } from "./assignee.ts";
+import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractClosingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
@@ -59,19 +59,20 @@ function followUpJobFrom(
   };
 }
 
-export async function enqueueFollowUpFromReview(opts: {
-  store: ReviewJobStore;
-  api: Pick<
-    ReviewApi,
-    "getPR" | "getIssue" | "getRepo" | "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"
-  >;
-  row: ReviewJobRecord;
-  botUsername: string;
-  published: ReviewResult;
-  markdown?: string | null;
-  maxFollowupRounds?: number;
-  logger?: (message: string) => void;
-}): Promise<EnqueueResult | undefined> {
+export async function enqueueFollowUpFromReview(
+  opts: {
+    store: ReviewJobStore;
+    api: Pick<
+      ReviewApi,
+      "getPR" | "getIssue" | "getRepo" | "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"
+    >;
+    row: ReviewJobRecord;
+    published: ReviewResult;
+    markdown?: string | null;
+    maxFollowupRounds?: number;
+    logger?: (message: string) => void;
+  } & PickupPolicy
+): Promise<EnqueueResult | undefined> {
   const logSkip = (reason: string): undefined => {
     opts.logger?.(`persist-insert skipped: ${reason}`);
     return undefined;
@@ -96,7 +97,7 @@ export async function enqueueFollowUpFromReview(opts: {
     foreign ? Promise.resolve(pr) : opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber),
     opts.api.getRepo(opts.row.owner, opts.row.repo),
   ]);
-  if (!foreign && (issue.state !== "open" || !isAssignedToBot(issue, opts.botUsername))) {
+  if (!foreign && (issue.state !== "open" || !isIssuePickedUp(issue, opts))) {
     return logSkip("unassigned");
   }
 

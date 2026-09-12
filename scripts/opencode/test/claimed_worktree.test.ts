@@ -11,6 +11,7 @@ import {
   throwIfAborted,
 } from "../src/claimed_worktree.ts";
 import type { Engine } from "../src/engine.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import { makeIssue, makeIssueJob, makeUser } from "./fixtures.ts";
 
 const fallbackEngine: Engine = async () => ({ status: "ok" });
@@ -284,6 +285,79 @@ describe("recheckAssignedAndOpen", () => {
     );
     expect(result).toEqual({ status: "skipped", reason: "failed to load issue: gitea 502" });
     expect(forgot).toBe(true);
+  });
+
+  test("cancels GitHub pickup when the jumi label is missing", async () => {
+    let forgot = false;
+    const result = await recheckAssignedAndOpen(
+      {
+        owner: "kirmanak",
+        repo: "demo",
+        issueNumber: 12,
+        worktree: "/work",
+        barePath: "/bare",
+        claimPath: "/claim",
+        claim: {
+          pid: 0,
+          startedAt: "",
+          heartbeatAt: "",
+          worktree: "/work",
+          branch: "",
+          issueUpdatedAt: "",
+          headShaAtStart: "",
+        },
+        useClaim: true,
+        sanitizeEnv: true,
+        engine: fallbackEngine,
+        git: async () => "",
+        now: () => new Date(),
+        forgetClaim: async () => {
+          forgot = true;
+        },
+      },
+      { api: { getIssue: async () => makeIssue({ labels: [] }) }, botUsername: "jumi", isPickedUp: hasJumiLabel }
+    );
+    expect(result).toEqual({ status: "cancelled" });
+    expect(forgot).toBe(true);
+  });
+
+  test("returns undefined when GitHub issue is labeled jumi and open", async () => {
+    const result = await recheckAssignedAndOpen(
+      {
+        owner: "kirmanak",
+        repo: "demo",
+        issueNumber: 12,
+        worktree: "/work",
+        barePath: "/bare",
+        claimPath: "/claim",
+        claim: {
+          pid: 0,
+          startedAt: "",
+          heartbeatAt: "",
+          worktree: "/work",
+          branch: "",
+          issueUpdatedAt: "",
+          headShaAtStart: "",
+        },
+        useClaim: true,
+        sanitizeEnv: true,
+        engine: fallbackEngine,
+        git: async () => "",
+        now: () => new Date(),
+        forgetClaim: async () => {
+          throw new Error("should not forget");
+        },
+      },
+      {
+        api: {
+          getIssue: async () =>
+            makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [], labels: [{ name: "jumi" }] }),
+        },
+        botUsername: "jumi",
+        isPickedUp: hasJumiLabel,
+      }
+    );
+    expect(result).toBeUndefined();
   });
 
   test("returns undefined when assigned and open", async () => {

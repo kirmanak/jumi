@@ -49,6 +49,7 @@ type GithubIssue = {
   updated_at: string;
   created_at?: string;
   pull_request?: unknown;
+  labels?: Array<{ name?: string } | string> | null;
   repository?: {
     full_name?: string;
     name?: string;
@@ -221,6 +222,7 @@ export function toTask(issue: GithubIssue): Task {
     created_at: issue.created_at ?? issue.updated_at,
     pull_request: issue.pull_request,
     is_pull: issue.pull_request != null,
+    labels: issue.labels,
   };
 }
 

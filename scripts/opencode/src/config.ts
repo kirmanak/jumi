@@ -10,6 +10,7 @@ export interface ServiceConfig {
   giteaUrl: string;
   giteaToken: string;
   webhookSecret: string;
+  githubWebhookSecret?: string;
   webhookAuthToken?: string;
   allowedOrgs: string[];
   allowedRepos: string[];
@@ -135,7 +136,7 @@ export type ForgeBind = {
   githubAppInstallationId?: string;
 };
 
-const GITHUB_ENV = {
+export const GITHUB_ENV = {
   appId: "GITHUB_APP_ID",
   appPrivateKey: "GITHUB_APP_PRIVATE_KEY",
   appInstallationId: "GITHUB_APP_INSTALLATION_ID",
@@ -197,6 +198,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
     ...forgeBind,
+    githubWebhookSecret: resolved[GITHUB_ENV.webhookSecret] || undefined,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",

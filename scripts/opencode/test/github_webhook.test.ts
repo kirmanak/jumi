@@ -1,0 +1,564 @@
+import { describe, expect, test } from "bun:test";
+import {
+  hasJumiLabel,
+  isGithubBotSender,
+  shouldEnqueueGithubIssue,
+  verifyGithubSignature,
+} from "../src/github_webhook.ts";
+import { MemoryReviewJobStore } from "../src/review_jobs.ts";
+import { createFetchHandler } from "../src/server.ts";
+import type { IssueJob, ReviewJob } from "../src/types.ts";
+import type { WorkerQueueLike } from "../src/worker.ts";
+import { createWorkerFetchHandler } from "../src/worker_server.ts";
+import { cancelLedgerWorkerJobs } from "../src/worker_webhook.ts";
+import {
+  encodeJson,
+  makeComment,
+  makeConfig,
+  makeIssue,
+  makeIssuePayload,
+  makeLinkedIssue,
+  makePayload,
+  makePR,
+  makeRepo,
+  makeUser,
+  makeWorkerConfig,
+  responseJson,
+  signBody,
+} from "./fixtures.ts";
+
+const githubRepo = makeRepo({
+  html_url: "https://github.com/kirmanak/demo",
+  clone_url: "https://github.com/kirmanak/demo.git",
+});
+
+const policy = {
+  giteaUrl: "https://github.com",
+  allowedOrgs: ["kirmanak"],
+  allowedRepos: [],
+  botUsername: "kirmanak-jumi[bot]",
+};
+
+function githubIssue(overrides: Parameters<typeof makeIssue>[0] = {}) {
+  return makeIssue({
+    html_url: "https://github.com/kirmanak/demo/issues/12",
+    assignee: null,
+    assignees: [],
+    labels: [{ name: "jumi" }],
+    ...overrides,
+  });
+}
+
+function labeledPayload(overrides: Parameters<typeof makeIssuePayload>[0] = {}) {
+  return makeIssuePayload({
+    action: "labeled",
+    issue: githubIssue(),
+    label: { name: "jumi" },
+    repository: githubRepo,
+    sender: makeUser({ login: "alice", type: "User" }),
+    ...overrides,
+  });
+}
+
+function makeReviewQueue(): { jobs: ReviewJob[]; enqueue: (job: ReviewJob) => { key: string; queued: true } } {
+  const jobs: ReviewJob[] = [];
+  return {
+    jobs,
+    enqueue(job) {
+      jobs.push(job);
+      return { key: `${job.owner}/${job.repo}#${job.prNumber}:${job.headSha}`, queued: true };
+    },
+  };
+}
+
+function makeIssueQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
+  const jobs: IssueJob[] = [];
+  return {
+    jobs,
+    enqueue(job) {
+      jobs.push(job);
+      return { key: `${job.owner}/${job.repo}#${job.issueNumber}`, queued: true };
+    },
+  };
+}
+
+async function signedGithubRequest(
+  body: unknown,
+  overrides: RequestInit & { event?: string; secret?: string; url?: string } = {}
+): Promise<Request> {
+  const raw = encodeJson(body);
+  const secret = overrides.secret ?? "webhook-secret";
+  const signature = await signBody(raw, secret);
+  const headers = new Headers(overrides.headers);
+  headers.set("content-type", "application/json");
+  headers.set("x-hub-signature-256", `sha256=${signature}`);
+  headers.set("x-github-event", overrides.event ?? "issues");
+  headers.set("x-github-delivery", "delivery-1");
+  return new Request(overrides.url ?? "https://reviewer.test/webhooks/github", {
+    method: overrides.method ?? "POST",
+    body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
+    headers,
+  });
+}
+
+describe("verifyGithubSignature", () => {
+  test("accepts sha256 hex of the raw UTF-8 body", async () => {
+    const raw = encodeJson({ zen: "pong" });
+    const hex = await signBody(raw, "webhook-secret");
+    expect(await verifyGithubSignature(raw, "webhook-secret", `sha256=${hex}`)).toBe(true);
+  });
+
+  test("rejects missing secret, missing header, and bad hmac", async () => {
+    const raw = encodeJson({ zen: "pong" });
+    const hex = await signBody(raw, "webhook-secret");
+    expect(await verifyGithubSignature(raw, "", `sha256=${hex}`)).toBe(false);
+    expect(await verifyGithubSignature(raw, "webhook-secret", null)).toBe(false);
+    expect(await verifyGithubSignature(raw, "webhook-secret", hex)).toBe(false);
+    expect(await verifyGithubSignature(raw, "webhook-secret", "sha256=deadbeef")).toBe(false);
+  });
+});
+
+describe("isGithubBotSender / hasJumiLabel", () => {
+  test("treats type Bot and *[bot] logins as bots", () => {
+    expect(isGithubBotSender({ login: "kirmanak-jumi[bot]", type: "Bot" })).toBe(true);
+    expect(isGithubBotSender({ login: "github-actions[bot]", type: "User" })).toBe(true);
+    expect(isGithubBotSender({ login: "dependabot[bot]" })).toBe(true);
+    expect(isGithubBotSender({ login: "alice", type: "User" })).toBe(false);
+  });
+
+  test("detects the jumi label", () => {
+    expect(hasJumiLabel({ labels: [{ name: "jumi" }] })).toBe(true);
+    expect(hasJumiLabel({ labels: ["bug"] })).toBe(false);
+  });
+});
+
+describe("shouldEnqueueGithubIssue", () => {
+  test("enqueues a non-PR issue labeled jumi", () => {
+    const decision = shouldEnqueueGithubIssue(labeledPayload(), policy);
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(12);
+      expect(decision.job.action).toBe("labeled");
+      expect(decision.job.cloneUrl).toBe("https://github.com/kirmanak/demo.git");
+    }
+  });
+
+  test("skips a labeled pull request issue", () => {
+    const decision = shouldEnqueueGithubIssue(
+      labeledPayload({ issue: githubIssue({ pull_request: { url: "https://github.com/kirmanak/demo/pulls/12" } }) }),
+      policy
+    );
+    expect(decision).toEqual({ type: "skip", reason: "pull request issue" });
+  });
+
+  test("cancels when the jumi label is removed", () => {
+    const decision = shouldEnqueueGithubIssue(
+      labeledPayload({ action: "unlabeled", issue: githubIssue({ labels: [] }) }),
+      policy
+    );
+    expect(decision).toEqual({ type: "cancel", owner: "kirmanak", repo: "demo", issueNumber: 12 });
+  });
+
+  test("skips bot senders on labeled", () => {
+    expect(
+      shouldEnqueueGithubIssue(
+        labeledPayload({ sender: makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" }) }),
+        policy
+      )
+    ).toEqual({ type: "skip", reason: "sender is bot" });
+  });
+
+  test("does not enqueue assigned-only GitHub issues", () => {
+    const decision = shouldEnqueueGithubIssue(
+      labeledPayload({
+        action: "assigned",
+        issue: githubIssue({
+          labels: [],
+          assignee: makeUser({ login: "kirmanak-jumi[bot]" }),
+          assignees: [makeUser({ login: "kirmanak-jumi[bot]" })],
+        }),
+      }),
+      policy
+    );
+    expect(decision).toEqual({ type: "skip", reason: "unsupported action assigned" });
+  });
+});
+
+describe("POST /webhooks/github", () => {
+  function githubConfig() {
+    return makeConfig({ githubWebhookSecret: "webhook-secret" });
+  }
+
+  function mailbox(store = new MemoryReviewJobStore()) {
+    const api = {
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async () => ({ id: 1, body: "", user: { login: "jumi" }, created_at: "", updated_at: "" }),
+      updateIssueComment: async () => ({ id: 1, body: "", user: { login: "jumi" }, created_at: "", updated_at: "" }),
+      listOpenPulls: async () => [],
+      getIssue: async () =>
+        githubIssue({
+          number: 12,
+          assignee: null,
+          assignees: [],
+          labels: [{ name: "jumi" }],
+        }),
+      listIssueBlocks: async () => [
+        makeLinkedIssue({
+          number: 12,
+          html_url: "https://github.com/kirmanak/demo/issues/12",
+          assignee: null,
+          assignees: [],
+        }),
+      ],
+      getRepo: async () => githubRepo,
+    };
+    return {
+      store,
+      handler: createFetchHandler(githubConfig(), {
+        queue: store,
+        worker: {
+          queue: { enqueue: (job) => store.enqueueIssue(job) },
+          api,
+          cancel: (owner, repo, issueNumber) =>
+            cancelLedgerWorkerJobs({
+              store,
+              api,
+              owner,
+              repo,
+              issueNumber,
+              botUsername: "jumi",
+            }),
+        },
+      }),
+    };
+  }
+
+  test("labeled issue enqueues implement; labeled PR does not", async () => {
+    const { handler, store } = mailbox();
+    const labeled = await handler(await signedGithubRequest(labeledPayload(), { event: "issues" }));
+    expect(labeled.status).toBe(202);
+    expect(await responseJson(labeled)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows[0]?.kind).toBe("implement");
+
+    const pr = await handler(
+      await signedGithubRequest(
+        labeledPayload({
+          issue: githubIssue({ number: 9, pull_request: { url: "https://github.com/kirmanak/demo/pulls/9" } }),
+        }),
+        { event: "issues" }
+      )
+    );
+    expect(pr.status).toBe(202);
+    expect(await responseJson(pr)).toEqual({ skipped: "pull request issue" });
+    expect(store.rows).toHaveLength(1);
+  });
+
+  test("bad HMAC is 401 and ping is 200", async () => {
+    const handler = createFetchHandler(githubConfig(), { queue: makeReviewQueue() });
+    expect((await handler(await signedGithubRequest(labeledPayload(), { secret: "wrong" }))).status).toBe(401);
+    const raw = encodeJson(labeledPayload());
+    const unsigned = new Request("https://reviewer.test/webhooks/github", {
+      method: "POST",
+      body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
+      headers: { "content-type": "application/json", "x-github-event": "issues" },
+    });
+    expect((await handler(unsigned)).status).toBe(401);
+    const ping = await handler(await signedGithubRequest({ zen: "pong" }, { event: "ping" }));
+    expect(ping.status).toBe(200);
+    expect(await responseJson(ping)).toEqual({ ok: true });
+  });
+
+  test("rejects GitHub mailbox when the GitHub secret is missing", async () => {
+    const handler = createFetchHandler(makeConfig(), { queue: makeReviewQueue() });
+    expect((await handler(await signedGithubRequest({ zen: "pong" }, { event: "ping" }))).status).toBe(401);
+  });
+
+  test("closing a blocker enqueues the blocked issue if it still has label jumi", async () => {
+    const { handler, store } = mailbox();
+    const response = await handler(
+      await signedGithubRequest(
+        labeledPayload({
+          action: "closed",
+          issue: githubIssue({
+            number: 196,
+            html_url: "https://github.com/kirmanak/demo/issues/196",
+            labels: [],
+            state: "closed",
+          }),
+        }),
+        { event: "issues" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows[0]?.kind).toBe("implement");
+  });
+
+  test("does not enqueue a blocked issue that is not labeled jumi", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () =>
+            githubIssue({
+              labels: [],
+              assignee: makeUser({ login: "jumi" }),
+              assignees: [makeUser({ login: "jumi" })],
+            }),
+          listIssueBlocks: async () => [
+            makeLinkedIssue({ number: 12, html_url: "https://github.com/kirmanak/demo/issues/12" }),
+          ],
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        labeledPayload({
+          action: "closed",
+          issue: githubIssue({ number: 196, state: "closed", labels: [] }),
+        }),
+        { event: "issues" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action closed" });
+    expect(store.rows).toHaveLength(0);
+  });
+
+  test("enqueues review on synchronize and skips draft / WIP", async () => {
+    const queue = makeReviewQueue();
+    const handler = createFetchHandler(githubConfig(), { queue });
+    const opened = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "synchronize",
+          repository: githubRepo,
+          pull_request: makePR({
+            html_url: "https://github.com/kirmanak/demo/pulls/7",
+            head: {
+              label: "kirmanak:feature",
+              ref: "feature",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(opened.status).toBe(202);
+    expect(await responseJson(opened)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    expect(queue.jobs[0]?.action).toBe("synchronize");
+
+    const draft = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "opened",
+          repository: githubRepo,
+          pull_request: makePR({
+            draft: true,
+            title: "WIP: secret",
+            html_url: "https://github.com/kirmanak/demo/pulls/7",
+            head: {
+              label: "kirmanak:feature",
+              ref: "feature",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(draft.status).toBe(202);
+    expect(await responseJson(draft)).toEqual({ skipped: "draft or WIP pull request" });
+  });
+
+  test("GitHub issue_comment on a PR fetches the PR and enqueues follow-up", async () => {
+    const store = new MemoryReviewJobStore();
+    const fetched = makePR({
+      number: 127,
+      title: "Fix the thing",
+      body: "Fixes #12",
+      user: makeUser({ login: "kirmanak-jumi[bot]" }),
+      html_url: "https://github.com/kirmanak/demo/pull/127",
+      head: {
+        label: "kirmanak:jumi/issue-12-fix-the-thing",
+        ref: "jumi/issue-12-fix-the-thing",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () => githubIssue(),
+          getPR: async () => fetched,
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        {
+          action: "created",
+          comment: makeComment({
+            id: 55,
+            body: "please fix the tests",
+            user: makeUser({ login: "alice" }),
+          }),
+          issue: githubIssue({
+            number: 127,
+            title: "Fix the thing",
+            body: "Fixes #12",
+            html_url: "https://github.com/kirmanak/demo/pull/127",
+            user: makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" }),
+            assignee: null,
+            assignees: [],
+            labels: [],
+            pull_request: {
+              url: "https://api.github.com/repos/kirmanak/demo/pulls/127",
+              html_url: "https://github.com/kirmanak/demo/pull/127",
+            },
+          }),
+          repository: githubRepo,
+          sender: makeUser({ login: "alice", type: "User" }),
+        },
+        { event: "issue_comment" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
+    expect(store.rows[0]?.kind).toBe("follow-up");
+  });
+
+  test("GitHub issue_comment PR lookup failure is 503", async () => {
+    const handler = createFetchHandler(githubConfig(), {
+      queue: makeReviewQueue(),
+      worker: {
+        queue: { enqueue: async () => ({ key: "x", queued: true }) },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () => githubIssue(),
+          getPR: async () => {
+            throw new Error("github 502");
+          },
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        {
+          action: "created",
+          comment: makeComment({
+            id: 55,
+            body: "please fix the tests",
+            user: makeUser({ login: "alice" }),
+          }),
+          issue: githubIssue({
+            number: 127,
+            title: "Fix the thing",
+            body: "Fixes #12",
+            html_url: "https://github.com/kirmanak/demo/pull/127",
+            user: makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" }),
+            assignee: null,
+            assignees: [],
+            labels: [],
+            pull_request: {
+              url: "https://api.github.com/repos/kirmanak/demo/pulls/127",
+              html_url: "https://github.com/kirmanak/demo/pull/127",
+            },
+          }),
+          repository: githubRepo,
+          sender: makeUser({ login: "alice", type: "User" }),
+        },
+        { event: "issue_comment" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "pr lookup failed" });
+  });
+
+  test("skips status and check_run", async () => {
+    const handler = createFetchHandler(githubConfig(), { queue: makeReviewQueue() });
+    expect(await responseJson(await handler(await signedGithubRequest({}, { event: "status" })))).toEqual({
+      skipped: "unsupported event status",
+    });
+    expect(await responseJson(await handler(await signedGithubRequest({}, { event: "check_run" })))).toEqual({
+      skipped: "unsupported event check_run",
+    });
+  });
+
+  test("Gitea mailbox still accepts Gitea signatures on /webhooks/gitea", async () => {
+    const queue = makeReviewQueue();
+    const handler = createFetchHandler(makeConfig(), { queue });
+    const raw = encodeJson(makePayload());
+    const signature = await signBody(raw, "webhook-secret");
+    const response = await handler(
+      new Request("https://reviewer.test/webhooks/gitea", {
+        method: "POST",
+        body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
+        headers: {
+          "content-type": "application/json",
+          "x-gitea-signature": signature,
+          "x-gitea-event": "pull_request",
+          "x-gitea-delivery": "delivery-1",
+        },
+      })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+  });
+});
+
+describe("worker POST /webhooks/github", () => {
+  test("labeled issue enqueues implement; ping is 200; bad hmac is 401", async () => {
+    const queue = makeIssueQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), { queue });
+    const labeled = await handler(
+      await signedGithubRequest(labeledPayload(), { event: "issues", url: "https://worker.test/webhooks/github" })
+    );
+    expect(labeled.status).toBe(202);
+    expect(await responseJson(labeled)).toEqual({ key: "kirmanak/demo#12", queued: true });
+    expect(queue.jobs[0]?.issueNumber).toBe(12);
+
+    const ping = await handler(
+      await signedGithubRequest({ zen: "pong" }, { event: "ping", url: "https://worker.test/webhooks/github" })
+    );
+    expect(ping.status).toBe(200);
+
+    expect(
+      (
+        await handler(
+          await signedGithubRequest(labeledPayload(), {
+            event: "issues",
+            secret: "wrong",
+            url: "https://worker.test/webhooks/github",
+          })
+        )
+      ).status
+    ).toBe(401);
+  });
+
+  test("does not enqueue review jobs on the worker mailbox", async () => {
+    const queue = makeIssueQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), { queue });
+    const response = await handler(
+      await signedGithubRequest(makePayload({ action: "synchronize", repository: githubRepo }), {
+        event: "pull_request",
+        url: "https://worker.test/webhooks/github",
+      })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action synchronize" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+});

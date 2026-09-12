@@ -1,10 +1,10 @@
-import { isAssignedToBot } from "./assignee.ts";
+import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { extractClosingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
 import type { GiteaPushPayload, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
-export type PushWebhookPolicy = WebhookPolicy & { botUsername: string };
+export type PushWebhookPolicy = WebhookPolicy & PickupPolicy;
 
 export type PushWebhookDecision =
   | { type: "enqueue"; jobs: Omit<IssueJob, "delivery" | "receivedAt">[] }
@@ -93,7 +93,7 @@ export async function shouldEnqueuePushConflicts(
     if (issueNumber === undefined) continue;
     try {
       const issue = await api.getIssue(owner, repo, issueNumber);
-      if (issue.state !== "open" || !isAssignedToBot(issue, policy.botUsername)) continue;
+      if (issue.state !== "open" || !isIssuePickedUp(issue, policy)) continue;
       jobs.push({
         owner,
         repo,

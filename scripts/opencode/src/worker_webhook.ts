@@ -29,7 +29,7 @@ export interface WorkerWebhookQueue {
 }
 
 export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks">>;
+  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "getPR">>;
 
 export interface HandleWorkerWebhookDeps {
   queue: WorkerWebhookQueue;

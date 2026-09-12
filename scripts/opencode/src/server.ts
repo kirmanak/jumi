@@ -5,6 +5,7 @@ import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
+import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
@@ -162,6 +163,15 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
       return new Response(body, {
         status: 200,
         headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
+      });
+    }
+    if (url.pathname === "/webhooks/github") {
+      if (!webhookEnabled) return json(404, { error: "not found" });
+      return handleGithubWebhook(request, config, {
+        review: deps.queue,
+        worker: deps.worker,
+        getPR: deps.getPR,
+        logger,
       });
     }
     if (url.pathname !== "/webhooks/gitea") return json(404, { error: "not found" });
@@ -327,7 +337,7 @@ async function handoverFollowUp(
       store,
       api,
       row: current ?? row,
-      botUsername: config.botUsername,
+      ...pickupPolicyForForge(config.forge, config.botUsername),
       published,
       markdown: current?.resultMarkdown ?? row.resultMarkdown,
       maxFollowupRounds: config.maxFollowupRounds,
@@ -459,6 +469,7 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
   return {
     getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
     getRepo: (owner, repo) => api.getRepo(owner, repo),
+    getPR: (owner, repo, index) => api.getPR(owner, repo, index),
     listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)

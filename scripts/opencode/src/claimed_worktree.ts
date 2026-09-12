@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { isAssignedToBot } from "./assignee.ts";
+import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
 import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import { type Engine, resolveEngine } from "./engine.ts";
@@ -131,11 +131,11 @@ export async function beginClaimedWorktree(
 
 export async function recheckAssignedAndOpen(
   claimed: ClaimedWorktree,
-  opts: { api: Pick<IssueApi, "getIssue">; botUsername: string }
+  opts: { api: Pick<IssueApi, "getIssue"> } & PickupPolicy
 ): Promise<ClaimedEarlyResult | undefined> {
   try {
     const currentIssue = await opts.api.getIssue(claimed.owner, claimed.repo, claimed.issueNumber);
-    if (!isAssignedToBot(currentIssue, opts.botUsername) || currentIssue.state !== "open") {
+    if (!isIssuePickedUp(currentIssue, opts) || currentIssue.state !== "open") {
       await claimed.forgetClaim();
       return { status: "cancelled" };
     }

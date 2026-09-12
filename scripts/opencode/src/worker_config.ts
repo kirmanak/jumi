@@ -1,5 +1,5 @@
 import { readFileSync, unlinkSync } from "node:fs";
-import { loadForgeBind, SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
+import { GITHUB_ENV, loadForgeBind, SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
 import { type ForgeKind, parseForge } from "./forge.ts";
 
 export interface WorkerConfig {
@@ -9,6 +9,7 @@ export interface WorkerConfig {
   giteaUrl: string;
   giteaToken: string;
   webhookSecret: string;
+  githubWebhookSecret?: string;
   webhookAuthToken?: string;
   allowedOrgs: string[];
   allowedRepos: string[];
@@ -111,6 +112,7 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
     ...forgeBind,
+    githubWebhookSecret: resolved[GITHUB_ENV.webhookSecret] || undefined,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",

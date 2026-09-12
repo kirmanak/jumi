@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import { enqueueFollowUpFromReview, shouldHandoverFollowUp, TOO_MANY_FOLLOWUP_ROUNDS } from "../src/handover.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
@@ -132,6 +133,47 @@ describe("enqueueFollowUpFromReview", () => {
     expect(follow?.payload?.title).toBe("Fix the thing");
     expect(api.comments).toEqual([]);
     expect(logs.some((line) => line.includes("persist-insert skipped"))).toBe(false);
+  });
+
+  test("inserts a follow-up job when GitHub closing issue is labeled jumi", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = makeApi({
+      getIssue: async () => makeIssue({ assignee: null, assignees: [], labels: [{ name: "jumi" }] }),
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      isPickedUp: hasJumiLabel,
+      published: { status: "posted", commentId: 1 },
+      markdown: "Please fix tests\n<!-- jumi-check: failure -->",
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "follow-up")?.issueNumber).toBe(12);
+  });
+
+  test("does not insert when GitHub closing issue lacks jumi label", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = makeApi({ getIssue: async () => makeIssue({ labels: [] }) });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      isPickedUp: hasJumiLabel,
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+    expect(logs).toEqual(["persist-insert skipped: unassigned"]);
   });
 
   test("does not insert when the issue is unassigned", async () => {

@@ -8,6 +8,7 @@ export interface GiteaUser {
   full_name: string;
   email: string;
   avatar_url: string;
+  type?: string;
 }
 
 export interface GiteaRepo {
@@ -171,6 +172,7 @@ export interface GiteaIssue {
     html_url?: string;
   } | null;
   is_pull?: boolean;
+  labels?: Array<string | { name?: string }> | null;
   updated_at: string;
   created_at: string;
   /** Webhook payloads embed a full repo; REST issue search only sends RepositoryMeta. */
@@ -191,6 +193,7 @@ export interface GiteaIssuePayload {
   action: string;
   number: number;
   issue: GiteaIssue;
+  label?: { name?: string } | null;
   repository: GiteaRepo;
   sender: GiteaUser;
 }

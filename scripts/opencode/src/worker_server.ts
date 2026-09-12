@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { scrubSecretEnv } from "./config.ts";
 import { createForge } from "./forge.ts";
+import { handleGithubWebhook } from "./github_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { ReviewQueue } from "./queue.ts";
 import { createPgReviewJobStore, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
@@ -58,6 +59,12 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       return new Response(renderTokenMetrics(), {
         status: 200,
         headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
+      });
+    }
+    if (url.pathname === "/webhooks/github") {
+      return handleGithubWebhook(request, config, {
+        worker: { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger },
+        logger,
       });
     }
     if (url.pathname !== "/webhooks/gitea") return json(404, { error: "not found" });

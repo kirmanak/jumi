@@ -1,4 +1,4 @@
-import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
+import { isAssignedToBot, isIssuePickedUp, isPullRequestIssue, type PickupPolicy } from "./assignee.ts";
 import {
   extractClosingIssueNumber,
   type IssueApi,
@@ -11,10 +11,10 @@ import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, Git
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
-export type FollowUpWebhookPolicy = WebhookPolicy & {
-  botUsername: string;
-  followupIgnoreLogins?: readonly string[];
-};
+export type FollowUpWebhookPolicy = WebhookPolicy &
+  PickupPolicy & {
+    followupIgnoreLogins?: readonly string[];
+  };
 
 export type FollowUpWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
@@ -62,13 +62,7 @@ export function isJumiWorkerBody(body: string | null | undefined): boolean {
 }
 
 export function isJumiInternalBody(body: string | null | undefined): boolean {
-  const text = body ?? "";
-  return (
-    isJumiWorkerBody(text) ||
-    text.includes("<!-- jumi-check:") ||
-    text.includes("<!-- jumi-stuck:") ||
-    text.includes("<!-- jumi-review:")
-  );
+  return /<!--\s*jumi-/.test(body ?? "");
 }
 
 export function parseIssueCommentPayload(rawBody: Uint8Array): GiteaIssueCommentPayload {
@@ -143,13 +137,15 @@ export function prFromCommentIssue(issue: GiteaIssue, repository: GiteaRepo): Gi
 export function followUpIssueNumber(
   pr: GiteaPR,
   issue: GiteaIssue | undefined,
-  botUsername: string
+  botUsername: string,
+  policy?: PickupPolicy
 ): number | undefined {
+  const pickup = policy ?? { botUsername };
   if (isJumiPrIdentity(pr, botUsername)) {
     const closer = extractClosingIssueNumber(pr);
     if (closer !== undefined) return closer;
   }
-  if (issue && isAssignedToBot(issue, botUsername)) return pr.number;
+  if (issue && isIssuePickedUp(issue, pickup)) return pr.number;
   if (isAssignedToBot(pr, botUsername)) return pr.number;
   return undefined;
 }
@@ -159,8 +155,10 @@ export function followUpSkipReason(
   issue: GiteaIssue | undefined,
   owner: string,
   repo: string,
-  botUsername: string
+  botUsername: string,
+  policy?: PickupPolicy
 ): string | undefined {
+  const pickup = policy ?? { botUsername };
   if (pr.state !== "open" || pr.merged) return "pull request not open";
   if (isWipOrDraft(pr)) return "draft or WIP pull request";
   if (pr.head?.repo && pr.head.repo.full_name !== `${owner}/${repo}`) return "fork pull request";
@@ -170,7 +168,7 @@ export function followUpSkipReason(
     if (issue) {
       if (issue.number !== closer) return "closing issue mismatch";
       if (issue.state !== "open") return "issue not open";
-      if (!isAssignedToBot(issue, botUsername)) return "not assigned to bot";
+      if (!isIssuePickedUp(issue, pickup)) return pickup.isPickedUp ? "not labeled jumi" : "not assigned to bot";
     }
     if (pr.head?.repo && !isInScopeJumiPR(pr, owner, repo, botUsername) && pr.head.ref) {
       return "not an in-scope jumi pull request";
@@ -178,7 +176,7 @@ export function followUpSkipReason(
     return undefined;
   }
 
-  const assignedOnIssue = Boolean(issue && isAssignedToBot(issue, botUsername) && issue.number === pr.number);
+  const assignedOnIssue = Boolean(issue && isIssuePickedUp(issue, pickup) && issue.number === pr.number);
   const assignedOnPr = isAssignedToBot(pr, botUsername);
   if (!assignedOnIssue && !assignedOnPr) {
     if (!isJumiPrIdentity(pr, botUsername)) return "not a jumi pull request";
@@ -248,7 +246,7 @@ export function shouldEnqueueIssueCommentFollowUp(
     embedded && typeof embedded.head?.ref === "string" && embedded.head.ref
       ? embedded
       : prFromCommentIssue(payload.issue, payload.repository);
-  const issueNumber = followUpIssueNumber(pr, closingIssue ?? payload.issue, policy.botUsername);
+  const issueNumber = followUpIssueNumber(pr, closingIssue ?? payload.issue, policy.botUsername, policy);
   if (issueNumber === undefined) {
     if (!isJumiPrIdentity(pr, policy.botUsername)) return { type: "skip", reason: "not a jumi pull request" };
     return { type: "skip", reason: "no closing issue" };
@@ -258,7 +256,7 @@ export function shouldEnqueueIssueCommentFollowUp(
     isJumiPrIdentity(pr, policy.botUsername) && extractClosingIssueNumber(pr) !== undefined
       ? closingIssue
       : (closingIssue ?? payload.issue);
-  const skip = followUpSkipReason(pr, skipIssue, owner, repo, policy.botUsername);
+  const skip = followUpSkipReason(pr, skipIssue, owner, repo, policy.botUsername, policy);
   if (skip) return { type: "skip", reason: skip };
 
   return {
@@ -293,13 +291,13 @@ export function shouldEnqueuePullRejectedFollowUp(
   }
 
   const pr = payload.pull_request;
-  const issueNumber = followUpIssueNumber(pr, closingIssue, policy.botUsername);
+  const issueNumber = followUpIssueNumber(pr, closingIssue, policy.botUsername, policy);
   if (issueNumber === undefined) {
     if (!isJumiPrIdentity(pr, policy.botUsername)) return { type: "skip", reason: "not a jumi pull request" };
     return { type: "skip", reason: "no closing issue" };
   }
 
-  const skip = followUpSkipReason(pr, closingIssue, owner, repo, policy.botUsername);
+  const skip = followUpSkipReason(pr, closingIssue, owner, repo, policy.botUsername, policy);
   if (skip) return { type: "skip", reason: skip };
 
   return {
@@ -345,7 +343,7 @@ export async function shouldEnqueuePullAssign(
     return { type: "skip", reason: "not assigned to bot" };
   }
 
-  const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername);
+  const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername, policy);
   if (skip) return { type: "skip", reason: skip };
 
   const closer = extractClosingIssueNumber(pr);
