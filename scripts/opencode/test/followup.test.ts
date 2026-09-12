@@ -20,6 +20,7 @@ import {
   implementFollowUp,
   isPointerStubBody,
   needsFollowUp,
+  parsePrHeadChangedReason,
   pickLatestJumiReview,
   writeFollowUpState,
 } from "../src/followup.ts";
@@ -163,6 +164,130 @@ describe("implementFollowUp", () => {
       });
       expect(result).toEqual({ status: "skipped", reason: "no open jumi closing PR" });
       expect(api.pulls).toHaveLength(0);
+    });
+  });
+
+  test("continues on the current head and keeps the original review-failure sticky", async () => {
+    await withDirs(async (home, workdir) => {
+      const oldSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const pr = jumiPr();
+      const api = makeApi({
+        listOpenPulls: async () => [pr],
+        listIssueComments: async () => [
+          makeComment({
+            id: 38022,
+            body: [
+              "<!-- jumi-review:kirmanak/demo#127 -->",
+              "### Jumi OpenCode review",
+              "",
+              `Reviewed commit: \`${oldSha}\``,
+              "",
+              "please fix the tests",
+              "<!-- jumi-check: failure -->",
+            ].join("\n"),
+            user: makeUser({ login: "jumi" }),
+          }),
+        ],
+      });
+      let feedback = "";
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({
+          headSha: oldSha,
+          trigger: { event: "review-failure", sender: "jumi" },
+        }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return " M src/demo.ts";
+          return "";
+        },
+        openCodeRunner: async () => {
+          feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(feedback).toContain("please fix the tests");
+      expect(feedback).toContain(oldSha);
+    });
+  });
+
+  test("rejected push because the remote moved skips without burning a follow-up round", async () => {
+    await withDirs(async (home, workdir) => {
+      let committed = false;
+      let fetched = false;
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob({ headSha: "oldsha" }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "commit") committed = true;
+          if (gitArgs[0] === "fetch") fetched = true;
+          if (gitArgs[0] === "push") throw new Error("non-fast-forward");
+          if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/jumi/issue-12-fix-the-thing")) {
+            return fetched ? "newsha" : "oldsha";
+          }
+          if (gitArgs[0] === "rev-parse") return committed ? "localsha" : "oldsha";
+          if (gitArgs[0] === "status") return " M src/demo.ts";
+          return "";
+        },
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "PR head changed from oldsha to newsha" });
+      expect(parsePrHeadChangedReason("PR head changed from oldsha to newsha")).toEqual({
+        from: "oldsha",
+        to: "newsha",
+      });
+      await expect(readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  });
+
+  test("failed push when the remote did not move rethrows instead of skipping", async () => {
+    await withDirs(async (home, workdir) => {
+      let committed = false;
+      await expect(
+        implementFollowUp({
+          api: makeApi(),
+          job: followUpJob({ headSha: "oldsha" }),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async (args) => {
+            const gitArgs = stripGitConfigArgs(args);
+            if (gitArgs[0] === "commit") committed = true;
+            if (gitArgs[0] === "push") throw new Error("authentication failed");
+            if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/jumi/issue-12-fix-the-thing")) return "oldsha";
+            if (gitArgs[0] === "rev-parse") return committed ? "localsha" : "oldsha";
+            if (gitArgs[0] === "status") return " M src/demo.ts";
+            return "";
+          },
+          openCodeRunner: async () => ({ status: "ok" }),
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("authentication failed");
     });
   });
 
@@ -2416,6 +2541,26 @@ describe("collectFollowUpItems", () => {
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
     expect(items.inlines.map((comment) => comment.id)).toEqual([12]);
     expect(items.jumiInlines.map((comment) => comment.id)).toEqual([11]);
+  });
+
+  test("includes a stale-head jumi failure sticky when extraHeadShas or review-failure match", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ sha: STALE_SHA }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const byExtra = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA, [], {
+      extraHeadShas: [STALE_SHA],
+    });
+    expect(byExtra.comments.map((comment) => comment.id)).toEqual([38022]);
+    const byTrigger = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA, [], {
+      anyReviewedCommit: true,
+    });
+    expect(byTrigger.comments.map((comment) => comment.id)).toEqual([38022]);
   });
 
   test("excludes jumi review sticky with success trailer", async () => {

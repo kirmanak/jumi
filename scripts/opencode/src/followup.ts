@@ -245,11 +245,22 @@ export function isJumiReviewSticky(comment: { body?: string | null }): boolean {
   return Boolean(parseReviewedCommitSha(body));
 }
 
-export function isJumiReviewFinding(comment: { body?: string | null }, headSha: string): boolean {
+export interface ReviewFindingMatchOpts {
+  extraHeadShas?: readonly string[];
+  anyReviewedCommit?: boolean;
+}
+
+export function isJumiReviewFinding(
+  comment: { body?: string | null },
+  headSha: string,
+  opts: ReviewFindingMatchOpts = {}
+): boolean {
   if (!isJumiReviewSticky(comment)) return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
-  if (!stickySha || !commitMatchesHead(stickySha, headSha)) return false;
-  return true;
+  if (!stickySha) return false;
+  if (opts.anyReviewedCommit) return true;
+  if (commitMatchesHead(stickySha, headSha)) return true;
+  return (opts.extraHeadShas ?? []).some((sha) => commitMatchesHead(stickySha, sha));
 }
 
 function isJumiReviewInline(
@@ -284,9 +295,22 @@ export function isInScopeFollowUpComment(
   comment: { body?: string | null; user?: { login?: string } },
   botUsername: string,
   headSha: string,
-  ignoreLogins: readonly string[] = []
+  ignoreLogins: readonly string[] = [],
+  findingOpts: ReviewFindingMatchOpts = {}
 ): boolean {
-  return isJumiReviewFinding(comment, headSha) || isInScopeHumanComment(comment, botUsername, ignoreLogins);
+  return (
+    isJumiReviewFinding(comment, headSha, findingOpts) || isInScopeHumanComment(comment, botUsername, ignoreLogins)
+  );
+}
+
+export function prHeadChangedReason(from: string, to: string): string {
+  return `PR head changed from ${from} to ${to}`;
+}
+
+export function parsePrHeadChangedReason(reason: string): { from: string; to: string } | undefined {
+  const match = /^PR head changed from (\S+) to (\S+)$/.exec(reason.trim());
+  if (!match?.[1] || !match[2]) return undefined;
+  return { from: match[1], to: match[2] };
 }
 
 export function isRequestChangesReview(review: PullReview): boolean {
@@ -319,7 +343,8 @@ export async function collectFollowUpItems(
   prNumber: number,
   botUsername: string,
   headSha: string,
-  ignoreLogins: readonly string[] = []
+  ignoreLogins: readonly string[] = [],
+  findingOpts: ReviewFindingMatchOpts = {}
 ): Promise<FollowUpItems> {
   const [rawComments, rawReviews, rawInlines] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
@@ -334,7 +359,9 @@ export async function collectFollowUpItems(
     }),
   ]);
   return {
-    comments: rawComments.filter((comment) => isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins)),
+    comments: rawComments.filter((comment) =>
+      isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts)
+    ),
     inlines: rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername, ignoreLogins)),
     reviews: rawReviews.filter(
       (review) =>
@@ -556,6 +583,14 @@ function triggerBodyFromItems(
   return "";
 }
 
+function reviewFindingMatchOptsForJob(job: IssueJob, headSha: string): ReviewFindingMatchOpts {
+  const extraHeadShas = job.headSha && job.headSha.toLowerCase() !== headSha.toLowerCase() ? [job.headSha] : undefined;
+  return {
+    extraHeadShas,
+    anyReviewedCommit: job.trigger?.event === "review-failure",
+  };
+}
+
 export async function implementFollowUp(opts: ImplementOptions): Promise<FollowUpResult> {
   const log = opts.logger ?? logDefault;
   const now = () => opts.now?.() ?? new Date();
@@ -624,9 +659,9 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     return { status: "skipped", reason: "no open jumi closing PR" };
   }
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
-    await forgetClaim();
-    return { status: "skipped", reason: `PR head changed from ${opts.job.headSha} to ${pr.head.sha}` };
+    log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
+  const findingOpts = reviewFindingMatchOptsForJob(opts.job, pr.head.sha);
 
   const branch = pr.head.ref;
   claim.branch = branch;
@@ -643,7 +678,8 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     pr.number,
     opts.botUsername,
     pr.head.sha,
-    opts.followupIgnoreLogins
+    opts.followupIgnoreLogins,
+    findingOpts
   );
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiReview(pendingItems.jumiStickies, pr.head.sha);
@@ -975,7 +1011,8 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         pr.number,
         opts.botUsername,
         pr.head.sha,
-        opts.followupIgnoreLogins
+        opts.followupIgnoreLogins,
+        findingOpts
       );
       const briefReview = pickLatestJumiReview(items.jumiStickies, pr.head.sha) ?? pendingLastReview;
       const feedback = buildFeedbackMarkdown({
@@ -1139,7 +1176,29 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         env: commitEnv,
       });
     }
-    await runConfiguredGit(["push", "-u", "origin", branch], { cwd: worktree, env });
+    try {
+      await runConfiguredGit(["push", "-u", "origin", branch], { cwd: worktree, env });
+    } catch (err) {
+      await runConfiguredGit(["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], {
+        cwd: worktree,
+        env,
+      }).catch(() => undefined);
+      const remoteSha = (
+        await runConfiguredGit(["rev-parse", `origin/${branch}`], { cwd: worktree, env }).catch(() => "")
+      ).trim();
+      if (remoteSha && remoteSha !== attemptedHeadSha) {
+        await stopHeartbeat();
+        await serializeClaim(async () => {
+          await forgetClaim();
+        });
+        await detachWorktree();
+        return {
+          status: "skipped",
+          reason: prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha),
+        };
+      }
+      throw err;
+    }
     throwIfAborted(opts.abortSignal);
     await persistConflictAttempt(mergeResult);
 

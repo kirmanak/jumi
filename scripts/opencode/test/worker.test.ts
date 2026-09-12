@@ -300,6 +300,64 @@ describe("processWorkerTick", () => {
     expect(store.rows[0]?.state).toBe("succeeded");
   });
 
+  test("does not lease conflict for an issue while follow-up is in flight", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 127, headSha: "headsha" }));
+    await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 127, headSha: "headsha" }));
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const follow = processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-a", {
+      followUp: async () => {
+        started.resolve();
+        await release.promise;
+        return { status: "pushed", prNumber: 127, htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127" };
+      },
+      conflict: async () => {
+        throw new Error("conflict should wait");
+      },
+    });
+    await started.promise;
+    expect(
+      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", {
+        conflict: async () => {
+          throw new Error("conflict should wait");
+        },
+      })
+    ).toBe("idle");
+    release.resolve();
+    expect(await follow).toBe("processed");
+    let conflictRan = 0;
+    expect(
+      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", {
+        conflict: async () => {
+          conflictRan++;
+          return { status: "up-to-date" };
+        },
+      })
+    ).toBe("processed");
+    expect(conflictRan).toBe(1);
+  });
+
+  test("follow-up skip because the PR head changed enqueues a successor for the new head", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 127,
+        headSha: "oldsha",
+        trigger: { event: "review-failure", sender: "jumi" },
+      })
+    );
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      followUp: async () => ({ status: "skipped", reason: "PR head changed from oldsha to newsha" }),
+    });
+    const successor = store.rows.find((row) => row.headSha === "newsha");
+    expect(successor?.kind).toBe("follow-up");
+    expect(successor?.state).toBe("queued");
+    expect(successor?.payload?.trigger?.event).toBe("review-failure");
+    expect(store.rows.find((row) => row.headSha === "oldsha")?.state).toBe("skipped");
+  });
+
   test("two workers lease different jobs", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob({ issueNumber: 12 }));

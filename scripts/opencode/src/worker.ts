@@ -9,7 +9,7 @@ import {
   stuckStatePath,
 } from "./claim.ts";
 import { implementConflict } from "./conflict.ts";
-import { implementFollowUp } from "./followup.ts";
+import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createGiteaForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
@@ -358,6 +358,18 @@ export async function processWorkerTick(
     }
     const reason =
       result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
+    if (result.status === "skipped" && job.mode === "follow-up" && reason) {
+      const moved = parsePrHeadChangedReason(reason);
+      if (moved?.to && moved.to !== job.headSha) {
+        const enqueued = await store.enqueueIssue({
+          ...job,
+          headSha: moved.to,
+          delivery: `head-changed-${row.id}-${moved.to}`,
+          receivedAt: new Date().toISOString(),
+        });
+        logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} after PR head changed`);
+      }
+    }
     await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
     const prNumber = pushedPrNumber(result);

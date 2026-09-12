@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   HEARTBEAT_MS,
+  isUniqueViolation,
   MemoryReviewJobStore,
   PgReviewJobStore,
   pgTextArrayLiteral,
+  QueueUnavailableError,
   RECLAIM_LEASED_BY,
+  REVIEW_JOBS_SCHEMA_SQL,
   WORKER_JOB_KINDS,
 } from "../src/review_jobs.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
@@ -139,6 +142,32 @@ describe("MemoryReviewJobStore", () => {
     expect(leased).toHaveLength(1);
     expect(leased[0]?.kind).toBe("implement");
     expect(leased[0]?.leasedBy === "worker-a" || leased[0]?.leasedBy === "worker-b").toBe(true);
+  });
+
+  test("leased follow-up blocks conflict for the same issue and still leases another issue", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 7, headSha: "olda" }));
+    await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 7, headSha: "olda" }));
+    await store.enqueueIssue(
+      makeIssueJob({
+        issueNumber: 13,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/13",
+        mode: "conflict",
+        prNumber: 8,
+        headSha: "other",
+      })
+    );
+    const first = await store.lease("worker-a", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(first?.kind).toBe("follow-up");
+    expect(first?.issueNumber).toBe(12);
+    const second = await store.lease("worker-b", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(second?.kind).toBe("conflict");
+    expect(second?.issueNumber).toBe(13);
+    expect(await store.lease("worker-c", 60_000, undefined, WORKER_JOB_KINDS)).toBeUndefined();
+    await store.markPublished(first!.id, "worker-a", { state: "succeeded" });
+    const third = await store.lease("worker-c", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(third?.kind).toBe("conflict");
+    expect(third?.issueNumber).toBe(12);
   });
 
   test("lease expiry reclaim requeues with attempt++", async () => {
@@ -535,6 +564,88 @@ describe("PgReviewJobStore.reclaimExpired", () => {
   });
 });
 
+describe("PgReviewJobStore.migrate", () => {
+  test("requeues extra leased worker rows before creating the unique issue index", () => {
+    const requeueAt = REVIEW_JOBS_SCHEMA_SQL.indexOf("ROW_NUMBER()");
+    const indexAt = REVIEW_JOBS_SCHEMA_SQL.indexOf("review_jobs_leased_worker_issue");
+    expect(requeueAt).toBeGreaterThanOrEqual(0);
+    expect(indexAt).toBeGreaterThan(requeueAt);
+    expect(REVIEW_JOBS_SCHEMA_SQL).toContain("WHERE rn > 1");
+    expect(REVIEW_JOBS_SCHEMA_SQL).toContain("state = 'queued'");
+  });
+});
+
+describe("isUniqueViolation", () => {
+  test("detects postgres 23505 including wrapped queue errors", () => {
+    expect(isUniqueViolation(Object.assign(new Error("duplicate key"), { code: "23505" }))).toBe(true);
+    expect(
+      isUniqueViolation(new QueueUnavailableError(Object.assign(new Error("duplicate key"), { code: "23505" })))
+    ).toBe(true);
+    expect(isUniqueViolation(new QueueUnavailableError(new Error("connection refused")))).toBe(false);
+  });
+});
+
+describe("PgReviewJobStore.lease unique violation", () => {
+  test("retries once then skips", async () => {
+    let calls = 0;
+    const sql: FakeSql = {
+      async unsafe() {
+        calls++;
+        throw Object.assign(new Error("duplicate key"), { code: "23505" });
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.lease("worker-1", 60_000, new Date(0), WORKER_JOB_KINDS)).toBeUndefined();
+    expect(calls).toBe(2);
+  });
+
+  test("retries unique violation then leases", async () => {
+    let calls = 0;
+    const sql: FakeSql = {
+      async unsafe() {
+        calls++;
+        if (calls === 1) throw Object.assign(new Error("duplicate key"), { code: "23505" });
+        return [
+          {
+            id: 9,
+            job_key: "follow-up:kirmanak/demo#127:headsha",
+            kind: "follow-up",
+            owner: "kirmanak",
+            repo: "demo",
+            pr_number: 127,
+            head_sha: "headsha",
+            issue_number: 12,
+            payload: null,
+            delivery: "d1",
+            state: "leased",
+            attempt: 0,
+            leased_by: "worker-1",
+            leased_until: new Date(60_000).toISOString(),
+            result_markdown: null,
+            result_reason: null,
+            error: null,
+            pending_status_at: null,
+            published_at: null,
+            pr_updated_at: null,
+            created_at: new Date(0).toISOString(),
+            updated_at: new Date(0).toISOString(),
+          },
+        ];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    const row = await store.lease("worker-1", 60_000, new Date(0), WORKER_JOB_KINDS);
+    expect(row?.id).toBe(9);
+    expect(calls).toBe(2);
+  });
+});
+
 describe("pgTextArrayLiteral", () => {
   test("formats closed job kinds as a postgres array literal, not a comma-string", () => {
     expect(pgTextArrayLiteral(["review"])).toBe("{review}");
@@ -570,6 +681,8 @@ describe("PgReviewJobStore kind ANY() bind", () => {
     await store.lease("worker-1", 60_000, new Date(0), WORKER_JOB_KINDS);
     const leaseWorker = captured.find((row) => row.query.includes("kind = ANY($3::text[])"));
     expect(leaseWorker?.params?.[2]).toBe("{implement,follow-up,conflict}");
+    expect(leaseWorker?.params?.[3]).toBe("{implement,follow-up,conflict}");
+    expect(leaseWorker?.query).toContain("held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number");
 
     captured.length = 0;
     await store.reclaimExpired(2, new Date(5_000), 30_000, WORKER_JOB_KINDS);

@@ -144,6 +144,26 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS payload JSONB;
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
   WHERE state = 'queued';
+
+UPDATE review_jobs
+SET state = 'queued', leased_by = NULL, leased_until = NULL, updated_at = NOW()
+WHERE id IN (
+  SELECT id FROM (
+    SELECT id, ROW_NUMBER() OVER (
+      PARTITION BY owner, repo, issue_number
+      ORDER BY id ASC
+    ) AS rn
+    FROM review_jobs
+    WHERE state = 'leased'
+      AND kind IN ('implement', 'follow-up', 'conflict')
+      AND issue_number IS NOT NULL
+  ) ranked
+  WHERE rn > 1
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
+  ON review_jobs (owner, repo, issue_number)
+  WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
 `;
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
@@ -261,6 +281,30 @@ function parsePayload(value: unknown): IssueJobPayload | null {
 
 function kindsOrReview(kinds?: readonly JobKind[]): readonly JobKind[] {
   return kinds && kinds.length > 0 ? kinds : [REVIEW_KIND];
+}
+
+function isWorkerKind(kind: JobKind): boolean {
+  return WORKER_JOB_KINDS.includes(kind);
+}
+
+function sameWorkerIssue(
+  left: { owner: string; repo: string; issueNumber: number | null },
+  right: { owner: string; repo: string; issueNumber: number | null }
+): boolean {
+  return left.owner === right.owner && left.repo === right.repo && left.issueNumber === right.issueNumber;
+}
+
+function workerIssueIsLeased(
+  rows: readonly ReviewJobRecord[],
+  candidate: { owner: string; repo: string; issueNumber: number | null }
+): boolean {
+  return rows.some(
+    (held) => held.state === "leased" && isWorkerKind(rowKind(held)) && sameWorkerIssue(held, candidate)
+  );
+}
+
+function leasesWorkerKinds(kinds: readonly JobKind[]): boolean {
+  return kinds.some((kind) => isWorkerKind(kind));
 }
 
 const PG_TEXT_ARRAY_ELEMENT = /^[A-Za-z0-9_-]+$/;
@@ -441,7 +485,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   ): Promise<ReviewJobRecord | undefined> {
     return this.locked(() => {
       const allowed = kindsOrReview(kinds);
-      const row = this.rows.find((item) => item.state === "queued" && allowed.includes(rowKind(item)));
+      const serializeWorkers = leasesWorkerKinds(allowed);
+      const row = this.rows.find((item) => {
+        if (item.state !== "queued" || !allowed.includes(rowKind(item))) return false;
+        if (serializeWorkers && isWorkerKind(rowKind(item)) && workerIssueIsLeased(this.rows, item)) return false;
+        return true;
+      });
       if (!row) return undefined;
       const ts = now.getTime();
       row.state = "leased";
@@ -645,6 +694,18 @@ type ReviewJobRow = {
   created_at: unknown;
   updated_at: unknown;
 };
+
+export function isUniqueViolation(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth++) {
+    const rec = current as { code?: unknown; sqlState?: unknown; cause?: unknown };
+    for (const value of [rec.code, rec.sqlState]) {
+      if (value === "23505" || value === 23505) return true;
+    }
+    current = rec.cause;
+  }
+  return false;
+}
 
 function wrapSqlError(err: unknown): never {
   if (err instanceof QueueUnavailableError) throw err;
@@ -909,9 +970,28 @@ export class PgReviewJobStore implements ReviewJobStore {
     kinds?: readonly JobKind[]
   ): Promise<ReviewJobRecord | undefined> {
     const allowed = kindsOrReview(kinds);
-    const rows = asRows<ReviewJobRow>(
-      await this.sql.unsafe(
-        `UPDATE review_jobs
+    const until = new Date(now.getTime() + leaseMs).toISOString();
+    const serializeWorkers = leasesWorkerKinds(allowed);
+    const query = serializeWorkers
+      ? `UPDATE review_jobs
+         SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
+         WHERE id = (
+           SELECT id FROM review_jobs
+           WHERE state = 'queued' AND kind = ANY($3::text[])
+             AND NOT EXISTS (
+               SELECT 1 FROM review_jobs held
+               WHERE held.state = 'leased'
+                 AND held.kind = ANY($4::text[])
+                 AND held.owner = review_jobs.owner
+                 AND held.repo = review_jobs.repo
+                 AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
+             )
+           ORDER BY created_at ASC, id ASC
+           FOR UPDATE SKIP LOCKED
+           LIMIT 1
+         )
+         RETURNING *`
+      : `UPDATE review_jobs
          SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
          WHERE id = (
            SELECT id FROM review_jobs
@@ -920,11 +1000,19 @@ export class PgReviewJobStore implements ReviewJobStore {
            FOR UPDATE SKIP LOCKED
            LIMIT 1
          )
-         RETURNING *`,
-        [leasedBy, new Date(now.getTime() + leaseMs).toISOString(), pgTextArrayLiteral(allowed)]
-      )
-    );
-    return rows[0] ? mapRow(rows[0]) : undefined;
+         RETURNING *`;
+    const params = serializeWorkers
+      ? [leasedBy, until, pgTextArrayLiteral(allowed), pgTextArrayLiteral([...WORKER_JOB_KINDS])]
+      : [leasedBy, until, pgTextArrayLiteral(allowed)];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const rows = asRows<ReviewJobRow>(await this.sql.unsafe(query, params));
+        return rows[0] ? mapRow(rows[0]) : undefined;
+      } catch (err) {
+        if (!isUniqueViolation(err)) throw err;
+        if (attempt >= 1) return undefined;
+      }
+    }
   }
 
   async heartbeat(id: number, leasedBy: string, leaseMs: number, now = new Date()): Promise<boolean> {
