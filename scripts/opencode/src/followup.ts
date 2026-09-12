@@ -222,6 +222,59 @@ export function isJumiReviewSticky(comment: { body?: string | null }): boolean {
   return Boolean(parseReviewedCommitSha(body));
 }
 
+const EMPTY_SUCCESS_RE = /^No blocking issues\.?$/i;
+
+export function isEmptySuccessReview(body: string | null | undefined): boolean {
+  const trimmed = (body ?? "").trim();
+  if (!trimmed) return true;
+  return EMPTY_SUCCESS_RE.test(trimmed);
+}
+
+function pullReviewBody(review: PullReview): string {
+  return review.body ?? review.content ?? "";
+}
+
+function pullReviewFindingSha(review: PullReview): string | undefined {
+  return parseReviewedCommitSha(pullReviewBody(review)) ?? (review.commit_id || undefined);
+}
+
+export function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
+  if (!loginEquals(review.user?.login, botUsername)) return false;
+  const body = pullReviewBody(review);
+  if (!body.trim() || isJumiWorkerBody(body) || isEmptySuccessReview(body)) return false;
+  return hasFailureCheckTrailer(body);
+}
+
+export function isJumiPullReviewFinding(
+  review: PullReview,
+  botUsername: string,
+  headSha: string,
+  opts: ReviewFindingMatchOpts = {}
+): boolean {
+  if (!isJumiFailurePullReview(review, botUsername)) return false;
+  const sha = pullReviewFindingSha(review);
+  if (!sha) return false;
+  if (opts.anyReviewedCommit) return true;
+  if (commitMatchesHead(sha, headSha)) return true;
+  return (opts.extraHeadShas ?? []).some((extra) => commitMatchesHead(sha, extra));
+}
+
+export function isUnresolvedInline(comment: InlineComment): boolean {
+  return comment.resolved !== true && comment.resolver == null;
+}
+
+function asReviewComment(review: PullReview): Comment {
+  const body = pullReviewBody(review);
+  const created = review.submitted_at ?? review.updated_at ?? review.created_at ?? "";
+  return {
+    id: review.id,
+    body,
+    user: review.user ?? { login: "" },
+    created_at: created,
+    updated_at: review.updated_at ?? created,
+  };
+}
+
 export interface ReviewFindingMatchOpts {
   extraHeadShas?: readonly string[];
   anyReviewedCommit?: boolean;
@@ -257,6 +310,20 @@ export function pickLatestJumiReview(stickies: readonly Comment[], headSha: stri
     return sha !== undefined && commitMatchesHead(sha, headSha);
   });
   const pool = currentHead.length ? currentHead : stickies;
+  return [...pool].sort(byDate).at(-1);
+}
+
+export function pickLatestJumiPullReview(reviews: readonly PullReview[], headSha: string): PullReview | undefined {
+  if (reviews.length === 0) return undefined;
+  const byDate = (a: PullReview, b: PullReview) =>
+    (a.submitted_at ?? a.updated_at ?? a.created_at ?? "").localeCompare(
+      b.submitted_at ?? b.updated_at ?? b.created_at ?? ""
+    );
+  const currentHead = reviews.filter((review) => {
+    const sha = pullReviewFindingSha(review);
+    return sha !== undefined && commitMatchesHead(sha, headSha);
+  });
+  const pool = currentHead.length ? currentHead : reviews;
   return [...pool].sort(byDate).at(-1);
 }
 
@@ -306,6 +373,30 @@ export interface FollowUpItems {
   reviews: PullReview[];
   jumiStickies: Comment[];
   jumiInlines: InlineComment[];
+  jumiReviews: PullReview[];
+  jumiFindingReviews: PullReview[];
+}
+
+export function pickLatestJumiFinding(items: FollowUpItems, headSha: string): Comment | undefined {
+  const headPull = pickLatestJumiPullReview(
+    items.jumiReviews.filter((review) => {
+      const sha = pullReviewFindingSha(review);
+      return sha !== undefined && commitMatchesHead(sha, headSha);
+    }),
+    headSha
+  );
+  if (headPull) return asReviewComment(headPull);
+  const headSticky = pickLatestJumiReview(
+    items.jumiStickies.filter((comment) => {
+      const sha = parseReviewedCommitSha(comment.body ?? "");
+      return sha !== undefined && commitMatchesHead(sha, headSha);
+    }),
+    headSha
+  );
+  if (headSticky) return headSticky;
+  const pull = pickLatestJumiPullReview(items.jumiReviews, headSha);
+  if (pull) return asReviewComment(pull);
+  return pickLatestJumiReview(items.jumiStickies, headSha);
 }
 
 export async function collectFollowUpItems(
@@ -346,6 +437,10 @@ export async function collectFollowUpItems(
     ),
     jumiStickies: rawComments.filter(isJumiReviewSticky),
     jumiInlines: rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername)),
+    jumiReviews: rawReviews.filter((review) => isJumiFailurePullReview(review, botUsername)),
+    jumiFindingReviews: rawReviews.filter((review) =>
+      isJumiPullReviewFinding(review, botUsername, headSha, findingOpts)
+    ),
   };
 }
 
@@ -355,6 +450,12 @@ function reviewFindingFromComment(comment: { id: number; body?: string | null })
   const sha = parseReviewedCommitSha(body);
   if (!sha) return undefined;
   return { id: comment.id, sha };
+}
+
+function reviewFindingFromReview(review: PullReview): HandledReviewFinding | undefined {
+  const sha = pullReviewFindingSha(review);
+  if (!sha) return undefined;
+  return { id: review.id, sha };
 }
 
 function withoutPointerStubs(items: FollowUpItems): FollowUpItems {
@@ -367,7 +468,7 @@ function withoutPointerStubs(items: FollowUpItems): FollowUpItems {
 function briefInlines(items: FollowUpItems): InlineComment[] {
   const seen = new Set<number>();
   const out: InlineComment[] = [];
-  for (const comment of [...items.inlines, ...items.jumiInlines]) {
+  for (const comment of items.inlines) {
     if (seen.has(comment.id)) continue;
     seen.add(comment.id);
     out.push(comment);
@@ -375,8 +476,34 @@ function briefInlines(items: FollowUpItems): InlineComment[] {
   return out;
 }
 
+function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
+  return items.jumiInlines.filter(isUnresolvedInline);
+}
+
+function earlierJumiReviews(items: FollowUpItems, lastReview?: Comment): Comment[] {
+  const skip = lastReview?.id;
+  const out: Comment[] = [];
+  const seen = new Set<number>();
+  for (const review of items.jumiReviews) {
+    if (review.id === skip) continue;
+    seen.add(review.id);
+    out.push(asReviewComment(review));
+  }
+  for (const comment of items.jumiStickies) {
+    if (comment.id === skip || seen.has(comment.id)) continue;
+    seen.add(comment.id);
+    out.push(comment);
+  }
+  return out;
+}
+
 function hasUnhandledFollowUpItems(
-  items: { comments: Comment[]; inlines: InlineComment[]; reviews: PullReview[] },
+  items: {
+    comments: Comment[];
+    inlines: InlineComment[];
+    reviews: PullReview[];
+    jumiFindingReviews?: PullReview[];
+  },
   state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds" | "handledReviewFindings">
 ): boolean {
   const handledComments = new Set(state.handledCommentIds);
@@ -391,7 +518,12 @@ function hasUnhandledFollowUpItems(
   });
   const unhandledInlines = items.inlines.some((comment) => !handledComments.has(comment.id));
   const unhandledReviews = items.reviews.some((review) => !handledReviews.has(review.id));
-  return unhandledComments || unhandledInlines || unhandledReviews;
+  const unhandledJumiReviews = (items.jumiFindingReviews ?? []).some((review) => {
+    const finding = reviewFindingFromReview(review);
+    if (finding) return !handledFindings.has(reviewFindingKey(finding.id, finding.sha));
+    return !handledReviews.has(review.id);
+  });
+  return unhandledComments || unhandledInlines || unhandledReviews || unhandledJumiReviews;
 }
 
 export async function needsFollowUp(opts: {
@@ -438,6 +570,8 @@ export function buildFeedbackMarkdown(opts: {
   inlines: InlineComment[];
   reviews: PullReview[];
   lastReview?: Comment;
+  currentInlines?: InlineComment[];
+  earlierReviews?: Comment[];
 }): { markdown: string; commentIds: number[]; reviewIds: number[] } {
   const header = [
     `# Review feedback`,
@@ -467,7 +601,29 @@ export function buildFeedbackMarkdown(opts: {
 
   const lastReviewSection = opts.lastReview ? `## Last review\n\n${opts.lastReview.body.trimEnd()}\n\n` : "";
 
+  const currentInlineItems: FeedbackItem[] = [];
+  for (const comment of opts.currentInlines ?? []) {
+    currentInlineItems.push({
+      kind: "inline",
+      id: comment.id,
+      createdAt: comment.created_at ?? "",
+      text: `### Inline ${comment.id} by ${comment.user?.login ?? "unknown"}${comment.path ? ` on ${comment.path}` : ""}\n\n${comment.body}\n`,
+    });
+  }
+  const currentInlineSection = currentInlineItems.length
+    ? `${currentInlineItems.map((item) => item.text).join("\n")}\n`
+    : "";
+
   const extras: FeedbackItem[] = [];
+  for (const comment of opts.earlierReviews ?? []) {
+    if (opts.lastReview?.id === comment.id) continue;
+    extras.push({
+      kind: "comment",
+      id: comment.id,
+      createdAt: comment.created_at ?? "",
+      text: `### Earlier review ${comment.id}\n\n${comment.body}\n`,
+    });
+  }
   for (const comment of opts.comments) {
     if (opts.trigger?.commentId === comment.id) continue;
     if (opts.lastReview?.id === comment.id) continue;
@@ -499,7 +655,7 @@ export function buildFeedbackMarkdown(opts: {
 
   const encoder = new TextEncoder();
   const otherHeader = "## Other comments\n\n";
-  const prefix = header + triggerSection + lastReviewSection;
+  const prefix = header + triggerSection + lastReviewSection + currentInlineSection;
   const fit: FeedbackItem[] = [...extras];
   const sizeOf = (items: FeedbackItem[]) => {
     const extra = items.length ? otherHeader + items.map((item) => item.text).join("\n") : "";
@@ -522,10 +678,15 @@ export function buildFeedbackMarkdown(opts: {
   if (opts.trigger?.commentId !== undefined) commentIds.add(opts.trigger.commentId);
   if (opts.trigger?.reviewId !== undefined) reviewIds.add(opts.trigger.reviewId);
   if (opts.lastReview && markdown.includes("## Last review")) commentIds.add(opts.lastReview.id);
+  for (const item of currentInlineItems) {
+    if (markdown.includes(`### Inline ${item.id}`)) commentIds.add(item.id);
+  }
   for (const item of fit) {
     const marker =
       item.kind === "comment"
-        ? `### Comment ${item.id}`
+        ? item.text.startsWith("### Earlier review ")
+          ? `### Earlier review ${item.id}`
+          : `### Comment ${item.id}`
         : item.kind === "inline"
           ? `### Inline ${item.id}`
           : `### Review ${item.id}`;
@@ -627,8 +788,8 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     findingOpts
   );
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
-  const pendingLastReview = pickLatestJumiReview(pendingItems.jumiStickies, pr.head.sha);
-  const hasInjectedReview = Boolean(pendingLastReview) || pendingItems.jumiInlines.length > 0;
+  const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
+  const hasInjectedReview = Boolean(pendingLastReview) || unresolvedJumiInlines(pendingItems).length > 0;
   let hasFeedback = hasUnhandledFollowUpItems(withoutPointerStubs(pendingItems), state);
   if (!hasFeedback && isPointerStubWake(opts.job.trigger, pendingTriggerBody) && hasInjectedReview) {
     hasFeedback = true;
@@ -705,6 +866,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     inlines: briefInlines(pendingItems),
     reviews: pendingItems.reviews,
     lastReview: pendingLastReview,
+    currentInlines: unresolvedJumiInlines(pendingItems),
   });
   const findingHash = hasFeedback ? fingerprintFollowUpText(feedbackPreview.markdown) : undefined;
   const ciHash = hasFeedback ? undefined : fingerprintCiChecks(ci.unhandled);
@@ -959,7 +1121,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         opts.followupIgnoreLogins,
         findingOpts
       );
-      const briefReview = pickLatestJumiReview(items.jumiStickies, pr.head.sha) ?? pendingLastReview;
+      const briefReview = pickLatestJumiFinding(items, pr.head.sha) ?? pendingLastReview;
       const feedback = buildFeedbackMarkdown({
         pr,
         trigger: opts.job.trigger,
@@ -968,12 +1130,18 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         inlines: briefInlines(items),
         reviews: items.reviews,
         lastReview: briefReview,
+        currentInlines: unresolvedJumiInlines(items),
+        earlierReviews: earlierJumiReviews(items, briefReview),
       });
       handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
       handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
       const findingById = new Map<number, HandledReviewFinding>();
       for (const comment of [...items.comments, ...items.jumiStickies]) {
         const finding = reviewFindingFromComment(comment);
+        if (finding) findingById.set(finding.id, finding);
+      }
+      for (const review of [...items.jumiFindingReviews, ...items.jumiReviews]) {
+        const finding = reviewFindingFromReview(review);
         if (finding) findingById.set(finding.id, finding);
       }
       if (briefReview) {
@@ -987,7 +1155,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         return false;
       });
       await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
-    } else if (pendingLastReview || pendingItems.jumiInlines.length > 0) {
+    } else if (pendingLastReview || unresolvedJumiInlines(pendingItems).length > 0) {
       await writeFile(
         join(worktree, "JUMI_FEEDBACK.md"),
         buildFeedbackMarkdown({
@@ -995,9 +1163,11 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
           trigger: opts.job.trigger,
           triggerBody: pendingTriggerBody,
           comments: [],
-          inlines: pendingItems.jumiInlines,
+          inlines: [],
           reviews: [],
           lastReview: pendingLastReview,
+          currentInlines: unresolvedJumiInlines(pendingItems),
+          earlierReviews: earlierJumiReviews(pendingItems, pendingLastReview),
         }).markdown
       );
     } else {

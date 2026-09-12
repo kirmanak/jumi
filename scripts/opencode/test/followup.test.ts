@@ -17,10 +17,12 @@ import {
   collectFollowUpItems,
   FEEDBACK_MAX_BYTES,
   FOLLOWUP_TIMEOUT_MS,
+  type FollowUpItems,
   implementFollowUp,
   isPointerStubBody,
   needsFollowUp,
   parsePrHeadChangedReason,
+  pickLatestJumiFinding,
   pickLatestJumiReview,
   writeFollowUpState,
 } from "../src/followup.ts";
@@ -956,6 +958,165 @@ describe("implementFollowUp", () => {
       });
       expect(result.status).not.toBe("skipped");
       expect(openCode).toBe(1);
+    });
+  });
+
+  test("findings-only review body with inlines is not stuck on the empty writeup hash", async () => {
+    await withDirs(async (home, workdir) => {
+      const writeup = [
+        "<!-- jumi-review:kirmanak/demo#127 -->",
+        "### Jumi OpenCode review",
+        "",
+        "Reviewed commit: `headsha`",
+        "",
+        "<!-- jumi-check: failure -->",
+      ].join("\n");
+      const inlineBody =
+        "🟡 risk: stuck fingerprint ignores the inlines that now carry the findings.\n\n<!-- jumi-review:kirmanak/demo#127 -->";
+      const lastReview = makeComment({ id: 88, body: writeup, user: makeUser({ login: "jumi" }) });
+      const bodyOnly = buildFeedbackMarkdown({
+        pr: jumiPr(),
+        trigger: { event: "review-failure", sender: "jumi" },
+        comments: [],
+        inlines: [],
+        reviews: [],
+        lastReview,
+      });
+      const emptyHash = fingerprintFollowUpText(bodyOnly.markdown)!;
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "action", hash: emptyHash },
+          { kind: "action", hash: emptyHash },
+          { kind: "action", hash: emptyHash },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api: makeApi({
+          listIssueComments: async () => [],
+          listPullReviews: async () => [
+            makeReview({
+              id: 88,
+              body: writeup,
+              state: "REQUEST_CHANGES",
+              commit_id: "headsha",
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+          listPullReviewComments: async () => [
+            makeComment({
+              id: 11,
+              body: inlineBody,
+              user: makeUser({ login: "jumi" }),
+            }),
+          ],
+        }),
+        job: followUpJob({ trigger: { event: "review-failure", sender: "jumi" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
+    });
+  });
+
+  test("same unresolved inline finding 4× → stuck sticky, no OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const writeup = [
+        "<!-- jumi-review:kirmanak/demo#127 -->",
+        "### Jumi OpenCode review",
+        "",
+        "Reviewed commit: `headsha`",
+        "",
+        "<!-- jumi-check: failure -->",
+      ].join("\n");
+      const inlineBody =
+        "🟡 risk: stuck fingerprint ignores the inlines that now carry the findings.\n\n<!-- jumi-review:kirmanak/demo#127 -->";
+      const lastReview = makeComment({ id: 88, body: writeup, user: makeUser({ login: "jumi" }) });
+      const withInlines = buildFeedbackMarkdown({
+        pr: jumiPr(),
+        trigger: { event: "review-failure", sender: "jumi" },
+        comments: [],
+        inlines: [],
+        reviews: [],
+        lastReview,
+        currentInlines: [
+          makeComment({
+            id: 11,
+            body: inlineBody,
+            user: makeUser({ login: "jumi" }),
+          }),
+        ],
+      });
+      const hash = fingerprintFollowUpText(withInlines.markdown)!;
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "action", hash },
+          { kind: "action", hash },
+          { kind: "action", hash },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listPullReviews: async () => [
+          makeReview({
+            id: 88,
+            body: writeup,
+            state: "REQUEST_CHANGES",
+            commit_id: "headsha",
+            user: makeUser({ login: "jumi" }),
+          }),
+        ],
+        listPullReviewComments: async () => [
+          makeComment({
+            id: 11,
+            body: inlineBody,
+            user: makeUser({ login: "jumi" }),
+          }),
+        ],
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "review-failure", sender: "jumi" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "stuck: repeated action" });
+      expect(openCode).toBe(0);
+      expect(api.comments.at(-1)).toContain("stuck: repeated action");
     });
   });
 
@@ -2231,6 +2392,37 @@ describe("buildFeedbackMarkdown", () => {
     expect(result.commentIds).toContain(38022);
     expect(result.commentIds).not.toContain(1);
   });
+
+  test("puts current-head review and unresolved inlines before earlier jumi findings", () => {
+    const lastReview = jumiReviewSticky({ id: 2, finding: "current finding" });
+    const earlier = jumiReviewSticky({
+      id: 1,
+      sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      finding: "earlier finding",
+    });
+    const result = buildFeedbackMarkdown({
+      pr: jumiPr(),
+      comments: [],
+      inlines: [],
+      reviews: [],
+      lastReview,
+      currentInlines: [
+        makeComment({
+          id: 11,
+          body: "🔴 bug: unresolved inline\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+      earlierReviews: [earlier],
+    });
+    const currentAt = result.markdown.indexOf("current finding");
+    const inlineAt = result.markdown.indexOf("unresolved inline");
+    const earlierAt = result.markdown.indexOf("earlier finding");
+    expect(currentAt).toBeGreaterThan(-1);
+    expect(inlineAt).toBeGreaterThan(currentAt);
+    expect(earlierAt).toBeGreaterThan(inlineAt);
+    expect(result.markdown).toContain("### Earlier review 1");
+  });
 });
 
 describe("isPointerStubBody", () => {
@@ -2267,6 +2459,93 @@ describe("pickLatestJumiReview", () => {
       createdAt: "2026-09-11T00:00:00Z",
     });
     expect(pickLatestJumiReview([older, newer], head)?.id).toBe(2);
+  });
+});
+
+describe("pickLatestJumiFinding", () => {
+  const head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const staleSha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  function items(overrides: Partial<FollowUpItems> = {}): FollowUpItems {
+    return {
+      comments: [],
+      inlines: [],
+      reviews: [],
+      jumiStickies: [],
+      jumiInlines: [],
+      jumiReviews: [],
+      jumiFindingReviews: [],
+      ...overrides,
+    };
+  }
+
+  function jumiPull(opts: { id: number; sha: string; finding: string; submittedAt: string }) {
+    return makeReview({
+      id: opts.id,
+      body: [
+        "<!-- jumi-review:kirmanak/demo#127 -->",
+        "### Jumi OpenCode review",
+        "",
+        `Reviewed commit: \`${opts.sha}\``,
+        "",
+        opts.finding,
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      state: "REQUEST_CHANGES",
+      commit_id: opts.sha,
+      user: makeUser({ login: "jumi" }),
+      submitted_at: opts.submittedAt,
+    });
+  }
+
+  test("prefers a current-head sticky over a stale pull review", () => {
+    const stalePull = jumiPull({
+      id: 1,
+      sha: staleSha,
+      finding: "stale pull finding",
+      submittedAt: "2026-09-12T00:00:00Z",
+    });
+    const currentSticky = jumiReviewSticky({
+      id: 2,
+      sha: head,
+      finding: "current sticky finding",
+      createdAt: "2026-09-11T00:00:00Z",
+    });
+    expect(pickLatestJumiFinding(items({ jumiReviews: [stalePull], jumiStickies: [currentSticky] }), head)?.id).toBe(2);
+  });
+
+  test("prefers a current-head pull review over a current-head sticky", () => {
+    const currentPull = jumiPull({
+      id: 1,
+      sha: head,
+      finding: "current pull finding",
+      submittedAt: "2026-09-10T00:00:00Z",
+    });
+    const currentSticky = jumiReviewSticky({
+      id: 2,
+      sha: head,
+      finding: "current sticky finding",
+      createdAt: "2026-09-12T00:00:00Z",
+    });
+    expect(pickLatestJumiFinding(items({ jumiReviews: [currentPull], jumiStickies: [currentSticky] }), head)?.id).toBe(
+      1
+    );
+  });
+
+  test("falls back to the latest dated finding when none match head", () => {
+    const olderPull = jumiPull({
+      id: 1,
+      sha: staleSha,
+      finding: "older pull finding",
+      submittedAt: "2026-09-10T00:00:00Z",
+    });
+    const newerSticky = jumiReviewSticky({
+      id: 2,
+      sha: "cccccccccccccccccccccccccccccccccccccccc",
+      finding: "newer sticky finding",
+      createdAt: "2026-09-11T00:00:00Z",
+    });
+    expect(pickLatestJumiFinding(items({ jumiReviews: [olderPull], jumiStickies: [newerSticky] }), head)?.id).toBe(1);
   });
 });
 
@@ -2738,6 +3017,111 @@ describe("collectFollowUpItems", () => {
           home,
         })
       ).toBe(true);
+    });
+  });
+
+  function reviewWriteup(opts: { sha?: string; trailer?: string; prose?: string } = {}) {
+    return [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi OpenCode review",
+      "",
+      `Reviewed commit: \`${opts.sha ?? HEAD_SHA}\``,
+      "",
+      opts.prose ?? "Guard the null deref.",
+      opts.trailer ?? "<!-- jumi-check: failure -->",
+    ].join("\n");
+  }
+
+  test("keeps current-head jumi pull review with failure trailer and needsFollowUp", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({
+          id: 88,
+          body: reviewWriteup(),
+          state: "REQUEST_CHANGES",
+          commit_id: HEAD_SHA,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.jumiFindingReviews.map((review) => review.id)).toEqual([88]);
+    expect(items.comments).toEqual([]);
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
+  });
+
+  test("skips empty success pull reviews and old verdict-only bodies", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({
+          id: 1,
+          body: "No blocking issues",
+          state: "APPROVED",
+          commit_id: HEAD_SHA,
+          user: makeUser({ login: "jumi" }),
+        }),
+        makeReview({
+          id: 2,
+          body: reviewWriteup({ trailer: "<!-- jumi-check: success -->" }),
+          state: "APPROVED",
+          commit_id: HEAD_SHA,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.jumiReviews).toEqual([]);
+    expect(items.jumiFindingReviews).toEqual([]);
+  });
+
+  test("needsFollowUp is false when the same jumi pull review id and SHA are already handled", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({
+          id: 88,
+          body: reviewWriteup(),
+          state: "REQUEST_CHANGES",
+          commit_id: HEAD_SHA,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    await withDirs(async (home) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [{ id: 88, sha: HEAD_SHA }],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(false);
     });
   });
 });

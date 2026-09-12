@@ -80,31 +80,54 @@ export function findingFingerprint(path: string, text: string): string {
   return `${path}\n${normalizeFindingText(text)}`;
 }
 
+function findingFromLine(original: string, opts?: { singleFilePath?: string }): ReviewFinding | undefined {
+  const line = stripFindingPrefix(original);
+  if (!line) return undefined;
+
+  const lForm = L_LINE_RE.exec(line);
+  if (lForm) {
+    const findingLine = parseFindingLine(lForm[1]);
+    const path = opts?.singleFilePath ? usableFindingPath(opts.singleFilePath) : undefined;
+    const body = lForm[2].trim();
+    if (!findingLine || !path || !body) return undefined;
+    return { path, line: findingLine, body };
+  }
+
+  const fileLine = FILE_LINE_RE.exec(line);
+  if (!fileLine) return undefined;
+  const path = usableFindingPath(fileLine[1]);
+  const findingLine = parseFindingLine(fileLine[2]);
+  const body = fileLine[3].trim();
+  if (!path || !findingLine || !body) return undefined;
+  return { path, line: findingLine, body };
+}
+
 export function parseReviewFindings(text: string, opts?: { singleFilePath?: string }): ReviewFinding[] {
   const findings: ReviewFinding[] = [];
   for (const original of text.split(/\r?\n/)) {
-    const line = stripFindingPrefix(original);
-    if (!line) continue;
-
-    const lForm = L_LINE_RE.exec(line);
-    if (lForm) {
-      const findingLine = parseFindingLine(lForm[1]);
-      const path = opts?.singleFilePath ? usableFindingPath(opts.singleFilePath) : undefined;
-      const body = lForm[2].trim();
-      if (!findingLine || !path || !body) continue;
-      findings.push({ path, line: findingLine, body });
-      continue;
-    }
-
-    const fileLine = FILE_LINE_RE.exec(line);
-    if (!fileLine) continue;
-    const path = usableFindingPath(fileLine[1]);
-    const findingLine = parseFindingLine(fileLine[2]);
-    const body = fileLine[3].trim();
-    if (!path || !findingLine || !body) continue;
-    findings.push({ path, line: findingLine, body });
+    const finding = findingFromLine(original, opts);
+    if (finding) findings.push(finding);
   }
   return findings;
+}
+
+export function stripFindingLines(
+  text: string,
+  opts?: { singleFilePath?: string; posted?: ReadonlySet<string> }
+): string {
+  const kept: string[] = [];
+  for (const original of text.split(/\r?\n/)) {
+    const finding = findingFromLine(original, opts);
+    if (finding) {
+      const key = findingFingerprint(finding.path, finding.body);
+      if (!opts?.posted || opts.posted.has(key)) continue;
+    }
+    kept.push(original);
+  }
+  return kept
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export function parseReviewOutput(output: string): ParsedReviewOutput {

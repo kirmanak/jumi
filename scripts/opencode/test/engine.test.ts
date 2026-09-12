@@ -11,9 +11,11 @@ import { makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   comments: string[];
+  reviews: unknown[];
   statuses: Array<{ sha: string; state: string; description?: string }>;
 } {
   const comments: string[] = [];
+  const reviews: unknown[] = [];
   const statuses: Array<{ sha: string; state: string; description?: string }> = [];
   const defaults: ReviewApi = {
     getRepo: async () => makeRepo(),
@@ -32,7 +34,10 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
     },
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
+    createPullReview: async (_owner, _repo, _index, review) => {
+      reviews.push(review);
+      return { id: reviews.length };
+    },
     submitPullReview: async () => ({ id: 1 }),
     resolvePullComment: async () => undefined,
     unresolvePullComment: async () => undefined,
@@ -42,7 +47,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
       return status;
     },
   };
-  return { ...defaults, ...overrides, comments, statuses };
+  return { ...defaults, ...overrides, comments, reviews, statuses };
 }
 
 function frozenGit(): GitRunner {
@@ -98,8 +103,9 @@ describe("processEngineTick", () => {
       expect(row?.state).toBe("succeeded");
       expect(row?.resultMarkdown).toContain("Looks good");
       expect(row?.resultMarkdown).not.toContain("I'll inspect");
-      expect(api.comments[0]).toContain("Looks good");
-      expect(api.comments[0]).not.toContain("I'll inspect");
+      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
+      expect(api.comments).toHaveLength(0);
       expect(api.statuses.map((status) => status.state)).toEqual(["pending", "success"]);
     });
   });
@@ -155,8 +161,9 @@ describe("processEngineTick", () => {
     await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
     expect(ran).toBe(0);
     expect(store.rows[0]?.state).toBe("succeeded");
-    expect(api.comments[0]).toContain("Persisted review");
-    expect(api.comments[0]).not.toContain("I'll inspect");
+    expect((api.reviews[0] as { body: string }).body).toContain("Persisted review");
+    expect((api.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
+    expect(api.comments).toHaveLength(0);
   });
 
   test("overlapping reclaimExpiredJobs does not double-post a persist-ready sticky", async () => {
@@ -175,17 +182,14 @@ describe("processEngineTick", () => {
     const inPublish = new Promise<void>((resolve) => {
       enteredPublish = resolve;
     });
-    let commentCalls = 0;
+    let reviewCalls = 0;
     const api = makeApi({
-      findStickyIssueComment: async () => {
+      createPullReview: async (_owner, _repo, _index, review) => {
         enteredPublish();
         await gate;
-        return undefined;
-      },
-      createIssueComment: async (_owner, _repo, _index, body) => {
-        commentCalls++;
-        api.comments.push(body);
-        return makeComment({ id: commentCalls, body });
+        reviewCalls++;
+        api.reviews.push(review);
+        return { id: reviewCalls };
       },
     });
     const first = reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
@@ -193,8 +197,8 @@ describe("processEngineTick", () => {
     const second = reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
     releaseComment();
     await Promise.all([first, second]);
-    expect(commentCalls).toBe(1);
-    expect(api.comments).toHaveLength(1);
+    expect(reviewCalls).toBe(1);
+    expect(api.reviews).toHaveLength(1);
     expect(store.rows[0]?.state).toBe("succeeded");
   });
 
@@ -215,9 +219,12 @@ describe("processEngineTick", () => {
       enteredPublish = resolve;
     });
     const api = makeApi({
-      findStickyIssueComment: async () => {
+      createPullReview: async () => {
         enteredPublish();
         await gate;
+        throw new Error("gitea down");
+      },
+      createIssueComment: async () => {
         throw new Error("gitea down");
       },
     });
@@ -252,27 +259,30 @@ describe("processEngineTick", () => {
       kind: "markdown",
       markdown: "Persisted review\n<!-- jumi-check: success -->",
     });
-    let commentCalls = 0;
+    let reviewCalls = 0;
     const api = makeApi({
-      createIssueComment: async (_owner, _repo, _index, body) => {
-        commentCalls++;
-        if (commentCalls === 1) throw new Error("gitea 502");
-        api.comments.push(body);
-        return makeComment({ id: commentCalls, body });
+      createPullReview: async (_owner, _repo, _index, review) => {
+        reviewCalls++;
+        if (reviewCalls === 1) throw new Error("gitea 502");
+        api.reviews.push(review);
+        return { id: reviewCalls };
+      },
+      createIssueComment: async () => {
+        throw new Error("gitea 502");
       },
     });
     await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
-    expect(commentCalls).toBe(1);
+    expect(reviewCalls).toBe(1);
     expect(store.rows[0]?.state).toBe("leased");
     expect(store.rows[0]?.publishedAt).toBeNull();
     expect(store.rows[0]?.leasedBy).toBeNull();
     expect(store.rows[0]?.leasedUntil).toBeLessThan(Date.now());
 
     await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
-    expect(commentCalls).toBe(2);
+    expect(reviewCalls).toBe(2);
     expect(store.rows[0]?.state).toBe("succeeded");
-    expect(api.comments).toHaveLength(1);
-    expect(api.comments[0]).toContain("Persisted review");
+    expect(api.reviews).toHaveLength(1);
+    expect((api.reviews[0] as { body: string }).body).toContain("Persisted review");
   });
 
   test("expired lease without a result is retried", async () => {
@@ -303,13 +313,16 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      let commentCalls = 0;
+      let reviewCalls = 0;
       const api = makeApi({
-        createIssueComment: async (_owner, _repo, _index, body) => {
-          commentCalls++;
-          if (commentCalls === 1) throw new Error("gitea down");
-          api.comments.push(body);
-          return makeComment({ id: commentCalls, body });
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviewCalls++;
+          if (reviewCalls === 1) throw new Error("gitea down");
+          api.reviews.push(review);
+          return { id: reviewCalls };
+        },
+        createIssueComment: async () => {
+          throw new Error("gitea down");
         },
       });
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
@@ -320,10 +333,10 @@ describe("processEngineTick", () => {
           return { status: "ok" };
         },
       });
-      expect(commentCalls).toBe(2);
+      expect(reviewCalls).toBe(2);
       expect(store.rows[0]?.state).toBe("succeeded");
       expect(store.rows[0]?.leasedUntil).toBeNull();
-      expect(api.comments[0]).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
     });
   });
 
@@ -366,8 +379,8 @@ describe("processEngineTick", () => {
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
-      expect(api.comments[0]).toContain("Looks good");
-      expect(api.comments[0]).not.toContain("cannot save result");
+      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).not.toContain("cannot save result");
     });
   });
 
@@ -413,10 +426,13 @@ describe("processEngineTick", () => {
         expireCallers.push(leasedBy);
         return originalExpire(id, leasedBy, now);
       };
-      let commentCalls = 0;
+      let reviewCalls = 0;
       const api = makeApi({
+        createPullReview: async () => {
+          reviewCalls++;
+          throw new Error("gitea down");
+        },
         createIssueComment: async () => {
-          commentCalls++;
           throw new Error("gitea down");
         },
       });
@@ -428,7 +444,7 @@ describe("processEngineTick", () => {
           return { status: "ok" };
         },
       });
-      expect(commentCalls).toBe(1);
+      expect(reviewCalls).toBe(1);
       expect(expireCallers).toEqual([]);
       expect(store.rows[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
       expect(store.rows[0]?.state).toBe("leased");
@@ -577,7 +593,7 @@ describe("processEngineTick", () => {
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
-      expect(api.comments[0]).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
     });
   });
 

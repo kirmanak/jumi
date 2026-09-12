@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { findingFingerprint, parseReviewFindings, parseReviewOutput } from "../src/verdict.ts";
+import { findingFingerprint, parseReviewFindings, parseReviewOutput, stripFindingLines } from "../src/verdict.ts";
 
 describe("parseReviewOutput", () => {
   test("reads an explicit success check and strips it from the comment", () => {
@@ -98,6 +98,21 @@ describe("parseReviewFindings", () => {
       { path: "src/demo.ts", line: 40, body: "❓ q: why swallow errors?" },
     ]);
     expect(parseReviewFindings(text, { singleFilePath: "../oops.ts" })).toEqual([]);
+  });
+
+  test("strips locatable findings and keeps prose", () => {
+    const text = [
+      "src/foo.ts:12: 🔴 bug: null deref. Guard it.",
+      "plain prose without a location",
+      "L12: ❓ q: is the timeout intentional?",
+    ].join("\n");
+    expect(stripFindingLines(text)).toBe("plain prose without a location\nL12: ❓ q: is the timeout intentional?");
+    expect(stripFindingLines(text, { singleFilePath: "src/demo.ts" })).toBe("plain prose without a location");
+    expect(
+      stripFindingLines(text, {
+        posted: new Set([findingFingerprint("src/foo.ts", "🔴 bug: null deref. Guard it.")]),
+      })
+    ).toBe("plain prose without a location\nL12: ❓ q: is the timeout intentional?");
   });
 
   test("fingerprints findings by path and normalized text, not line", () => {

@@ -41,10 +41,12 @@ function stripGitConfigArgs(args: string[]): string[] {
 
 function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & Forge) & {
   comments: string[];
+  reviews: unknown[];
   pulls: Array<{ title: string; body: string; head: string; base: string }>;
   statuses: Array<{ sha: string; state: string; context?: string; description?: string }>;
 } {
   const comments: string[] = [];
+  const reviews: unknown[] = [];
   const pulls: Array<{ title: string; body: string; head: string; base: string }> = [];
   const statuses: Array<{ sha: string; state: string; context?: string; description?: string }> = [];
   const defaults: Tracker & Forge = {
@@ -75,7 +77,10 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
+    createPullReview: async (_owner, _repo, _index, review) => {
+      reviews.push(review);
+      return { id: reviews.length };
+    },
     submitPullReview: async () => ({ id: 1 }),
     resolvePullComment: async () => undefined,
     unresolvePullComment: async () => undefined,
@@ -86,7 +91,7 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
       return status;
     },
   };
-  return { ...defaults, ...overrides, comments, pulls, statuses };
+  return { ...defaults, ...overrides, comments, reviews, pulls, statuses };
 }
 
 async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
@@ -245,7 +250,7 @@ describe("Engine, Tracker, and Forge ports", () => {
     });
   });
 
-  test("review publishes sticky+trailer+status from the artifact, not engine stdout", async () => {
+  test("review publishes pull-review writeup+trailer+status from the artifact, not engine stdout", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "jumi-ports-review-"));
     try {
       const sha = "d90b7289701097dae3ffa3dc0ccdc348be552697";
@@ -286,11 +291,12 @@ describe("Engine, Tracker, and Forge ports", () => {
       });
 
       expect(result.status).toBe("posted");
-      expect(forge.comments).toHaveLength(1);
-      expect(forge.comments[0]).toContain("<!-- jumi-review:kirmanak/demo#7 -->");
-      expect(forge.comments[0]).toContain("Looks good");
-      expect(forge.comments[0]).not.toContain("I'll inspect");
-      expect(lastNonEmptyLine(forge.comments[0])).toBe("<!-- jumi-check: success -->");
+      expect(forge.comments).toHaveLength(0);
+      expect(forge.reviews).toHaveLength(1);
+      expect((forge.reviews[0] as { body: string }).body).toContain("<!-- jumi-review:kirmanak/demo#7 -->");
+      expect((forge.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((forge.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
+      expect(lastNonEmptyLine((forge.reviews[0] as { body: string }).body)).toBe("<!-- jumi-check: success -->");
       expect(forge.statuses.map((status) => ({ state: status.state, context: status.context }))).toEqual([
         { state: "pending", context: "jumi/opencode-review" },
         { state: "success", context: "jumi/opencode-review" },

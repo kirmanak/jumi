@@ -38,7 +38,7 @@ import {
   upsertStuckText,
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
-import { findingFingerprint, parseReviewFindings, parseReviewOutput } from "./verdict.ts";
+import { findingFingerprint, parseReviewFindings, parseReviewOutput, stripFindingLines } from "./verdict.ts";
 import { checkoutPullRequestWorkspace, type GitRunner, runGit } from "./workspace.ts";
 
 async function logParentDiag(
@@ -356,12 +356,11 @@ async function postPullReview(opts: {
   prAuthor: string | undefined;
   event: PullReviewEvent;
   body: string;
+  checkLine?: string;
+  singleFilePath?: string;
   log: (message: string) => void;
-}): Promise<void> {
-  const singleFilePath = needsSingleFilePath(opts.comment)
-    ? await resolveSingleFilePath(opts.api, opts.owner, opts.repo, opts.prNumber, opts.log)
-    : undefined;
-  const findings = parseReviewFindings(opts.comment, { singleFilePath });
+}): Promise<boolean> {
+  const findings = parseReviewFindings(opts.comment, { singleFilePath: opts.singleFilePath });
 
   await submitPendingBotReviews(opts);
 
@@ -404,25 +403,28 @@ async function postPullReview(opts: {
     });
   }
 
-  const create = (event: PullReviewEvent, reviewComments: CreatePullReviewComment[]) =>
+  const create = (event: PullReviewEvent, reviewComments: CreatePullReviewComment[], reviewBody = opts.body) =>
     opts.api.createPullReview(opts.owner, opts.repo, opts.prNumber, {
       commit_id: opts.headSha,
       event,
-      body: opts.body,
+      ...(reviewBody ? { body: reviewBody } : {}),
       ...(reviewComments.length > 0 ? { comments: reviewComments } : {}),
     });
 
   const createWithFallback = async (
     event: PullReviewEvent,
-    reviewComments: CreatePullReviewComment[]
+    reviewComments: CreatePullReviewComment[],
+    reviewBody?: string
   ): Promise<PullReviewEvent> => {
+    const post = (ev: PullReviewEvent) =>
+      reviewBody === undefined ? create(ev, reviewComments) : create(ev, reviewComments, reviewBody);
     try {
-      await create(event, reviewComments);
+      await post(event);
       return event;
     } catch (err) {
       if (event !== "COMMENT" && isSelfReviewRejection(err, opts.prAuthor, opts.botUsername)) {
         opts.log(`review event ${event} rejected as self-review, falling back to COMMENT`);
-        await create("COMMENT", reviewComments);
+        await post("COMMENT");
         return "COMMENT";
       }
       throw err;
@@ -431,29 +433,41 @@ async function postPullReview(opts: {
 
   try {
     await createWithFallback(opts.event, comments);
+    return true;
   } catch (err) {
     if (comments.length === 0) {
       opts.log(`review event skipped: ${errorMessage(err)}`);
-    } else {
-      opts.log(`batch inlines rejected, retrying individually: ${errorMessage(err)}`);
-      await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
-      for (const comment of comments) {
-        const fingerprint = commentFingerprint(comment, opts.marker);
-        if (fingerprint && posted.has(fingerprint)) continue;
-        try {
-          await create("COMMENT", [comment]);
-          if (fingerprint) posted.add(fingerprint);
-        } catch (inner) {
-          await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
-          if (fingerprint && posted.has(fingerprint)) continue;
-          opts.log(`inline skipped ${comment.path}:${comment.new_position}: ${errorMessage(inner)}`);
-        }
-      }
+      return false;
+    }
+    opts.log(`batch inlines rejected, retrying individually: ${errorMessage(err)}`);
+    await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+    for (const comment of comments) {
+      const fingerprint = commentFingerprint(comment, opts.marker);
+      if (fingerprint && posted.has(fingerprint)) continue;
       try {
-        await createWithFallback(opts.event, []);
-      } catch (eventErr) {
-        opts.log(`review event skipped: ${errorMessage(eventErr)}`);
+        await create("COMMENT", [comment], "");
+        if (fingerprint) posted.add(fingerprint);
+      } catch (inner) {
+        await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+        if (fingerprint && posted.has(fingerprint)) continue;
+        opts.log(`inline skipped ${comment.path}:${comment.new_position}: ${errorMessage(inner)}`);
       }
+    }
+    try {
+      await createWithFallback(
+        opts.event,
+        [],
+        buildCommentBody(
+          opts.marker,
+          opts.headSha,
+          stripFindingLines(opts.comment, { singleFilePath: opts.singleFilePath, posted }),
+          opts.checkLine
+        )
+      );
+      return true;
+    } catch (eventErr) {
+      opts.log(`review event skipped: ${errorMessage(eventErr)}`);
+      return false;
     }
   }
 }
@@ -756,34 +770,21 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
 
   const marker = markerFor(opts.owner, opts.repo, pr.number);
   const parsed = parseReviewOutput(opts.resultMarkdown);
-  const body = buildCommentBody(marker, opts.expectedHeadSha, parsed.comment, parsed.checkLine);
-  await logParentDiag(log, "post_find_sticky", {
-    review: reviewLabel,
-    body_bytes: byteLength(body),
-    body_bytes_h: formatBytes(byteLength(body)),
-  });
-  const existing = await opts.api.findStickyIssueComment(opts.owner, opts.repo, pr.number, opts.botUsername, marker);
-  await logParentDiag(log, "post_sticky_result", {
-    review: reviewLabel,
-    sticky_id: existing?.id ?? null,
-    sticky_found: Boolean(existing),
-  });
+  const singleFilePath = needsSingleFilePath(parsed.comment)
+    ? await resolveSingleFilePath(opts.api, opts.owner, opts.repo, pr.number, log)
+    : undefined;
+  const writeup = buildCommentBody(
+    marker,
+    opts.expectedHeadSha,
+    stripFindingLines(parsed.comment, { singleFilePath }),
+    parsed.checkLine
+  );
+  const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, parsed.comment, parsed.checkLine);
 
-  let result: ReviewResult;
-  if (existing) {
-    await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
-    const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
-    result = { status: "updated", commentId: updated.id };
-  } else {
-    await logParentDiag(log, "post_comment_create", { review: reviewLabel });
-    const created = await opts.api.createIssueComment(opts.owner, opts.repo, pr.number, body);
-    result = { status: "posted", commentId: created.id };
-  }
-  const { state, description } = statusForResult(result, parsed.verdict);
-  await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+  let result: ReviewResult | undefined;
   if (!parsed.verdict.incomplete) {
     try {
-      await postPullReview({
+      const landed = await postPullReview({
         api: opts.api,
         owner: opts.owner,
         repo: opts.repo,
@@ -794,13 +795,42 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         botUsername: opts.botUsername,
         prAuthor: pr.user?.login,
         event: reviewEventForVerdict(parsed.verdict.state, pr.user?.login, opts.botUsername),
-        body: parsed.verdict.description,
+        body: writeup,
+        checkLine: parsed.checkLine,
+        singleFilePath,
         log,
       });
+      if (landed) result = { status: "posted" };
     } catch (err) {
       log(`pull review not posted: ${errorMessage(err)}`);
     }
   }
+
+  if (!result) {
+    await logParentDiag(log, "post_find_sticky", {
+      review: reviewLabel,
+      body_bytes: byteLength(stickyBody),
+      body_bytes_h: formatBytes(byteLength(stickyBody)),
+    });
+    const existing = await opts.api.findStickyIssueComment(opts.owner, opts.repo, pr.number, opts.botUsername, marker);
+    await logParentDiag(log, "post_sticky_result", {
+      review: reviewLabel,
+      sticky_id: existing?.id ?? null,
+      sticky_found: Boolean(existing),
+    });
+    if (existing) {
+      await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
+      const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, stickyBody);
+      result = { status: "updated", commentId: updated.id };
+    } else {
+      await logParentDiag(log, "post_comment_create", { review: reviewLabel });
+      const created = await opts.api.createIssueComment(opts.owner, opts.repo, pr.number, stickyBody);
+      result = { status: "posted", commentId: created.id };
+    }
+  }
+
+  const { state, description } = statusForResult(result, parsed.verdict);
+  await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;
 }
