@@ -2358,6 +2358,26 @@ describe("collectFollowUpItems", () => {
     expect(items.reviews).toEqual([]);
   });
 
+  test("skips bot inlines the same way stickies are ignored", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviewComments: async () => [
+        makeComment({
+          id: 11,
+          body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+          user: makeUser({ login: "jumi" }),
+        }),
+        makeComment({
+          id: 12,
+          body: "please rename this helper",
+          user: makeUser({ login: "alice" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
+    expect(items.inlines.map((comment) => comment.id)).toEqual([12]);
+  });
+
   test("skips listed ignore logins and still skips the bot", async () => {
     const api = makeApi({
       listIssueComments: async () => [

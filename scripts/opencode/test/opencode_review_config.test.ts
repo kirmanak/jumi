@@ -169,6 +169,9 @@ describe("worker image JDK", () => {
   test("copies pinned Temurin 21 into the worker target only", () => {
     expect(dockerfile).toContain("ARG TEMURIN_TAG=21.0.12_8-jdk");
     expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
+    expect(dockerfile).toMatch(/FROM tools AS build/);
+    expect(dockerfile).toMatch(/oven-sh\/bun\/releases\/download\/bun-v\$\{BUN_VERSION\}/);
+    expect(dockerfile).not.toMatch(/FROM oven\/bun/);
     expect(workerStage).toContain("COPY --from=jdk /opt/java/openjdk /opt/java/openjdk");
     expect(workerStage).toContain("JAVA_HOME=/opt/java/openjdk");
     expect(beforeWorker).not.toContain("COPY --from=jdk");

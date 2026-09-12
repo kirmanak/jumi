@@ -75,6 +75,8 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
     listIssueComments: async () => [],
     listPullReviewComments: async () => [],
     listPullReviews: async () => [],
+    createPullReview: async () => ({ id: 1 }),
+    submitPullReview: async () => ({ id: 1 }),
     ...emptyCiMethods(),
     createCommitStatus: async (_owner, _repo, sha, status) => {
       statuses.push({ sha, state: status.state, context: status.context, description: status.description });
@@ -125,6 +127,8 @@ describe("Engine, Tracker, and Forge ports", () => {
       listIssueComments: async () => [],
       listPullReviewComments: async () => [],
       listPullReviews: async () => [],
+      createPullReview: async () => ({ id: 1 }),
+      submitPullReview: async () => ({ id: 1 }),
       ...emptyCiMethods(),
       createCommitStatus: async (_owner, _repo, _sha, status) => status,
     };

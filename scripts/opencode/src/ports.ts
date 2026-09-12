@@ -78,13 +78,30 @@ export interface PullReview {
   user?: Actor;
   state?: string;
   type?: string;
+  commit_id?: string;
   submitted_at?: string;
   updated_at?: string;
   created_at?: string;
 }
 
+export interface CreatePullReviewComment {
+  body: string;
+  path: string;
+  new_position?: number;
+  old_position?: number;
+}
+
+export interface CreatePullReviewOptions {
+  body?: string;
+  commit_id: string;
+  comments?: CreatePullReviewComment[];
+  event?: string;
+}
+
 export interface InlineComment extends Comment {
   path?: string;
+  commit_id?: string;
+  new_position?: number;
   pull_request_review_id?: number;
   html_url?: string;
 }
@@ -158,6 +175,8 @@ export interface Forge {
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment>;
   listPullReviewComments(owner: string, repo: string, index: number): Promise<InlineComment[]>;
   listPullReviews(owner: string, repo: string, index: number): Promise<PullReview[]>;
+  createPullReview(owner: string, repo: string, index: number, review: CreatePullReviewOptions): Promise<PullReview>;
+  submitPullReview(owner: string, repo: string, index: number, reviewId: number, body: string): Promise<PullReview>;
   createCommitStatus(owner: string, repo: string, sha: string, status: CheckPayload): Promise<CheckPayload>;
   listCommitStatuses(owner: string, repo: string, sha: string): Promise<Check[]>;
   listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]>;
@@ -173,6 +192,10 @@ export type ReviewApi = Pick<
   | "findStickyIssueComment"
   | "createIssueComment"
   | "updateIssueComment"
+  | "listPullReviewComments"
+  | "listPullReviews"
+  | "createPullReview"
+  | "submitPullReview"
   | "createCommitStatus"
 > &
   Pick<Tracker, "getIssue">;

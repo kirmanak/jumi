@@ -211,6 +211,24 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
     ).toEqual({ type: "skip", reason: "jumi internal comment" });
   });
 
+  test("skips jumi-review inline bodies", () => {
+    expect(
+      shouldEnqueueIssueCommentFollowUp(
+        makeIssueCommentPayload({
+          comment: {
+            id: 4,
+            body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+            user: makeUser({ login: "alice" }),
+            created_at: "",
+            updated_at: "",
+          },
+        }),
+        policy,
+        "issue_comment"
+      )
+    ).toEqual({ type: "skip", reason: "jumi internal comment" });
+  });
+
   test("skips jumi-check and jumi-worker bodies", () => {
     expect(
       shouldEnqueueIssueCommentFollowUp(

@@ -79,6 +79,7 @@ export interface GiteaPullReview {
   user?: GiteaUser;
   state?: string;
   type?: string;
+  commit_id?: string;
   submitted_at?: string;
   updated_at?: string;
   created_at?: string;
@@ -86,6 +87,10 @@ export interface GiteaPullReview {
 
 export interface GiteaPullReviewComment extends GiteaComment {
   path?: string;
+  commit_id?: string;
+  new_position?: number;
+  position?: number;
+  line?: number;
   pull_request_review_id?: number;
   html_url?: string;
 }

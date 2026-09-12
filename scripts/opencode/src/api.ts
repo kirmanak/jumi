@@ -3,6 +3,7 @@ import type {
   Check,
   CheckPayload,
   Comment,
+  CreatePullReviewOptions,
   InlineComment,
   Pull,
   PullFile,
@@ -134,6 +135,7 @@ export function toPullReview(review: GiteaPullReview): PullReview {
     user: review.user ? actor(review.user) : review.user,
     state: review.state,
     type: review.type,
+    commit_id: review.commit_id,
     submitted_at: review.submitted_at,
     updated_at: review.updated_at,
     created_at: review.created_at,
@@ -144,6 +146,8 @@ export function toInlineComment(comment: GiteaPullReviewComment): InlineComment 
   return {
     ...toComment(comment),
     path: comment.path,
+    commit_id: comment.commit_id,
+    new_position: comment.new_position ?? comment.line ?? comment.position,
     pull_request_review_id: comment.pull_request_review_id,
     html_url: comment.html_url,
   };
@@ -369,7 +373,12 @@ export class GiteaAPI {
     for (const review of reviews) {
       if (typeof review.id !== "number" || !Number.isFinite(review.id)) continue;
       try {
-        comments.push(...(await this.listPullReviewCommentsByReview(owner, repo, index, review.id)));
+        comments.push(
+          ...(await this.listPullReviewCommentsByReview(owner, repo, index, review.id)).map((comment) => ({
+            ...comment,
+            pull_request_review_id: comment.pull_request_review_id ?? review.id,
+          }))
+        );
       } catch (err) {
         if (isNotFoundError(err)) continue;
         throw err;
@@ -381,6 +390,32 @@ export class GiteaAPI {
   async listPullReviews(owner: string, repo: string, index: number): Promise<PullReview[]> {
     const reviews = await this.getPages<GiteaPullReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews`);
     return reviews.map(toPullReview);
+  }
+
+  async createPullReview(
+    owner: string,
+    repo: string,
+    index: number,
+    review: CreatePullReviewOptions
+  ): Promise<PullReview> {
+    return toPullReview(
+      await this.post<GiteaPullReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews`, review)
+    );
+  }
+
+  async submitPullReview(
+    owner: string,
+    repo: string,
+    index: number,
+    reviewId: number,
+    body: string
+  ): Promise<PullReview> {
+    return toPullReview(
+      await this.post<GiteaPullReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews/${reviewId}`, {
+        body,
+        event: "COMMENT",
+      })
+    );
   }
 
   // ── Commit statuses ───────────────────────────────────────────────────────────

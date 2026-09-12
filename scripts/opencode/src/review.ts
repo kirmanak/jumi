@@ -4,7 +4,18 @@ import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnost
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
-import type { CheckPayload, Comment, Pull, PullFile, Repo, ReviewApi, Task } from "./ports.ts";
+import type {
+  CheckPayload,
+  Comment,
+  CreatePullReviewComment,
+  InlineComment,
+  Pull,
+  PullFile,
+  PullReview,
+  Repo,
+  ReviewApi,
+  Task,
+} from "./ports.ts";
 import { buildPROpenedPrompt } from "./prompt.ts";
 import {
   CONTRACT_PATH,
@@ -26,7 +37,7 @@ import {
   upsertStuckComment,
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
-import { parseReviewOutput } from "./verdict.ts";
+import { parseReviewFindings, parseReviewOutput } from "./verdict.ts";
 import { checkoutPullRequestWorkspace, type GitRunner, runGit } from "./workspace.ts";
 
 async function logParentDiag(
@@ -138,6 +149,234 @@ function buildCommentBody(marker: string, headSha: string, output: string, check
   const body = `${marker}\n### Jumi OpenCode review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`;
   if (!checkLine) return body;
   return `${body.trimEnd()}\n\n${checkLine}`;
+}
+
+function needsSingleFilePath(text: string): boolean {
+  for (const original of text.split(/\r?\n/)) {
+    const line = original.trim().replace(/^(?:[-*]|\d+\.)\s+/, "");
+    if (/^L\d+:\s+\S/.test(line)) return true;
+  }
+  return false;
+}
+
+async function resolveSingleFilePath(
+  api: ReviewApi,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  log: (message: string) => void
+): Promise<string | undefined> {
+  try {
+    const files = await api.getPRFiles(owner, repo, prNumber);
+    const names = [...new Set(files.map((file) => file.filename).filter((name) => typeof name === "string" && name))];
+    if (names.length === 1) return names[0];
+  } catch (err) {
+    log(`inline single-file path unavailable: ${errorMessage(err)}`);
+  }
+  return undefined;
+}
+
+function isPendingPullReview(review: PullReview): boolean {
+  const blob = `${review.state ?? ""} ${review.type ?? ""}`.toLowerCase();
+  return blob.includes("pending");
+}
+
+function isBotPullReview(review: PullReview, botUsername: string): boolean {
+  const login = review.user?.login;
+  if (!login) return false;
+  return login.toLowerCase() === botUsername.toLowerCase();
+}
+
+async function submitPendingBotReviews(opts: {
+  api: ReviewApi;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  marker: string;
+  botUsername: string;
+  log: (message: string) => void;
+}): Promise<boolean> {
+  let submitted = false;
+  try {
+    const reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
+    for (const review of reviews) {
+      if (!isPendingPullReview(review) || !isBotPullReview(review, opts.botUsername)) continue;
+      if (review.commit_id && review.commit_id !== opts.headSha) continue;
+      try {
+        await opts.api.submitPullReview(opts.owner, opts.repo, opts.prNumber, review.id, opts.marker);
+        submitted = true;
+      } catch (err) {
+        opts.log(`pending review ${review.id} not submitted: ${errorMessage(err)}`);
+      }
+    }
+  } catch (err) {
+    opts.log(`pending reviews unavailable: ${errorMessage(err)}`);
+  }
+  return submitted;
+}
+
+async function submitPendingAndRefreshPosted(
+  opts: {
+    api: ReviewApi;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    headSha: string;
+    marker: string;
+    botUsername: string;
+    log: (message: string) => void;
+  },
+  posted: Set<string>,
+  attempted: CreatePullReviewComment[],
+  existingIds: Set<number>
+): Promise<void> {
+  const submitted = await submitPendingBotReviews(opts);
+
+  let leftover: InlineComment[] = [];
+  try {
+    leftover = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
+  } catch (err) {
+    opts.log(`existing inlines unavailable: ${errorMessage(err)}`);
+  }
+  let reviews: PullReview[] = [];
+  try {
+    reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
+  } catch (err) {
+    opts.log(`existing reviews unavailable: ${errorMessage(err)}`);
+  }
+
+  const attemptedKeys = new Set(
+    attempted.flatMap((comment) => {
+      const key = inlineKey(comment.path, comment.new_position);
+      return key ? [key] : [];
+    })
+  );
+  for (const key of postedInlineKeys(leftover, reviews, opts.marker, opts.headSha)) {
+    if (attemptedKeys.has(key)) posted.add(key);
+  }
+  if (submitted) {
+    for (const key of leftoverAttemptedKeys(leftover, attempted, opts.marker, existingIds)) posted.add(key);
+  }
+}
+
+async function postReviewInlines(opts: {
+  api: ReviewApi;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  marker: string;
+  comment: string;
+  botUsername: string;
+  log: (message: string) => void;
+}): Promise<void> {
+  const singleFilePath = needsSingleFilePath(opts.comment)
+    ? await resolveSingleFilePath(opts.api, opts.owner, opts.repo, opts.prNumber, opts.log)
+    : undefined;
+  const findings = parseReviewFindings(opts.comment, { singleFilePath });
+  if (findings.length === 0) return;
+
+  await submitPendingBotReviews(opts);
+
+  let existing: InlineComment[] = [];
+  try {
+    existing = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
+  } catch (err) {
+    opts.log(`existing inlines unavailable: ${errorMessage(err)}`);
+  }
+  let reviews: PullReview[] = [];
+  try {
+    reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
+  } catch (err) {
+    opts.log(`existing reviews unavailable: ${errorMessage(err)}`);
+  }
+  const posted = postedInlineKeys(existing, reviews, opts.marker, opts.headSha);
+  const existingIds = new Set(existing.map((comment) => comment.id));
+
+  const comments: CreatePullReviewComment[] = findings
+    .filter((finding) => !posted.has(`${finding.path}:${finding.line}`))
+    .map((finding) => ({
+      path: finding.path,
+      new_position: finding.line,
+      body: `${finding.body}\n\n${opts.marker}`,
+    }));
+  if (comments.length === 0) return;
+
+  const post = (reviewComments: CreatePullReviewComment[]) =>
+    opts.api.createPullReview(opts.owner, opts.repo, opts.prNumber, {
+      commit_id: opts.headSha,
+      event: "COMMENT",
+      comments: reviewComments,
+    });
+
+  try {
+    await post(comments);
+    return;
+  } catch (err) {
+    opts.log(`batch inlines rejected, retrying individually: ${errorMessage(err)}`);
+  }
+
+  await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+
+  for (const comment of comments) {
+    const key = `${comment.path}:${comment.new_position}`;
+    if (posted.has(key)) continue;
+    try {
+      await post([comment]);
+      posted.add(key);
+    } catch (err) {
+      await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+      if (posted.has(key)) continue;
+      opts.log(`inline skipped ${key}: ${errorMessage(err)}`);
+    }
+  }
+}
+
+function inlineKey(path: string | undefined, position: number | undefined): string | undefined {
+  if (!path || typeof position !== "number") return undefined;
+  return `${path}:${position}`;
+}
+
+function leftoverAttemptedKeys(
+  comments: InlineComment[],
+  attempted: CreatePullReviewComment[],
+  marker: string,
+  existingIds: Set<number>
+): Set<string> {
+  const attemptedKeys = new Set(
+    attempted.flatMap((comment) => {
+      const key = inlineKey(comment.path, comment.new_position);
+      return key ? [key] : [];
+    })
+  );
+  return new Set(
+    comments.flatMap((comment) => {
+      if (existingIds.has(comment.id)) return [];
+      if (!(comment.body ?? "").includes(marker)) return [];
+      const key = inlineKey(comment.path, comment.new_position);
+      return key && attemptedKeys.has(key) ? [key] : [];
+    })
+  );
+}
+
+function postedInlineKeys(
+  comments: InlineComment[],
+  reviews: PullReview[],
+  marker: string,
+  headSha: string
+): Set<string> {
+  const reviewById = new Map(reviews.map((review) => [review.id, review]));
+  return new Set(
+    comments.flatMap((comment) => {
+      if (!(comment.body ?? "").includes(marker)) return [];
+      const reviewId = comment.pull_request_review_id;
+      const review = reviewId == null ? undefined : reviewById.get(reviewId);
+      if (!review || review.commit_id !== headSha || isPendingPullReview(review)) return [];
+      const key = inlineKey(comment.path, comment.new_position);
+      return key ? [key] : [];
+    })
+  );
 }
 
 const CHECK_CONTEXT = "jumi/opencode-review";
@@ -405,21 +644,35 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     sticky_found: Boolean(existing),
   });
 
+  let result: ReviewResult;
   if (existing) {
     await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
     const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, body);
-    const result: ReviewResult = { status: "updated", commentId: updated.id };
-    const { state, description } = statusForResult(result, parsed.verdict);
-    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
-    await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
-    return result;
+    result = { status: "updated", commentId: updated.id };
+  } else {
+    await logParentDiag(log, "post_comment_create", { review: reviewLabel });
+    const created = await opts.api.createIssueComment(opts.owner, opts.repo, pr.number, body);
+    result = { status: "posted", commentId: created.id };
   }
-
-  await logParentDiag(log, "post_comment_create", { review: reviewLabel });
-  const created = await opts.api.createIssueComment(opts.owner, opts.repo, pr.number, body);
-  const result: ReviewResult = { status: "posted", commentId: created.id };
   const { state, description } = statusForResult(result, parsed.verdict);
   await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+  if (!parsed.verdict.incomplete) {
+    try {
+      await postReviewInlines({
+        api: opts.api,
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: pr.number,
+        headSha: opts.expectedHeadSha,
+        marker,
+        comment: parsed.comment,
+        botUsername: opts.botUsername,
+        log,
+      });
+    } catch (err) {
+      log(`inlines failed: ${errorMessage(err)}`);
+    }
+  }
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;
 }

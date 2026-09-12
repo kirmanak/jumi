@@ -29,6 +29,10 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
     updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
+    listPullReviewComments: async () => [],
+    listPullReviews: async () => [],
+    createPullReview: async () => ({ id: 1 }),
+    submitPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
   };
   return { ...defaults, ...overrides };
@@ -543,6 +547,51 @@ describe("reviewPullRequest", () => {
         },
       });
       expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
+    });
+  });
+
+  test("inlines 💡 findings without flipping a success trailer", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const reviews: unknown[] = [];
+      let sticky = "";
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            sticky = body;
+            return makeComment({ id: 44, body });
+          },
+          createPullReview: async (_owner, _repo, _index, review) => {
+            reviews.push(review);
+            return { id: 1 };
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => {
+          await writeReview(workspace, "src/demo.ts:8: 💡 simpler: drop the helper.\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result.status).toBe("posted");
+      expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: success -->");
+      expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
+      expect(reviews).toEqual([
+        {
+          commit_id: "headsha",
+          event: "COMMENT",
+          comments: [
+            {
+              path: "src/demo.ts",
+              new_position: 8,
+              body: "💡 simpler: drop the helper.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+            },
+          ],
+        },
+      ]);
     });
   });
 
@@ -1267,10 +1316,11 @@ describe("publishReviewResult", () => {
   test("SHA moved at publish skips and does not overwrite sticky with stale markdown", async () => {
     let created = false;
     let updated = false;
+    let inlined = false;
     const result = await publishReviewResult({
       ...publishOpts,
       expectedHeadSha: "oldsha",
-      resultMarkdown: "stale review\n<!-- jumi-check: success -->",
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: stale.\n<!-- jumi-check: failure -->",
       api: makeApi({
         getPR: async () => makePR({ head: makeBranch({ sha: "newsha" }) }),
         createIssueComment: async (_owner, _repo, _index, body) => {
@@ -1281,11 +1331,16 @@ describe("publishReviewResult", () => {
           updated = true;
           return makeComment({ id: commentId, body });
         },
+        createPullReview: async () => {
+          inlined = true;
+          return { id: 1 };
+        },
       }),
     });
     expect(result).toEqual({ status: "skipped", reason: "PR head changed from oldsha to newsha" });
     expect(created).toBe(false);
     expect(updated).toBe(false);
+    expect(inlined).toBe(false);
   });
 
   test("finds an existing sticky by marker then updates (crash after Gitea write)", async () => {
@@ -1349,5 +1404,740 @@ describe("publishReviewResult", () => {
         target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
       },
     ]);
+  });
+
+  test("posts locatable findings as pull-review comments and keeps the sticky trailer", async () => {
+    const reviews: unknown[] = [];
+    let sticky = "";
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: null deref. Guard it.",
+        "src/foo.ts:40: 💡 simpler: drop the helper.",
+        "plain prose without a location",
+        "<!-- jumi-check: failure; 1 blocking -->",
+      ].join("\n"),
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(sticky).toContain("src/foo.ts:12: 🔴 bug: null deref. Guard it.");
+    expect(sticky).toContain("src/foo.ts:40: 💡 simpler: drop the helper.");
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure; 1 blocking -->");
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "COMMENT",
+        comments: [
+          {
+            path: "src/foo.ts",
+            new_position: 12,
+            body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+          {
+            path: "src/foo.ts",
+            new_position: 40,
+            body: "💡 simpler: drop the helper.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("resolves L-form inlines from the single changed file", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "L12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPRFiles: async () => [makeFile({ filename: "src/demo.ts" })],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "COMMENT",
+        comments: [
+          {
+            path: "src/demo.ts",
+            new_position: 12,
+            body: "❓ q: is the timeout intentional?\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("skips L-form inlines when the PR has multiple files", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "L12: 🔴 bug: null deref. Guard it.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        getPRFiles: async () => [makeFile({ filename: "a.ts" }), makeFile({ filename: "b.ts" })],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([]);
+  });
+
+  test("retries inlines individually when the batch is rejected and still publishes the sticky", async () => {
+    const reviews: unknown[] = [];
+    const logs: string[] = [];
+    let sticky = "";
+    const result = await publishReviewResult({
+      ...publishOpts,
+      logger: (message) => logs.push(message),
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) throw new Error("batch rejected");
+          if (review.comments?.[0]?.new_position === 40) throw new Error("line not in diff");
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
+    expect(reviews).toHaveLength(3);
+    expect(reviews[1]).toMatchObject({
+      comments: [{ path: "src/foo.ts", new_position: 12 }],
+    });
+    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
+  });
+
+  test("does not retry inlines when a lost batch 200 already submitted them", async () => {
+    const reviews: unknown[] = [];
+    let sticky = "";
+    let batchRejected = false;
+    const submittedReview = {
+      id: 7,
+      commit_id: "headsha",
+      state: "COMMENTED",
+      user: makeUser({ login: "jumi" }),
+    };
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        listPullReviews: async () => (batchRejected ? [submittedReview] : []),
+        listPullReviewComments: async () =>
+          batchRejected
+            ? [
+                {
+                  ...makeComment({
+                    id: 11,
+                    body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+                    user: makeUser({ login: "jumi" }),
+                  }),
+                  path: "src/foo.ts",
+                  new_position: 12,
+                  pull_request_review_id: 7,
+                },
+                {
+                  ...makeComment({
+                    id: 12,
+                    body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+                    user: makeUser({ login: "jumi" }),
+                  }),
+                  path: "src/foo.ts",
+                  new_position: 40,
+                  pull_request_review_id: 7,
+                },
+              ]
+            : [],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) {
+            batchRejected = true;
+            throw new Error("timeout");
+          }
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
+    expect(reviews).toHaveLength(1);
+  });
+
+  test("submits pending reviews after a batch reject then retries only unpublished inlines", async () => {
+    const reviews: unknown[] = [];
+    const submitted: number[] = [];
+    let batchRejected = false;
+    let pendingSubmitted = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        listPullReviews: async () =>
+          batchRejected && !pendingSubmitted ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
+        listPullReviewComments: async () =>
+          pendingSubmitted
+            ? [
+                {
+                  ...makeComment({
+                    id: 11,
+                    body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+                    user: makeUser({ login: "jumi" }),
+                  }),
+                  path: "src/foo.ts",
+                  commit_id: "blamesha",
+                  new_position: 12,
+                },
+              ]
+            : [],
+        submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
+          expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
+          pendingSubmitted = true;
+          submitted.push(reviewId);
+          return { id: reviewId };
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) {
+            batchRejected = true;
+            throw new Error("batch rejected");
+          }
+          if (review.comments?.[0]?.new_position === 40) throw new Error("line not in diff");
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 1 });
+    expect(submitted).toEqual([99]);
+    expect(reviews).toHaveLength(2);
+    expect(reviews[1]).toMatchObject({
+      comments: [{ path: "src/foo.ts", new_position: 40 }],
+    });
+  });
+
+  test("skips remaining inlines when pending submit fails and still publishes the sticky", async () => {
+    const reviews: unknown[] = [];
+    const logs: string[] = [];
+    let sticky = "";
+    let batchRejected = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      logger: (message) => logs.push(message),
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        listPullReviews: async () =>
+          batchRejected ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
+        submitPullReview: async () => {
+          throw new Error("submit rejected");
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) {
+            batchRejected = true;
+            throw new Error("batch rejected");
+          }
+          throw new Error("pending review already exists");
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
+    expect(logs.some((line) => line.includes("pending review 99 not submitted"))).toBe(true);
+    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:12"))).toBe(true);
+    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
+    expect(reviews).toHaveLength(3);
+  });
+
+  test("retries leftover inlines when pending submit fails", async () => {
+    const reviews: unknown[] = [];
+    const logs: string[] = [];
+    let sticky = "";
+    let batchRejected = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      logger: (message) => logs.push(message),
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        listPullReviews: async () =>
+          batchRejected ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
+        listPullReviewComments: async () =>
+          batchRejected
+            ? [
+                {
+                  ...makeComment({
+                    id: 11,
+                    body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+                    user: makeUser({ login: "jumi" }),
+                  }),
+                  path: "src/foo.ts",
+                  commit_id: "blamesha",
+                  new_position: 12,
+                },
+              ]
+            : [],
+        submitPullReview: async () => {
+          throw new Error("submit rejected");
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) {
+            batchRejected = true;
+            throw new Error("batch rejected");
+          }
+          throw new Error("pending review already exists");
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
+    expect(logs.some((line) => line.includes("pending review 99 not submitted"))).toBe(true);
+    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:12"))).toBe(true);
+    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
+    expect(reviews).toHaveLength(3);
+  });
+
+  test("submits a pending bot review for this SHA before treating inlines as posted", async () => {
+    const reviews: unknown[] = [];
+    const submitted: number[] = [];
+    let pendingSubmitted = false;
+    const pendingReview = {
+      id: 99,
+      state: "PENDING",
+      commit_id: "headsha",
+      user: makeUser({ login: "jumi" }),
+    };
+    const pendingComment = {
+      ...makeComment({
+        id: 11,
+        body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        user: makeUser({ login: "jumi" }),
+      }),
+      path: "src/foo.ts",
+      commit_id: "blamesha",
+      new_position: 12,
+      pull_request_review_id: 99,
+    };
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        listPullReviews: async () => (pendingSubmitted ? [{ ...pendingReview, state: "COMMENTED" }] : [pendingReview]),
+        listPullReviewComments: async () => [pendingComment],
+        submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
+          expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
+          pendingSubmitted = true;
+          submitted.push(reviewId);
+          return { id: reviewId };
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 1 });
+    expect(submitted).toEqual([99]);
+    expect(reviews).toEqual([]);
+  });
+
+  test("failed pending submit still publishes sticky and does not treat inlines as posted", async () => {
+    const reviews: unknown[] = [];
+    const submitted: number[] = [];
+    const logs: string[] = [];
+    let sticky = "";
+    const pendingReview = {
+      id: 99,
+      state: "PENDING",
+      commit_id: "headsha",
+      user: makeUser({ login: "jumi" }),
+    };
+    const result = await publishReviewResult({
+      ...publishOpts,
+      logger: (message) => logs.push(message),
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        listPullReviews: async () => [pendingReview],
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            commit_id: "blamesha",
+            new_position: 12,
+            pull_request_review_id: 99,
+          },
+        ],
+        submitPullReview: async (_owner, _repo, _index, reviewId) => {
+          submitted.push(reviewId);
+          throw new Error("submit rejected");
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
+    expect(submitted).toEqual([99]);
+    expect(logs.some((line) => line.includes("pending review 99 not submitted"))).toBe(true);
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "COMMENT",
+        comments: [
+          {
+            path: "src/foo.ts",
+            new_position: 12,
+            body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("skips inlines already posted with the same marker path, new_position, and head SHA", async () => {
+    const reviews: unknown[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        listPullReviews: async () => [
+          { id: 5, commit_id: "headsha", user: makeUser({ login: "jumi" }) },
+          { id: 6, commit_id: "headsha", user: makeUser({ login: "alice" }) },
+        ],
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            commit_id: "blamesha",
+            new_position: 12,
+            pull_request_review_id: 5,
+          },
+          {
+            ...makeComment({
+              id: 12,
+              body: "please rename this helper",
+              user: makeUser({ login: "alice" }),
+            }),
+            path: "src/foo.ts",
+            commit_id: "blamesha",
+            new_position: 40,
+            pull_request_review_id: 6,
+          },
+        ],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 1 });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "COMMENT",
+        comments: [
+          {
+            path: "src/foo.ts",
+            new_position: 40,
+            body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("posts inlines again when existing bot comments are on a previous head SHA", async () => {
+    const reviews: unknown[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        listPullReviews: async () => [{ id: 5, commit_id: "oldsha", user: makeUser({ login: "jumi" }) }],
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            commit_id: "blamesha",
+            new_position: 12,
+            pull_request_review_id: 5,
+          },
+        ],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 1 });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "COMMENT",
+        comments: [
+          {
+            path: "src/foo.ts",
+            new_position: 12,
+            body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("does not post a review when every inline already exists", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        listPullReviews: async () => [{ id: 5, commit_id: "headsha", user: makeUser({ login: "jumi" }) }],
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            commit_id: "blamesha",
+            new_position: 12,
+            pull_request_review_id: 5,
+          },
+        ],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([]);
+  });
+
+  test("does not duplicate a leftover inline whose comment commit_id is a blame SHA", async () => {
+    const reviews: unknown[] = [];
+    let batchRejected = false;
+    let pendingSubmitted = false;
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        listPullReviews: async () =>
+          batchRejected && !pendingSubmitted ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
+        listPullReviewComments: async () =>
+          pendingSubmitted
+            ? [
+                {
+                  ...makeComment({
+                    id: 11,
+                    body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+                    user: makeUser({ login: "jumi" }),
+                  }),
+                  path: "src/foo.ts",
+                  commit_id: "blamesha",
+                  new_position: 12,
+                },
+              ]
+            : [],
+        submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
+          expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
+          pendingSubmitted = true;
+          return { id: reviewId };
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) {
+            batchRejected = true;
+            throw new Error("batch rejected");
+          }
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(reviews).toHaveLength(2);
+    expect(reviews[1]).toMatchObject({
+      comments: [{ path: "src/foo.ts", new_position: 40 }],
+    });
+  });
+
+  test("does not submit a pending review from a previous head SHA", async () => {
+    const submitted: number[] = [];
+    const reviews: unknown[] = [];
+    let batchRejected = false;
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        listPullReviews: async () =>
+          batchRejected ? [{ id: 99, state: "PENDING", commit_id: "oldsha", user: makeUser({ login: "jumi" }) }] : [],
+        submitPullReview: async (_owner, _repo, _index, reviewId) => {
+          submitted.push(reviewId);
+          return { id: reviewId };
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if (!batchRejected) {
+            batchRejected = true;
+            throw new Error("batch rejected");
+          }
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(submitted).toEqual([]);
+    expect(reviews).toHaveLength(2);
+  });
+
+  test("retries inlines on a new head SHA when an old leftover shares path and line", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        listPullReviews: async () => [{ id: 5, commit_id: "oldsha", user: makeUser({ login: "jumi" }) }],
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            commit_id: "blamesha",
+            new_position: 12,
+            pull_request_review_id: 5,
+          },
+        ],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) throw new Error("batch rejected");
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(reviews).toHaveLength(3);
+    expect(reviews[1]).toMatchObject({
+      comments: [{ path: "src/foo.ts", new_position: 12 }],
+    });
+    expect(reviews[2]).toMatchObject({
+      comments: [{ path: "src/foo.ts", new_position: 40 }],
+    });
+  });
+
+  test("inline posting errors still publish the sticky trailer", async () => {
+    let sticky = "";
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        getPRFiles: async () => {
+          throw new Error("files exploded");
+        },
+        listPullReviewComments: async () => {
+          throw new Error("inlines exploded");
+        },
+        createPullReview: async () => {
+          throw new Error("inlines exploded");
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
+  });
+
+  test("does not post inlines for an incomplete artifact", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: null deref. Guard it.",
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([]);
   });
 });

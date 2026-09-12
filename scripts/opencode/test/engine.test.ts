@@ -29,6 +29,10 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
       comments.push(body);
       return makeComment({ id: commentId, body });
     },
+    listPullReviewComments: async () => [],
+    listPullReviews: async () => [],
+    createPullReview: async () => ({ id: 1 }),
+    submitPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, sha, status) => {
       statuses.push({ sha, state: status.state, description: status.description });
       return status;

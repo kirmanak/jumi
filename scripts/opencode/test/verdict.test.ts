@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseReviewOutput } from "../src/verdict.ts";
+import { parseReviewFindings, parseReviewOutput } from "../src/verdict.ts";
 
 describe("parseReviewOutput", () => {
   test("reads an explicit success check and strips it from the comment", () => {
@@ -70,5 +70,33 @@ describe("parseReviewOutput", () => {
       description: "Incomplete review: no check verdict",
       incomplete: true,
     });
+  });
+});
+
+describe("parseReviewFindings", () => {
+  test("parses file:line findings and skips lines without a usable path or line", () => {
+    const text = [
+      "src/foo.ts:12: 🔴 bug: null deref. Guard it.",
+      "No location on this sentence.",
+      "deploy/contract.md:1: 🟡 risk: missing env.",
+      "../secret:3: 🔴 bug: skip traversal.",
+      "src/bar.ts:0: 🔴 bug: skip zero.",
+      "- src/list.ts:9: 💡 simpler: drop the helper.",
+    ].join("\n");
+    expect(parseReviewFindings(text)).toEqual([
+      { path: "src/foo.ts", line: 12, body: "🔴 bug: null deref. Guard it." },
+      { path: "deploy/contract.md", line: 1, body: "🟡 risk: missing env." },
+      { path: "src/list.ts", line: 9, body: "💡 simpler: drop the helper." },
+    ]);
+  });
+
+  test("resolves L-form only when a single-file path is provided", () => {
+    const text = "L12: 🔴 bug: null deref. Guard it.\nL40: ❓ q: why swallow errors?";
+    expect(parseReviewFindings(text)).toEqual([]);
+    expect(parseReviewFindings(text, { singleFilePath: "src/demo.ts" })).toEqual([
+      { path: "src/demo.ts", line: 12, body: "🔴 bug: null deref. Guard it." },
+      { path: "src/demo.ts", line: 40, body: "❓ q: why swallow errors?" },
+    ]);
+    expect(parseReviewFindings(text, { singleFilePath: "../oops.ts" })).toEqual([]);
   });
 });

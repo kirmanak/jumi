@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { GiteaAPI } from "../src/api.ts";
+import { GiteaAPI, toInlineComment, toPullReview } from "../src/api.ts";
+import { makeUser } from "./fixtures.ts";
 
 const originalFetch = globalThis.fetch;
 
@@ -59,6 +60,71 @@ describe("GiteaAPI", () => {
       url: "https://gitea.example.test/api/v1/repos/owner/repo/statuses/sha%2F1",
       method: "POST",
       body: JSON.stringify({ state: "pending", context: "jumi/opencode-review", description: "running" }),
+    });
+  });
+
+  test("toPullReview maps the parent review commit_id", () => {
+    expect(
+      toPullReview({
+        id: 9,
+        commit_id: "headsha",
+        state: "COMMENT",
+        user: makeUser({ login: "jumi" }),
+      }).commit_id
+    ).toBe("headsha");
+  });
+
+  test("toInlineComment prefers new_position then line then position", () => {
+    const base = {
+      id: 1,
+      body: "a",
+      user: makeUser({ login: "jumi" }),
+      created_at: "",
+      updated_at: "",
+      path: "src/foo.ts",
+    };
+    expect(toInlineComment({ ...base, new_position: 9, line: 8, position: 7 }).new_position).toBe(9);
+    expect(toInlineComment({ ...base, line: 8, position: 7 }).new_position).toBe(8);
+    expect(toInlineComment({ ...base, position: 7 }).new_position).toBe(7);
+  });
+
+  test("creates a pull review with inline comments", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      return Response.json({ id: 3 });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.createPullReview("owner", "repo", 7, {
+      commit_id: "abc",
+      event: "COMMENT",
+      comments: [{ path: "src/foo.ts", new_position: 12, body: "🔴 bug: null deref." }],
+    });
+    expect(requests[0]).toEqual({
+      url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/reviews",
+      method: "POST",
+      body: JSON.stringify({
+        commit_id: "abc",
+        event: "COMMENT",
+        comments: [{ path: "src/foo.ts", new_position: 12, body: "🔴 bug: null deref." }],
+      }),
+    });
+  });
+
+  test("submits a pending pull review as COMMENT", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      return Response.json({ id: 99 });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.submitPullReview("owner", "repo", 7, 99, "<!-- jumi-review:owner/repo#7 -->");
+    expect(requests[0]).toEqual({
+      url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/reviews/99",
+      method: "POST",
+      body: JSON.stringify({ body: "<!-- jumi-review:owner/repo#7 -->", event: "COMMENT" }),
     });
   });
 
@@ -177,10 +243,10 @@ describe("GiteaAPI", () => {
         return Response.json([{ id: 9 }, { id: 10 }]);
       }
       if (href.includes("/pulls/7/reviews/9/comments")) {
-        return Response.json([{ id: 101, body: "a" }]);
+        return Response.json([{ id: 101, body: "a", path: "src/foo.ts", position: 12, commit_id: "oldsha" }]);
       }
       if (href.includes("/pulls/7/reviews/10/comments")) {
-        return Response.json([{ id: 102, body: "b" }]);
+        return Response.json([{ id: 102, body: "b", path: "src/bar.ts", line: 40, position: 3, commit_id: "headsha" }]);
       }
       return Response.json([]);
     }) as unknown as typeof fetch;
@@ -188,6 +254,9 @@ describe("GiteaAPI", () => {
     const api = new GiteaAPI("https://gitea.example.test", "token-1");
     const comments = await api.listPullReviewComments("owner", "repo", 7);
     expect(comments.map((comment) => comment.id)).toEqual([101, 102]);
+    expect(comments.map((comment) => comment.new_position)).toEqual([12, 40]);
+    expect(comments.map((comment) => comment.commit_id)).toEqual(["oldsha", "headsha"]);
+    expect(comments.map((comment) => comment.pull_request_review_id)).toEqual([9, 10]);
     expect(urls.some((url) => url.includes("/pulls/7/reviews/9/comments?limit=50&page=1"))).toBe(true);
     expect(urls.some((url) => url.includes("/pulls/7/reviews/10/comments?limit=50&page=1"))).toBe(true);
     expect(urls.some((url) => /\/pulls\/7\/comments(?:\?|$)/.test(url))).toBe(false);
