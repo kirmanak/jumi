@@ -1,6 +1,6 @@
 import { isAssignedToBot } from "./assignee.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
-import { extractClosingIssueNumber } from "./gitea_issues.ts";
+import { extractClosingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { ReviewResult } from "./review.ts";
@@ -34,7 +34,7 @@ function persistInsertSkipReason(markdown: string | null | undefined): string | 
 function followUpJobFrom(
   owner: string,
   repo: string,
-  issue: Task,
+  issue: Pick<Task, "number" | "title" | "body" | "html_url" | "updated_at">,
   pr: Pull,
   repository: Pick<Repo, "default_branch" | "clone_url">,
   delivery: string
@@ -84,14 +84,21 @@ export async function enqueueFollowUpFromReview(opts: {
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
-  const issueNumber = extractClosingIssueNumber(pr);
-  if (issueNumber === undefined) return logSkip("no closer");
+  const closer = extractClosingIssueNumber(pr);
+  const foreign =
+    closer === undefined &&
+    isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername) &&
+    !isJumiPrIdentity(pr, opts.botUsername);
+  if (closer === undefined && !foreign) return logSkip("no closer");
 
+  const issueNumber = closer ?? pr.number;
   const [issue, repo] = await Promise.all([
-    opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber),
+    foreign ? Promise.resolve(pr) : opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber),
     opts.api.getRepo(opts.row.owner, opts.row.repo),
   ]);
-  if (issue.state !== "open" || !isAssignedToBot(issue, opts.botUsername)) return logSkip("unassigned");
+  if (!foreign && (issue.state !== "open" || !isAssignedToBot(issue, opts.botUsername))) {
+    return logSkip("unassigned");
+  }
 
   const followUpSucceeded = await opts.store.countSucceeded("follow-up", opts.row.owner, opts.row.repo, issueNumber);
   if (followUpSucceeded >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) {

@@ -39,12 +39,23 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: st
   return { ...defaults, ...overrides, comments };
 }
 
-async function seedSucceededFollowUps(store: MemoryReviewJobStore, count: number): Promise<void> {
+function makeAssignedForeignPR() {
+  const repo = makeRepo();
+  return makePR({
+    user: makeUser({ login: "renovate" }),
+    body: "no close keyword",
+    assignee: makeUser({ login: "jumi" }),
+    assignees: [makeUser({ login: "jumi" })],
+    head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "headsha", repo, repo_id: repo.id },
+  });
+}
+
+async function seedSucceededFollowUps(store: MemoryReviewJobStore, count: number, issueNumber = 12): Promise<void> {
   for (let i = 0; i < count; i++) {
     await store.enqueueIssue(
       makeIssueJob({
         mode: "follow-up",
-        issueNumber: 12,
+        issueNumber,
         prNumber: 7,
         headSha: `sha${i}`,
         delivery: `follow-${i}`,
@@ -239,6 +250,37 @@ describe("enqueueFollowUpFromReview", () => {
     expect(allowedApi.comments).toEqual([]);
   });
 
+  test("assigned jumi-identity PR with no closer stays no closer", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const repo = makeRepo();
+    const api = makeApi({
+      getPR: async () =>
+        makePR({
+          user: makeUser({ login: "jumi" }),
+          body: "no close keyword",
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" })],
+          head: { label: "kirmanak:jumi/issue-12-x", ref: "jumi/issue-12-x", sha: "headsha", repo, repo_id: repo.id },
+        }),
+    });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+    expect(api.comments).toEqual([]);
+    expect(logs).toEqual(["persist-insert skipped: no closer"]);
+  });
+
   test("does not insert without a closing issue", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
@@ -258,6 +300,53 @@ describe("enqueueFollowUpFromReview", () => {
     expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
     expect(api.comments).toEqual([]);
     expect(logs).toEqual(["persist-insert skipped: no closer"]);
+  });
+
+  test("assigned foreign PR failure trailer below cap enqueues keyed by PR number", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = makeApi({ getPR: async () => makeAssignedForeignPR() });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    const follow = store.rows.find((row) => row.kind === "follow-up");
+    expect(follow?.state).toBe("queued");
+    expect(follow?.issueNumber).toBe(7);
+    expect(follow?.prNumber).toBe(7);
+    expect(follow?.headSha).toBe("headsha");
+    expect(api.comments).toEqual([]);
+    expect(logs.some((line) => line.includes("persist-insert skipped"))).toBe(false);
+  });
+
+  test("assigned foreign PR failure trailer at cap posts stuck and does not enqueue", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedSucceededFollowUps(store, 3, 7);
+    await store.enqueue(makeJob());
+    const review = await store.lease("engine-1", 60_000);
+    const api = makeApi({ getPR: async () => makeAssignedForeignPR() });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: review!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "queued")).toHaveLength(0);
+    expect(api.comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${TOO_MANY_FOLLOWUP_ROUNDS}`]);
+    expect(logs).toEqual(["persist-insert skipped: round cap"]);
   });
 
   test("success trailer neither enqueues nor posts stuck", async () => {
