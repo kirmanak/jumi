@@ -3,7 +3,9 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, readClaim } from "../src/claim.ts";
+import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
+import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
@@ -366,6 +368,442 @@ describe("implementIssue", () => {
       expect(api.comments.some((body) => body.includes("stuck: dependency cycle"))).toBe(true);
       const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
       expect(claim).toBeUndefined();
+    });
+  });
+
+  test("first-run yield of a queue id sets a Gitea dependency and does not open a PR", async () => {
+    await withDirs(async (home, workdir) => {
+      const deps: Array<{ owner: string; repo: string; number: number }> = [];
+      const events: string[] = [];
+      const api = makeApi({
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+        createIssueDependency: async (_owner, _repo, _index, dependency) => {
+          events.push("createIssueDependency");
+          deps.push(dependency);
+        },
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "push" && gitArgs.includes("--delete")) events.push("deleteIssueBranch");
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1) ?? "";
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") throw new Error("missing");
+          return "";
+        }
+        return "";
+      };
+      let prompt: string | undefined;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (opts) => {
+          prompt = opts.prompt;
+          const queue = await readFile(join(workdir, "kirmanak/demo/12", QUEUE_FILE), "utf8");
+          expect(queue).toContain("#196");
+          await writeFile(join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #196 -->\n");
+          await writeFile(join(workdir, "kirmanak/demo/12/src.ts"), "guess");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(prompt).toBe(IMPLEMENT_YIELD_PROMPT);
+      expect(result).toEqual({ status: "skipped", reason: "blocked on #196" });
+      expect(deps).toEqual([{ owner: "kirmanak", repo: "demo", number: 196 }]);
+      expect(events).toEqual(["createIssueDependency", "deleteIssueBranch"]);
+      expect(api.pulls).toHaveLength(0);
+      expect(api.comments.some((body) => body.includes("blocked on #196"))).toBe(true);
+      expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "push" && args.includes("--delete"))).toBe(true);
+      expect(gitCalls.some((args) => args[0] === "push" && args.includes("-u"))).toBe(false);
+      const removeAt = gitCalls.findIndex((args) => args[0] === "worktree" && args[1] === "remove");
+      const deleteHeadAt = gitCalls.findIndex(
+        (args) => args[0] === "update-ref" && args[1] === "-d" && args[2] === "refs/heads/jumi/issue-12-fix-the-thing"
+      );
+      const deletePushAt = gitCalls.findIndex((args) => args[0] === "push" && args.includes("--delete"));
+      expect(removeAt).toBeGreaterThanOrEqual(0);
+      expect(deleteHeadAt).toBeGreaterThan(removeAt);
+      expect(deletePushAt).toBeGreaterThan(removeAt);
+      const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
+      expect(claim).toBeUndefined();
+    });
+  });
+
+  test("invalid blocked-by retries once in the same lease then ships if the retry implements", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1) ?? "";
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") throw new Error("missing");
+          return "";
+        }
+        return "";
+      };
+      const prompts: Array<string | undefined> = [];
+      let round = 0;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (opts) => {
+          round++;
+          prompts.push(opts.prompt);
+          if (round === 1) {
+            await writeFile(join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #404 -->\n");
+            await writeFile(join(workdir, "kirmanak/demo/12/junk.ts"), "guess");
+            return { status: "ok" };
+          }
+          expect(await readFile(join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE), "utf8").catch(() => "")).toBe("");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(round).toBe(2);
+      expect(prompts[0]).toBe(IMPLEMENT_YIELD_PROMPT);
+      expect(prompts[1]).toBe(BLOCKED_BY_REJECTED_PROMPT);
+      expect(result.status).toBe("pr");
+      expect(api.pulls).toHaveLength(1);
+      const removeAt = gitCalls.findIndex((args) => args[0] === "worktree" && args[1] === "remove");
+      const readdAt = gitCalls.findIndex(
+        (args) => args[0] === "worktree" && args[1] === "add" && args.includes("origin/main") && args.includes("-B")
+      );
+      expect(removeAt).toBeGreaterThanOrEqual(0);
+      expect(readdAt).toBeGreaterThan(removeAt);
+    });
+  });
+
+  test("second garbage blocked-by is stuck and does not open a PR", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1) ?? "";
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") throw new Error("missing");
+          return "";
+        }
+        return "";
+      };
+      let round = 0;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          round++;
+          await writeFile(
+            join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE),
+            `<!-- jumi-blocked-by: #${round === 1 ? 12 : 999} -->\n`
+          );
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(round).toBe(2);
+      expect(result).toEqual({ status: "skipped", reason: BLOCKED_BY_REJECTED_STUCK });
+      expect(api.pulls).toHaveLength(0);
+      expect(api.comments.some((body) => body.includes(BLOCKED_BY_REJECTED_STUCK))).toBe(true);
+    });
+  });
+
+  test("empty queue does not mention yield and does not extra-spawn", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      let runs = 0;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (opts) => {
+          runs++;
+          expect("prompt" in opts).toBe(false);
+          await expect(access(join(workdir, "kirmanak/demo/12", QUEUE_FILE))).rejects.toThrow();
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(runs).toBe(1);
+      expect(result.status).toBe("pr");
+    });
+  });
+
+  test("clears leftover JUMI_BLOCKED.md before the engine so a prior marker is not this run's yield", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      await mkdir(join(worktree, ".git"), { recursive: true });
+      await writeFile(join(worktree, BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #196 -->\n");
+      const deps: Array<{ owner: string; repo: string; number: number }> = [];
+      const api = makeApi({
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+        createIssueDependency: async (_owner, _repo, _index, dependency) => {
+          deps.push(dependency);
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1) ?? "";
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") throw new Error("missing");
+          return "";
+        }
+        return "";
+      };
+      let leftoverPresent = true;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          leftoverPresent = await access(join(worktree, BLOCKED_BY_FILE)).then(
+            () => true,
+            () => false
+          );
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(leftoverPresent).toBe(false);
+      expect(result.status).toBe("pr");
+      expect(deps).toEqual([]);
+      expect(api.pulls).toHaveLength(1);
+    });
+  });
+
+  test("empty queue does not treat an engine-written JUMI_BLOCKED.md as a yield", async () => {
+    await withDirs(async (home, workdir) => {
+      const deps: Array<{ owner: string; repo: string; number: number }> = [];
+      const api = makeApi({
+        createIssueDependency: async (_owner, _repo, _index, dependency) => {
+          deps.push(dependency);
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      let runs = 0;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          runs++;
+          await writeFile(join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #196 -->\n");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(runs).toBe(1);
+      expect(result.status).toBe("pr");
+      expect(deps).toEqual([]);
+    });
+  });
+
+  test("valid yield still deletes issue-branch when createIssueDependency throws", async () => {
+    await withDirs(async (home, workdir) => {
+      const events: string[] = [];
+      const api = makeApi({
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+        createIssueDependency: async () => {
+          events.push("createIssueDependency");
+          throw new Error("dependency already exists");
+        },
+      });
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "push" && gitArgs.includes("--delete")) events.push("deleteIssueBranch");
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1) ?? "";
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") throw new Error("missing");
+          return "";
+        }
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await writeFile(join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #196 -->\n");
+          await writeFile(join(workdir, "kirmanak/demo/12/src.ts"), "guess");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "failed to set dependency: dependency already exists" });
+      expect(events).toEqual(["createIssueDependency", "deleteIssueBranch"]);
+      expect(api.pulls).toHaveLength(0);
+      expect(api.comments.some((body) => body.includes("failed to set dependency: dependency already exists"))).toBe(
+        true
+      );
+      const removeAt = gitCalls.findIndex((args) => args[0] === "worktree" && args[1] === "remove");
+      const deleteHeadAt = gitCalls.findIndex(
+        (args) => args[0] === "update-ref" && args[1] === "-d" && args[2] === "refs/heads/jumi/issue-12-fix-the-thing"
+      );
+      const deletePushAt = gitCalls.findIndex((args) => args[0] === "push" && args.includes("--delete"));
+      expect(removeAt).toBeGreaterThanOrEqual(0);
+      expect(deleteHeadAt).toBeGreaterThan(removeAt);
+      expect(deletePushAt).toBeGreaterThan(removeAt);
+      const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
+      expect(claim).toBeUndefined();
+    });
+  });
+
+  test("valid yield POSTs the dependency even if issue-branch push --delete fails", async () => {
+    await withDirs(async (home, workdir) => {
+      const deps: Array<{ owner: string; repo: string; number: number }> = [];
+      const api = makeApi({
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+        createIssueDependency: async (_owner, _repo, _index, dependency) => {
+          deps.push(dependency);
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "push" && gitArgs.includes("--delete")) throw new Error("permission denied");
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await writeFile(join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #196 -->\n");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "blocked on #196" });
+      expect(deps).toEqual([{ owner: "kirmanak", repo: "demo", number: 196 }]);
+      expect(api.pulls).toHaveLength(0);
+      expect(api.comments.some((body) => body.includes("blocked on #196"))).toBe(true);
+    });
+  });
+
+  test("valid yield still skip-blocks when origin/issue-branch remains after delete", async () => {
+    await withDirs(async (home, workdir) => {
+      const deps: Array<{ owner: string; repo: string; number: number }> = [];
+      const api = makeApi({
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+        createIssueDependency: async (_owner, _repo, _index, dependency) => {
+          deps.push(dependency);
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") return "abc123";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await writeFile(join(workdir, "kirmanak/demo/12", BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #196 -->\n");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "blocked on #196" });
+      expect(deps).toEqual([{ owner: "kirmanak", repo: "demo", number: 196 }]);
+      expect(api.pulls).toHaveLength(0);
     });
   });
 

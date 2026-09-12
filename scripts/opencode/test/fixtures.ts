@@ -197,6 +197,8 @@ export function emptyCiMethods(): {
   getActionJobLogs: () => Promise<string>;
   listIssueDependencies: () => Promise<LinkedIssue[]>;
   listIssueBlocks: () => Promise<LinkedIssue[]>;
+  listRepoIssues: () => Promise<LinkedIssue[]>;
+  createIssueDependency: () => Promise<void>;
 } {
   return {
     listCommitStatuses: async () => [],
@@ -204,6 +206,8 @@ export function emptyCiMethods(): {
     getActionJobLogs: async () => "",
     listIssueDependencies: async () => [],
     listIssueBlocks: async () => [],
+    listRepoIssues: async () => [],
+    createIssueDependency: async () => undefined,
   };
 }
 

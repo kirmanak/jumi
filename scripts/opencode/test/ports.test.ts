@@ -118,6 +118,8 @@ describe("Engine, Tracker, and Forge ports", () => {
       updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
       listIssueDependencies: async () => [],
       listIssueBlocks: async () => [],
+      listRepoIssues: async () => [],
+      createIssueDependency: async () => undefined,
     };
     const forge: Forge = {
       getRepo: async () => makeRepo(),
@@ -142,11 +144,13 @@ describe("Engine, Tracker, and Forge ports", () => {
     };
     expect(Object.keys(tracker).sort()).toEqual([
       "createIssueComment",
+      "createIssueDependency",
       "findStickyIssueComment",
       "getIssue",
       "listIssueBlocks",
       "listIssueComments",
       "listIssueDependencies",
+      "listRepoIssues",
       "updateIssueComment",
     ]);
     expect("getPR" in tracker).toBe(false);

@@ -47,15 +47,31 @@ export const REVIEW_OPENCODE_PERMISSION = JSON.stringify({ webfetch: REVIEW_WEBF
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
 Grep is ripgrep syntax, not JavaScript.
-Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, and JUMI_CI.md at the repository root.
+Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_QUEUE.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, and JUMI_CI.md at the repository root.
 Verify once at the end, not after every edit.`;
 
-export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
-${WORKER_SCOPE}
-Edit, write, commit, and push as needed. Incremental commits are fine.
+const IMPLEMENT_FINISH = `Edit, write, commit, and push as needed. Incremental commits are fine.
 Do not force-push. Do not ask questions.
 When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
 Then stop.`;
+
+export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
+${WORKER_SCOPE}
+${IMPLEMENT_FINISH}`;
+
+export const IMPLEMENT_YIELD_PROMPT = `Read JUMI_TASK.md and JUMI_QUEUE.md and implement the requested changes in this repository.
+${WORKER_SCOPE}
+If this work cannot proceed until an id in JUMI_QUEUE.md finishes, write JUMI_BLOCKED.md at the repository root containing exactly one HTML comment:
+\`<!-- jumi-blocked-by: #N -->\`
+(or \`<!-- jumi-blocked-by: owner/repo#N -->\` for another repo), using an id from that list. Then stop. Do not commit. Do not push. Do not implement a guess.
+Do not treat needing a new abstraction, a cluster pin, or a live image as a blocker.
+${IMPLEMENT_FINISH}`;
+
+export const BLOCKED_BY_REJECTED_PROMPT = `blocked-by rejected, implement
+The previous JUMI_BLOCKED.md was not an id from JUMI_QUEUE.md (unknown, closed, invented, or this issue). Implement the requested changes in this repository.
+${WORKER_SCOPE}
+Do not write JUMI_BLOCKED.md unless the id is on JUMI_QUEUE.md. Do not commit a blocked-by guess.
+${IMPLEMENT_FINISH}`;
 
 export const FOLLOWUP_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.

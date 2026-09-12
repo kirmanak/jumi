@@ -3,9 +3,11 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  BLOCKED_BY_REJECTED_PROMPT,
   CONFLICT_PROMPT,
   FOLLOWUP_PROMPT,
   IMPLEMENT_PROMPT,
+  IMPLEMENT_YIELD_PROMPT,
   REVIEW_OPENCODE_PERMISSION,
   resolveOpenCodePrompt,
   runOpenCode,
@@ -546,6 +548,7 @@ describe("worker prompts", () => {
       expect(prompt).toContain("Public upstream docs are fine");
       expect(prompt).toContain("Grep is ripgrep syntax, not JavaScript");
       expect(prompt).toContain("Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt");
+      expect(prompt).toContain("JUMI_QUEUE.md");
       expect(prompt).toContain("Verify once at the end");
       expect(prompt).toContain("Do not ask questions");
       expect(prompt).not.toContain("denied");
@@ -556,6 +559,27 @@ describe("worker prompts", () => {
   test("conflict stays on the injected conflicted paths", () => {
     expect(CONFLICT_PROMPT).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
     expect(CONFLICT_PROMPT).toContain("One adjacent file is allowed only if the resolution truly requires it");
+  });
+
+  test("follow-up and conflict must not yield", () => {
+    expect(FOLLOWUP_PROMPT).not.toContain("JUMI_BLOCKED.md");
+    expect(CONFLICT_PROMPT).not.toContain("JUMI_BLOCKED.md");
+    expect(FOLLOWUP_PROMPT).not.toContain("jumi-blocked-by");
+    expect(CONFLICT_PROMPT).not.toContain("jumi-blocked-by");
+  });
+
+  test("first-run may yield a queue id then stop", () => {
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_QUEUE.md");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_BLOCKED.md");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("<!-- jumi-blocked-by: #N -->");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("Do not commit");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("Do not push");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("Do not implement a guess");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("new abstraction");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("cluster pin");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("live image");
+    expect(BLOCKED_BY_REJECTED_PROMPT.startsWith("blocked-by rejected, implement")).toBe(true);
+    expect(IMPLEMENT_PROMPT).not.toContain("JUMI_BLOCKED.md");
   });
 });
 

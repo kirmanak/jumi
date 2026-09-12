@@ -15,11 +15,22 @@ import {
   writeClaim,
 } from "./claim.ts";
 import type { ConflictResult } from "./conflict.ts";
-import { blockedOnComment, checkIssueBlockers } from "./dependencies.ts";
+import {
+  BLOCKED_BY_FILE,
+  BLOCKED_BY_REJECTED_STUCK,
+  blockedOnComment,
+  checkIssueBlockers,
+  collectCandidateQueue,
+  formatQueueMarkdown,
+  parseBlockedByArtifact,
+  QUEUE_FILE,
+  type QueueCandidate,
+  validateYield,
+} from "./dependencies.ts";
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
-import { openCodeEngine } from "./git.ts";
+import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, openCodeEngine } from "./git.ts";
 import {
   closesIssuePattern,
   isAssignedForeignPR,
@@ -47,7 +58,7 @@ import {
   workerOpenCodeChildEnv,
 } from "./workspace.ts";
 
-export { IMPLEMENT_PROMPT } from "./git.ts";
+export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 const PR_BODY_MAX_CHARS = 8000;
@@ -262,6 +273,25 @@ export async function implementIssue(
     return { status: "skipped", reason: stuckComment(stuckReason) };
   }
 
+  let queue: QueueCandidate[] = [];
+  try {
+    queue = await collectCandidateQueue({
+      api: opts.api,
+      owner,
+      repo,
+      issueNumber,
+      botUsername: opts.botUsername,
+      body: opts.job.body,
+      pulls,
+    });
+  } catch (err) {
+    await forgetClaim();
+    return {
+      status: "skipped",
+      reason: `failed to load candidate queue: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
   const configArgs = gitConfigArgs();
   const env = gitEnv({ giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken });
   const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
@@ -339,16 +369,17 @@ export async function implementIssue(
     }
     throwIfAborted(opts.abortSignal);
 
+    const refExists = async (ref: string) => {
+      try {
+        await runConfiguredGit(["show-ref", "--verify", "--quiet", ref], { cwd: barePath, env });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
     if (!(await pathExists(join(worktree, ".git")))) {
       await mkdir(dirname(worktree), { recursive: true });
-      const refExists = async (ref: string) => {
-        try {
-          await runConfiguredGit(["show-ref", "--verify", "--quiet", ref], { cwd: barePath, env });
-          return true;
-        } catch {
-          return false;
-        }
-      };
       if (await refExists(`refs/heads/${branch}`)) {
         log(`Adding worktree ${worktree} from existing ${branch}`);
         await runConfiguredGit(["worktree", "add", worktree, branch], { cwd: barePath, env });
@@ -379,10 +410,19 @@ export async function implementIssue(
     });
 
     throwIfAborted(opts.abortSignal);
-    await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(opts.job));
+    const writeTaskFiles = async () => {
+      await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(opts.job));
+      if (queue.length > 0) {
+        await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
+      } else {
+        await rm(join(worktree, QUEUE_FILE), { force: true }).catch(() => undefined);
+      }
+      await rm(join(worktree, BLOCKED_BY_FILE), { force: true }).catch(() => undefined);
+    };
+    await writeTaskFiles();
     await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, "Jumi is implementing this issue.");
 
-    const runEngine = async (label: string, kind: "implement" | "follow-up" = "implement") => {
+    const runEngine = async (label: string, kind: "implement" | "follow-up" = "implement", prompt?: string) => {
       throwIfAborted(opts.abortSignal);
       log(label);
       throwIfEngineFailed(
@@ -409,6 +449,7 @@ export async function implementIssue(
             sha: headSha,
             jobId: opts.jobId ?? opts.job.delivery,
           },
+          ...(prompt != null ? { prompt } : {}),
           logger: log,
           abortSignal: opts.abortSignal,
           onPid: async (pid) => {
@@ -426,7 +467,111 @@ export async function implementIssue(
       );
     };
 
-    await runEngine(`Running OpenCode for ${owner}/${repo}#${issueNumber}`);
+    const addWorktreeFromDefault = async () => {
+      await mkdir(dirname(worktree), { recursive: true });
+      await runConfiguredGit(["worktree", "add", "-B", branch, worktree, `origin/${opts.job.defaultBranch}`], {
+        cwd: barePath,
+        env,
+      });
+      await mkdir(worktree, { recursive: true });
+    };
+
+    const deleteRefIfPresent = async (ref: string) => {
+      if (!(await refExists(ref))) return;
+      await runConfiguredGit(["update-ref", "-d", ref], { cwd: barePath, env });
+    };
+
+    const deletePushedIssueBranch = async () => {
+      if (branch === opts.job.defaultBranch) return;
+      await detachWorktree();
+      await deleteRefIfPresent(`refs/heads/${branch}`);
+      try {
+        await runConfiguredGit(["push", "origin", "--delete", branch], { cwd: barePath, env });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/remote ref does not exist/i.test(msg)) throw err;
+      }
+      await deleteRefIfPresent(`refs/remotes/origin/${branch}`);
+      await runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], { cwd: barePath, env });
+      if (await refExists(`refs/remotes/origin/${branch}`)) {
+        throw new Error(`failed to delete origin/${branch}`);
+      }
+    };
+
+    const readBlockedBy = async () => {
+      const path = join(worktree, BLOCKED_BY_FILE);
+      try {
+        const info = await lstat(path);
+        if (!info.isFile()) return parseBlockedByArtifact(null, owner, repo);
+        return parseBlockedByArtifact(await readFile(path, "utf8"), owner, repo);
+      } catch {
+        return parseBlockedByArtifact(null, owner, repo);
+      }
+    };
+
+    const skipBlocked = async (reason: string) => {
+      await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, reason);
+      await stopHeartbeat();
+      await serializeClaim(async () => {
+        await forgetClaim();
+      });
+      await detachWorktree();
+      return { status: "skipped" as const, reason };
+    };
+
+    const applyValidYield = async (blocker: { owner: string; repo: string; number: number }) => {
+      try {
+        await opts.api.createIssueDependency(owner, repo, issueNumber, {
+          owner: blocker.owner,
+          repo: blocker.repo,
+          number: blocker.number,
+        });
+      } catch (err) {
+        await deletePushedIssueBranch().catch(() => undefined);
+        return skipBlocked(`failed to set dependency: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      await deletePushedIssueBranch().catch(() => undefined);
+      return skipBlocked(blockedOnComment([blocker], owner, repo));
+    };
+
+    const resetAfterRejectedYield = async () => {
+      await deletePushedIssueBranch();
+      await addWorktreeFromDefault();
+      await writeTaskFiles();
+    };
+
+    const handleYield = async (rejectedOnce: boolean): Promise<ImplementResult | "continue" | "retry"> => {
+      if (queue.length === 0) return "continue";
+      const artifact = await readBlockedBy();
+      if (!artifact.present) return "continue";
+      const decision = validateYield(artifact.parsed, queue, owner, repo, issueNumber);
+      if (decision.ok) return applyValidYield(decision.blocker);
+      if (!rejectedOnce) return "retry";
+      await deletePushedIssueBranch();
+      return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
+    };
+
+    await runEngine(
+      `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
+      "implement",
+      queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : undefined
+    );
+
+    const firstYield = await handleYield(false);
+    if (firstYield === "retry") {
+      log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
+      await resetAfterRejectedYield();
+      await runEngine(
+        `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
+        "implement",
+        BLOCKED_BY_REJECTED_PROMPT
+      );
+      const secondYield = await handleYield(true);
+      if (secondYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
+      if (secondYield !== "continue") return secondYield;
+    } else if (firstYield !== "continue") {
+      return firstYield;
+    }
 
     const gate = await gateShipAfterOpenCode({
       api: opts.api,
@@ -454,6 +599,8 @@ export async function implementIssue(
     const prFileContents = await readPullRequestDescription(worktree);
     await rm(join(worktree, PR_DESCRIPTION_FILE), { recursive: true, force: true }).catch(() => undefined);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
+    await rm(join(worktree, QUEUE_FILE), { force: true }).catch(() => undefined);
+    await rm(join(worktree, BLOCKED_BY_FILE), { force: true }).catch(() => undefined);
     await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
     const porcelain = (await runConfiguredGit(["status", "--porcelain"], { cwd: worktree, env })).trim();
     if (!porcelain) {

@@ -170,6 +170,17 @@ export interface Tracker {
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment>;
   listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]>;
   listIssueBlocks(owner: string, repo: string, index: number): Promise<LinkedIssue[]>;
+  listRepoIssues(
+    owner: string,
+    repo: string,
+    opts?: { state?: "open" | "closed" | "all"; type?: "issues" | "pulls"; assignedBy?: string }
+  ): Promise<LinkedIssue[]>;
+  createIssueDependency(
+    owner: string,
+    repo: string,
+    index: number,
+    dependency: { owner: string; repo: string; number: number }
+  ): Promise<void>;
 }
 
 /** Forge: clone + PR + sticky + status (git host identity). */

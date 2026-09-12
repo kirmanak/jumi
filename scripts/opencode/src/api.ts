@@ -364,6 +364,34 @@ export class GiteaAPI {
     return issues.map((issue) => toLinkedIssue(issue, owner, repo));
   }
 
+  async listRepoIssues(
+    owner: string,
+    repo: string,
+    opts?: { state?: "open" | "closed" | "all"; type?: "issues" | "pulls"; assignedBy?: string }
+  ): Promise<LinkedIssue[]> {
+    const params = new URLSearchParams();
+    if (opts?.state) params.set("state", opts.state);
+    if (opts?.type) params.set("type", opts.type);
+    if (opts?.assignedBy) params.set("assigned_by", opts.assignedBy);
+    params.set("limit", "50");
+    params.set("page", "1");
+    const issues = await this.get<GiteaIssue[]>(`/repos/${this.repoPath(owner, repo)}/issues?${params.toString()}`);
+    return issues.map((issue) => toLinkedIssue(issue, owner, repo));
+  }
+
+  async createIssueDependency(
+    owner: string,
+    repo: string,
+    index: number,
+    dependency: { owner: string; repo: string; number: number }
+  ): Promise<void> {
+    await this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/dependencies`, {
+      index: dependency.number,
+      owner: dependency.owner,
+      repo: dependency.repo,
+    });
+  }
+
   async getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]> {
     const files = await this.getAll<GiteaPRFile>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/files`);
     return files.map(toPullFile);

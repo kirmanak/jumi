@@ -2,13 +2,18 @@ import { describe, expect, test } from "bun:test";
 import {
   blockedOnComment,
   checkIssueBlockers,
+  collectCandidateQueue,
   DEPENDENCY_CYCLE_REASON,
   DEPENDENCY_GRAPH_CAP,
   formatIssueRef,
+  formatQueueMarkdown,
   isBlockerUnresolved,
+  parseBlockedByArtifact,
+  parseIssueCitations,
+  validateYield,
 } from "../src/dependencies.ts";
 import type { LinkedIssue } from "../src/ports.ts";
-import { makeLinkedIssue, makePR } from "./fixtures.ts";
+import { makeIssue, makeLinkedIssue, makePR, makeUser } from "./fixtures.ts";
 
 describe("formatIssueRef / blockedOnComment", () => {
   test("uses #n in the home repo and owner/repo#n across repos", () => {
@@ -154,5 +159,101 @@ describe("checkIssueBlockers", () => {
       12
     );
     expect(result).toEqual({ status: "stuck", reason: DEPENDENCY_CYCLE_REASON });
+  });
+});
+
+describe("parseIssueCitations", () => {
+  test("reads #n, owner/repo#n, and issue URLs; closed/self are the caller's problem", () => {
+    expect(
+      parseIssueCitations(
+        "Depends on #196 and kirmanak/other#10. See https://gitea.kirmanak.stream/kirmanak/demo/issues/180",
+        "kirmanak",
+        "demo"
+      )
+    ).toEqual([
+      { owner: "kirmanak", repo: "other", number: 10 },
+      { owner: "kirmanak", repo: "demo", number: 196 },
+      { owner: "kirmanak", repo: "demo", number: 180 },
+    ]);
+  });
+});
+
+describe("parseBlockedByArtifact / validateYield", () => {
+  test("parses the structured marker", () => {
+    expect(parseBlockedByArtifact(null, "kirmanak", "demo")).toEqual({ present: false });
+    expect(parseBlockedByArtifact("<!-- jumi-blocked-by: #196 -->\n", "kirmanak", "demo")).toEqual({
+      present: true,
+      parsed: { owner: "kirmanak", repo: "demo", number: 196 },
+    });
+    expect(parseBlockedByArtifact("<!-- jumi-blocked-by: kirmanak/other#10 -->", "kirmanak", "demo")).toEqual({
+      present: true,
+      parsed: { owner: "kirmanak", repo: "other", number: 10 },
+    });
+    expect(parseBlockedByArtifact("please wait on 196", "kirmanak", "demo")).toEqual({
+      present: true,
+      parsed: undefined,
+    });
+  });
+
+  test("rejects invalid, unknown, and self; maps a closer to the issue it closes", () => {
+    const candidates = [
+      { owner: "kirmanak", repo: "demo", number: 196, title: "Blocker", kind: "issue" as const },
+      {
+        owner: "kirmanak",
+        repo: "demo",
+        number: 225,
+        title: "Closer",
+        kind: "closer" as const,
+        closes: { owner: "kirmanak", repo: "demo", number: 196 },
+      },
+    ];
+    expect(validateYield(undefined, candidates, "kirmanak", "demo", 12)).toEqual({ ok: false, reason: "invalid" });
+    expect(validateYield({ owner: "kirmanak", repo: "demo", number: 12 }, candidates, "kirmanak", "demo", 12)).toEqual({
+      ok: false,
+      reason: "self",
+    });
+    expect(validateYield({ owner: "kirmanak", repo: "demo", number: 999 }, candidates, "kirmanak", "demo", 12)).toEqual(
+      { ok: false, reason: "unknown" }
+    );
+    expect(validateYield({ owner: "kirmanak", repo: "demo", number: 196 }, candidates, "kirmanak", "demo", 12)).toEqual(
+      { ok: true, blocker: { owner: "kirmanak", repo: "demo", number: 196 } }
+    );
+    expect(validateYield({ owner: "kirmanak", repo: "demo", number: 225 }, candidates, "kirmanak", "demo", 12)).toEqual(
+      { ok: true, blocker: { owner: "kirmanak", repo: "demo", number: 196 } }
+    );
+  });
+});
+
+describe("collectCandidateQueue", () => {
+  test("includes assigned bot issues, their open closers, open citations, and existing deps", async () => {
+    const assigned = makeLinkedIssue({ number: 196, title: "Sibling" });
+    const cited = makeIssue({ number: 180, title: "Cited" });
+    const dep = makeLinkedIssue({ number: 170, title: "Dep" });
+    const closedCited = makeIssue({ number: 9, title: "Done", state: "closed" });
+    const queue = await collectCandidateQueue({
+      api: {
+        listRepoIssues: async () => [assigned, makeLinkedIssue({ number: 12, title: "Self" })],
+        listIssueDependencies: async () => [dep],
+        getIssue: async (_owner, _repo, index) => {
+          if (index === 180) return cited;
+          if (index === 9) return closedCited;
+          throw new Error("missing");
+        },
+      },
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      botUsername: "jumi",
+      body: "Wait for #180. Closed #9 is noise. Invented #404 stays out.",
+      pulls: [makePR({ number: 225, title: "Fix sibling", body: "Fixes #196", user: makeUser({ login: "jumi" }) })],
+    });
+    expect(queue.map((row) => ({ number: row.number, kind: row.kind }))).toEqual([
+      { number: 196, kind: "issue" },
+      { number: 225, kind: "closer" },
+      { number: 180, kind: "cited" },
+      { number: 170, kind: "dependency" },
+    ]);
+    expect(formatQueueMarkdown(queue, "kirmanak", "demo")).toContain("#196 Sibling");
+    expect(formatQueueMarkdown(queue, "kirmanak", "demo")).toContain("#225 open closer of #196");
   });
 });

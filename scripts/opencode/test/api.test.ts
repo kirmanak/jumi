@@ -324,6 +324,45 @@ describe("GiteaAPI", () => {
     await expect(api.listIssueBlocks("owner", "repo", 196)).resolves.toEqual([]);
   });
 
+  test("lists one page of repo issues with assigned_by", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json([
+        {
+          number: 196,
+          title: "one",
+          body: "",
+          state: "open",
+          html_url: "https://gitea.example.test/owner/repo/issues/196",
+          user: { login: "alice" },
+          assignee: { login: "jumi" },
+          updated_at: "2026-05-23T00:00:00Z",
+          created_at: "2026-05-23T00:00:00Z",
+        },
+      ]);
+    }) as unknown as typeof fetch;
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const issues = await api.listRepoIssues("owner", "repo", { state: "open", type: "issues", assignedBy: "jumi" });
+    expect(issues).toEqual([expect.objectContaining({ owner: "owner", repo: "repo", number: 196 })]);
+    expect(urls[0]).toContain("/issues?state=open&type=issues&assigned_by=jumi&limit=50&page=1");
+  });
+
+  test("creates an issue dependency", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      return Response.json({ number: 12 }, { status: 201 });
+    }) as unknown as typeof fetch;
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.createIssueDependency("owner", "repo", 12, { owner: "owner", repo: "repo", number: 196 });
+    expect(requests[0]).toEqual({
+      url: "https://gitea.example.test/api/v1/repos/owner/repo/issues/12/dependencies",
+      method: "POST",
+      body: JSON.stringify({ index: 196, owner: "owner", repo: "repo" }),
+    });
+  });
+
   test("lists pull reviews with exact-50 paging", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
