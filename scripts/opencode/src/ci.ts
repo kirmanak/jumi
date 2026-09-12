@@ -166,6 +166,16 @@ export function infraFlakeReason(log: string): string | undefined {
   return undefined;
 }
 
+function stripGiteaLogTimestamp(line: string): string {
+  return line.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/, "").trimStart();
+}
+
+export function classifyInfraFlake(capped: string): string | undefined {
+  const bunFails = capped.split(/\r?\n/).filter((line) => stripGiteaLogTimestamp(line).startsWith("(fail)"));
+  if (bunFails.length > 0) return undefined;
+  return infraFlakeReason(capped);
+}
+
 export function jobMatchesCheck(job: ActionJob, checkName: string, sha: string): boolean {
   if ((job.head_sha ?? "").toLowerCase() !== sha.toLowerCase()) return false;
   const name = job.name ?? "";
@@ -365,7 +375,7 @@ export async function inspectCi(opts: {
       jobId,
       capped,
       logHash,
-      flake: infraFlakeReason(`${text}\n${capped}`),
+      flake: classifyInfraFlake(capped),
     });
   }
   const unhandled = failed.filter((check) => !isCheckHandled(ciState, opts.sha, check.name, check.logHash));

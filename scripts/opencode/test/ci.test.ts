@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   buildCiMarkdown,
   capFailedJobLog,
+  classifyInfraFlake,
   dropUnpackNoise,
   hashText,
   infraFlakeReason,
@@ -108,6 +109,67 @@ describe("infraFlakeReason", () => {
   test("unknown red is not a flake", () => {
     expect(infraFlakeReason("##[error]Failed to find package 'platforms;android-37'")).toBeUndefined();
   });
+
+  test("bun (fail) log with 429 only in fixture text is not a flake", () => {
+    const log = [
+      "bun test v1.2.3",
+      "fixture: values.schema.json remote schema 429 Too Many Requests",
+      "(pass) detects Helm remote-schema 429",
+      "error: expect(received).toBe(expected)",
+      "  Expected: 2",
+      "  Received: 1",
+      "(fail) adds numbers [0.03ms]",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toBeUndefined();
+    expect(classifyInfraFlake(capFailedJobLog(log))).toBeUndefined();
+  });
+
+  test("timestamped bun (fail) log with 429 only in fixture text is not a flake", () => {
+    const log = [
+      "2026-09-12T10:59:26.0000000Z bun test v1.2.3",
+      "2026-09-12T10:59:26.0000000Z fixture: values.schema.json remote schema 429 Too Many Requests",
+      "2026-09-12T10:59:26.0000000Z (pass) detects Helm remote-schema 429",
+      "2026-09-12T10:59:26.0000000Z error: expect(received).toBe(expected)",
+      "2026-09-12T10:59:26.0000000Z   Expected: 2",
+      "2026-09-12T10:59:26.0000000Z   Received: 1",
+      "2026-09-12T10:59:26.0000000Z (fail) adds numbers [0.03ms]",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toBeUndefined();
+    expect(classifyInfraFlake(capFailedJobLog(log))).toBeUndefined();
+  });
+
+  test("bun fail title with 429 is not a flake", () => {
+    expect(classifyInfraFlake("(fail) detects Helm remote-schema 429")).toBeUndefined();
+    expect(
+      classifyInfraFlake(
+        [
+          "bun test v1.2.3",
+          "helm: values.schema.json remote schema 429 Too Many Requests",
+          "(fail) detects Helm remote-schema 429 [0.03ms]",
+        ].join("\n")
+      )
+    ).toBeUndefined();
+  });
+
+  test("mention of (fail) in a pass title does not hide a later job/step flake", () => {
+    const log = [
+      "(pass) bun (fail) log with 429 only in fixture text is not a flake",
+      "helm: values.schema.json remote schema 429 Too Many Requests",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toContain("Helm");
+  });
+
+  test("true positives still match from the capped window", () => {
+    expect(classifyInfraFlake("Failed to connect to 140.82.112.4 port 443: Connection timed out")).toContain("140.82");
+    expect(classifyInfraFlake("helm: values.schema.json remote schema 429 Too Many Requests")).toContain("Helm");
+    expect(classifyInfraFlake("tofu Error acquiring the state lock on s3")).toContain("S3");
+    expect(
+      classifyInfraFlake(
+        "reading manifest bookworm-slim in docker.io/library/debian: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit"
+      )
+    ).toContain("Docker Hub");
+  });
 });
 
 describe("jobMatchesCheck", () => {
@@ -204,6 +266,57 @@ describe("inspectCi", () => {
       });
       expect(inspection.unhandled[0]?.capped).toContain("from jobs list");
       expect(inspection.unhandled[0]?.jobId).toBe(9);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("classifies Helm remote-schema 429 in the capped window as a flake", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "deploy", status: "failure" }],
+          listActionJobs: async () => [{ id: 9, name: "deploy", head_sha: "headsha", conclusion: "failure" }],
+          getActionJobLogs: async () =>
+            "helm: values.schema.json remote schema 429 Too Many Requests\n##[error]Process completed with exit code 1.\n",
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.unhandled[0]?.flake).toContain("Helm");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("does not treat bun fixture 429 as an infra flake", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "test", status: "failure" }],
+          listActionJobs: async () => [{ id: 9, name: "test", head_sha: "headsha", conclusion: "failure" }],
+          getActionJobLogs: async () =>
+            [
+              "bun test v1.2.3",
+              "fixture: values.schema.json remote schema 429 Too Many Requests",
+              "(pass) detects Helm remote-schema 429",
+              "error: expect(received).toBe(expected)",
+              "(fail) adds numbers [0.03ms]",
+            ].join("\n"),
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.unhandled).toHaveLength(1);
+      expect(inspection.unhandled[0]?.flake).toBeUndefined();
     } finally {
       await rm(home, { recursive: true, force: true });
     }
