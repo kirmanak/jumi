@@ -37,6 +37,14 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
   configPath?: string;
 }
 
+export const REVIEW_WEBFETCH_PERMISSION: Record<string, "allow" | "ask" | "deny"> = {
+  "*": "allow",
+  "*kirmanak.stream*": "deny",
+  "*github.com/search*": "deny",
+};
+
+export const REVIEW_OPENCODE_PERMISSION = JSON.stringify({ webfetch: REVIEW_WEBFETCH_PERMISSION });
+
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
 Grep is ripgrep syntax, not JavaScript.
@@ -92,6 +100,16 @@ function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined
   return opts.configPath ?? process.env.OPENCODE_CONFIG;
 }
 
+function overlayReviewWebfetch(
+  env: Record<string, string>,
+  opts: OpenCodeRunOptions,
+  configPath: string | undefined
+): void {
+  if (opts.trace?.kind === "review" || configPath?.endsWith("opencode-review.json")) {
+    env.OPENCODE_PERMISSION = REVIEW_OPENCODE_PERMISSION;
+  }
+}
+
 function buildEnv(
   opts: OpenCodeRunOptions,
   tempRoot: string,
@@ -103,6 +121,7 @@ function buildEnv(
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: tempRoot, OPENCODE_DB: openCodeDbPath } as Record<string, string>;
     if (configPath) env.OPENCODE_CONFIG = configPath;
+    overlayReviewWebfetch(env, opts, configPath);
     return env;
   }
 
@@ -117,6 +136,7 @@ function buildEnv(
   };
 
   if (configPath) env.OPENCODE_CONFIG = configPath;
+  overlayReviewWebfetch(env, opts, configPath);
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
       if (key.startsWith("GITEA_")) continue;

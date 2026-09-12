@@ -97,6 +97,14 @@ describe("infraFlakeReason", () => {
     expect(infraFlakeReason("tofu Error acquiring the state lock on s3")).toContain("S3");
   });
 
+  test("detects Docker Hub unauthenticated pull rate limit", () => {
+    expect(
+      infraFlakeReason(
+        "reading manifest bookworm-slim in docker.io/library/debian: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit"
+      )
+    ).toContain("Docker Hub");
+  });
+
   test("unknown red is not a flake", () => {
     expect(infraFlakeReason("##[error]Failed to find package 'platforms;android-37'")).toBeUndefined();
   });

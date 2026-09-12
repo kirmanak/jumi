@@ -160,6 +160,9 @@ export function infraFlakeReason(log: string): string | undefined {
   ) {
     return "tofu S3 state lock";
   }
+  if (/toomanyrequests/i.test(log) && /rate limit/i.test(log)) {
+    return "Docker Hub unauthenticated pull rate limit";
+  }
   return undefined;
 }
 

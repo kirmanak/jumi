@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONFLICT_PROMPT, FOLLOWUP_PROMPT, IMPLEMENT_PROMPT, resolveOpenCodePrompt, runOpenCode } from "../src/git.ts";
+import {
+  CONFLICT_PROMPT,
+  FOLLOWUP_PROMPT,
+  IMPLEMENT_PROMPT,
+  REVIEW_OPENCODE_PERMISSION,
+  resolveOpenCodePrompt,
+  runOpenCode,
+} from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
@@ -420,6 +427,63 @@ cat
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toBe("review-context-xml");
+      }
+    );
+  });
+
+  test("overlays reviewer webfetch last-match via OPENCODE_PERMISSION", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'KIND_PERM=%s\n' "$OPENCODE_PERMISSION"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "review", owner: "kirmanak", repo: "demo" },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain(`KIND_PERM=${REVIEW_OPENCODE_PERMISSION}`);
+      }
+    );
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'PATH_PERM=%s\n' "$OPENCODE_PERMISSION"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          configPath: "/app/.gitea/opencode-review.json",
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain(`PATH_PERM=${REVIEW_OPENCODE_PERMISSION}`);
+      }
+    );
+  });
+
+  test("does not overlay webfetch last-match on worker OpenCode", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
+`,
+      async (_binDir, workdir) => {
+        for (const kind of ["implement", "follow-up", "conflict"] as const) {
+          const result = await runOpenCode({
+            prompt: "prompt",
+            model: "model",
+            workdir,
+            sanitizeEnv: true,
+            configPath: "/app/.gitea/opencode-implement.json",
+            trace: { kind, owner: "kirmanak", repo: "demo" },
+          });
+          expect(result.status).toBe("ok");
+          expect(result.stdout?.trim()).toBe("PERM=");
+        }
       }
     );
   });

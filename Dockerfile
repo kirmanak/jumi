@@ -2,17 +2,15 @@ ARG BUN_VERSION=1.2.5
 ARG HELM_VERSION=3.18.6
 ARG TEMURIN_TAG=21.0.12_8-jdk
 
-# oven/bun:1.2.5-slim is bullseye; bullseye-security InRelease expires / 404s
-# (image-build 2026-09-05 libperl, 2026-09-08 Valid-Until). Fetch tools and
-# install git on bookworm; copy bun from the slim image.
-FROM debian:bookworm-slim AS tools
+FROM public.ecr.aws/docker/library/debian:bookworm-slim AS tools
 
 ARG OPENCODE_VERSION=1.15.5
 ARG HELM_VERSION=3.18.6
+ARG BUN_VERSION=1.2.5
 ARG TARGETARCH
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl tar \
+  && apt-get install -y --no-install-recommends ca-certificates curl tar unzip \
   && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
     case "${TARGETARCH:-amd64}" in \
@@ -36,8 +34,19 @@ RUN set -eu; \
     tar -xzf "${tmp_dir}/helm.tar.gz" -C "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/linux-${helm_arch}/helm" /usr/local/bin/helm; \
     rm -rf "${tmp_dir}"
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) bun_platform="linux-x64" ;; \
+      arm64) bun_platform="linux-aarch64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-${bun_platform}.zip" -o "${tmp_dir}/bun.zip"; \
+    unzip -q "${tmp_dir}/bun.zip" -d "${tmp_dir}"; \
+    install -m 755 "${tmp_dir}/bun-${bun_platform}/bun" /usr/local/bin/bun; \
+    rm -rf "${tmp_dir}"
 
-FROM oven/bun:${BUN_VERSION}-slim AS build
+FROM tools AS build
 
 WORKDIR /app/scripts/opencode
 COPY scripts/opencode/package.json scripts/opencode/bun.lock ./
@@ -47,7 +56,7 @@ COPY scripts/opencode/src ./src
 COPY .gitea/opencode-review.json /app/.gitea/opencode-review.json
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 
-FROM debian:bookworm-slim AS runtime
+FROM public.ecr.aws/docker/library/debian:bookworm-slim AS runtime
 
 ARG VERSION=dev
 ARG REVISION=unknown
@@ -59,7 +68,7 @@ LABEL org.opencontainers.image.source="https://gitea.kirmanak.stream/personal/ju
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils libstdc++6 python3 \
   && rm -rf /var/lib/apt/lists/*
-COPY --from=build /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=tools /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=tools /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 RUN git --version \
@@ -97,7 +106,7 @@ ENTRYPOINT ["/app/scripts/opencode/entrypoint.sh"]
 CMD ["bun", "run", "src/server.ts"]
 
 ARG TEMURIN_TAG
-FROM eclipse-temurin:${TEMURIN_TAG} AS jdk
+FROM public.ecr.aws/docker/library/eclipse-temurin:${TEMURIN_TAG} AS jdk
 
 FROM runtime AS worker
 USER root

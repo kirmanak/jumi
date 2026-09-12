@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION } from "../src/git.ts";
 
 interface OpenCodeReviewConfig {
   model?: unknown;
@@ -75,6 +76,30 @@ describe("opencode review config", () => {
     expect(config.skills?.paths).toEqual(["/app/review-skills"]);
   });
 
+  test("denies webfetch to homelab Gitea and GitHub search after star allow (last-match)", () => {
+    const rules = REVIEW_WEBFETCH_PERMISSION;
+    expect(JSON.parse(REVIEW_OPENCODE_PERMISSION)).toEqual({ webfetch: rules });
+    expect(rules).toEqual({
+      "*": "allow",
+      "*kirmanak.stream*": "deny",
+      "*github.com/search*": "deny",
+    });
+    expect(Object.keys(rules)).toEqual(["*", "*kirmanak.stream*", "*github.com/search*"]);
+
+    expect(bashPermission(rules, "https://gitea.kirmanak.stream/personal/jumi/releases")).toBe("deny");
+    expect(bashPermission(rules, "http://gitea.kirmanak.stream/personal/jumi")).toBe("deny");
+    expect(bashPermission(rules, "https://gitea.kirmanak.stream/api/v1/repos/personal/jumi")).toBe("deny");
+    expect(bashPermission(rules, "https://api.github.com/search/code?q=repo:foo")).toBe("deny");
+    expect(bashPermission(rules, "https://github.com/search?q=foo")).toBe("deny");
+
+    expect(bashPermission(rules, "https://docs.gitea.com/installation")).toBe("allow");
+    expect(bashPermission(rules, "https://raw.githubusercontent.com/owner/repo/main/README.md")).toBe("allow");
+    expect(bashPermission(rules, "https://github.com/owner/repo/releases/tag/v1.0.0")).toBe("allow");
+    expect(bashPermission(rules, "https://github.com/owner/repo/commit/abc123")).toBe("allow");
+    expect(bashPermission(rules, "https://github.com/owner/repo/raw/main/file.ts")).toBe("allow");
+    expect(bashPermission(rules, "https://cdn.jsdelivr.net/npm/package/file.js")).toBe("allow");
+  });
+
   test("allows Read of baked review-skills after star deny (last-match)", () => {
     const rules = config.permission.external_directory;
     expect(rules).toEqual({ "*": "deny", "/app/review-skills/**": "allow" });
@@ -143,10 +168,18 @@ describe("worker image JDK", () => {
 
   test("copies pinned Temurin 21 into the worker target only", () => {
     expect(dockerfile).toContain("ARG TEMURIN_TAG=21.0.12_8-jdk");
-    expect(dockerfile).toMatch(/FROM eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
+    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
     expect(workerStage).toContain("COPY --from=jdk /opt/java/openjdk /opt/java/openjdk");
     expect(workerStage).toContain("JAVA_HOME=/opt/java/openjdk");
     expect(beforeWorker).not.toContain("COPY --from=jdk");
     expect(beforeWorker).not.toContain("JAVA_HOME=");
+  });
+
+  test("does not pull debian, bun, or temurin via Docker Hub short names", () => {
+    expect(dockerfile).not.toMatch(/^FROM debian:/m);
+    expect(dockerfile).not.toMatch(/^FROM oven\/bun:/m);
+    expect(dockerfile).not.toMatch(/^FROM eclipse-temurin:/m);
+    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim AS tools/);
+    expect(dockerfile).toMatch(/bun-v\$\{BUN_VERSION\}\/bun-\$\{bun_platform\}\.zip/);
   });
 });
