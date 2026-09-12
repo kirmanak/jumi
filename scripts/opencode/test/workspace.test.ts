@@ -5,7 +5,10 @@ import { join } from "node:path";
 import {
   checkoutPullRequestWorkspace,
   createReviewWorkspace,
+  GITHUB_GIT_USERNAME,
   type GitRunner,
+  redactGitSecrets,
+  validateCloneUrl,
   workerOpenCodeChildEnv,
 } from "../src/workspace.ts";
 import { makeBranch, makeJob, makePR, makeRepo } from "./fixtures.ts";
@@ -40,6 +43,35 @@ function gitConfigValues(args: string[], key: string): string[] {
   }
   return values;
 }
+
+describe("clone URL origin allowlist", () => {
+  test("accepts github.com when forge URL is github.com and rejects a Gitea clone URL", () => {
+    expect(validateCloneUrl("https://github.com/kirmanak/jumi.git", "https://github.com")).toBe(
+      "https://github.com/kirmanak/jumi.git"
+    );
+    expect(() => validateCloneUrl("https://gitea.kirmanak.stream/kirmanak/jumi.git", "https://github.com")).toThrow(
+      "Clone URL origin does not match configured forge URL"
+    );
+  });
+
+  test("accepts Gitea when forge URL is Gitea and rejects github.com", () => {
+    expect(validateCloneUrl("https://gitea.kirmanak.stream/kirmanak/jumi.git", "https://gitea.kirmanak.stream")).toBe(
+      "https://gitea.kirmanak.stream/kirmanak/jumi.git"
+    );
+    expect(() => validateCloneUrl("https://github.com/kirmanak/jumi.git", "https://gitea.kirmanak.stream")).toThrow(
+      "Clone URL origin does not match configured forge URL"
+    );
+  });
+});
+
+describe("redactGitSecrets", () => {
+  test("redacts URL passwords and explicit tokens", () => {
+    expect(redactGitSecrets("https://x-access-token:ghs_secret@github.com/kirmanak/jumi.git", ["ghs_secret"])).toBe(
+      "https://x-access-token:***@github.com/kirmanak/jumi.git"
+    );
+    expect(redactGitSecrets("token=ghs_secret in stderr", ["ghs_secret"])).toBe("token=*** in stderr");
+  });
+});
 
 describe("review workspace", () => {
   test("creates a unique empty workspace under the configured root", async () => {
@@ -146,6 +178,60 @@ describe("review workspace", () => {
     expect(calls.map(stripGitConfigArgs)).toContainEqual(["checkout", "--force", "-B", "jumi/pr-48", "a".repeat(40)]);
     expect(stripGitConfigArgs(calls.at(-2) ?? [])).toEqual(["rev-parse", "HEAD"]);
     expect(stripGitConfigArgs(calls.at(-1) ?? [])).toEqual(["rev-parse", "jumi/target"]);
+  });
+
+  test("clones GitHub with x-access-token URL and does not log the token", async () => {
+    const repo = makeRepo({
+      full_name: "kirmanak/jumi",
+      clone_url: "https://github.com/kirmanak/jumi.git",
+    });
+    const pr = makePR({
+      number: 48,
+      head: makeBranch({ ref: "feature/release", sha: "a".repeat(40), repo }),
+      base: makeBranch({ ref: "main", sha: "b".repeat(40), repo }),
+    });
+    const logs: string[] = [];
+    const calls: Array<{ args: string[]; env: Record<string, string | undefined> }> = [];
+    const gitRunner: GitRunner = async (args, opts) => {
+      const gitArgs = stripGitConfigArgs(args);
+      calls.push({ args, env: opts.env });
+      if (gitArgs[0] === "rev-parse" && gitArgs[1] === "HEAD") return "a".repeat(40);
+      if (gitArgs[0] === "rev-parse" && gitArgs[1] === "jumi/target") return "b".repeat(40);
+      return "";
+    };
+
+    await checkoutPullRequestWorkspace({
+      workdir: "/work/review-48",
+      repo,
+      pr,
+      giteaUrl: "https://github.com",
+      username: GITHUB_GIT_USERNAME,
+      token: "ghs_install",
+      embedTokenInUrl: true,
+      authorName: "kirmanak-jumi[bot]",
+      authorEmail: "123+kirmanak-jumi[bot]@users.noreply.github.com",
+      gitRunner,
+      logger: (message) => logs.push(message),
+    });
+
+    expect(stripGitConfigArgs(calls[0].args)).toEqual([
+      "clone",
+      "https://x-access-token:ghs_install@github.com/kirmanak/jumi.git",
+      "/work/review-48",
+    ]);
+    expect(stripGitConfigArgs(calls[1].args)).toEqual([
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/kirmanak/jumi.git",
+    ]);
+    expect(calls[0].env.GIT_AUTH_USERNAME).toBe("x-access-token");
+    expect(calls[0].env.GIT_AUTH_TOKEN).toBe("ghs_install");
+    expect(calls[0].env.GIT_AUTHOR_NAME).toBe("kirmanak-jumi[bot]");
+    expect(calls[0].env.GIT_AUTHOR_EMAIL).toBe("123+kirmanak-jumi[bot]@users.noreply.github.com");
+    expect(calls[0].env.GIT_COMMITTER_NAME).toBe("kirmanak-jumi[bot]");
+    expect(calls[0].env.GIT_COMMITTER_EMAIL).toBe("123+kirmanak-jumi[bot]@users.noreply.github.com");
+    expect(logs.join("\n")).not.toContain("ghs_install");
   });
 });
 

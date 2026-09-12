@@ -19,6 +19,7 @@ import { ReviewQueue } from "./queue.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
+import { gitAuthResolverFor } from "./workspace.ts";
 
 export { issueJobKey };
 
@@ -56,6 +57,7 @@ export function createIssueQueue(
           job,
           giteaUrl: config.giteaUrl,
           giteaToken: config.giteaToken,
+          gitAuthResolver: gitAuthResolverFor(config, api),
           ...pickupPolicyForForge(config.forge, config.botUsername),
           followupIgnoreLogins: config.followupIgnoreLogins,
           model: config.model,
@@ -306,6 +308,7 @@ export async function processWorkerTick(
       job,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
+      gitAuthResolver: gitAuthResolverFor(config, api),
       ...pickupPolicyForForge(config.forge, config.botUsername),
       followupIgnoreLogins: config.followupIgnoreLogins,
       model: config.model,

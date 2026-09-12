@@ -24,7 +24,16 @@ import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_re
 import type { Pull } from "./ports.ts";
 import { appendStuckFingerprint, evaluateStuck, fingerprintError, readStuckState, stuckComment } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitRunner, gitConfigArgs, gitEnv, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
+import {
+  type GitAuth,
+  type GitRunner,
+  gitConfigArgs,
+  gitEnv,
+  gitRemoteUrl,
+  resolveGitAuth,
+  validateCloneUrl,
+  workerOpenCodeChildEnv,
+} from "./workspace.ts";
 
 export { CONFLICT_PROMPT } from "./git.ts";
 
@@ -303,10 +312,10 @@ async function commitMerge(
 ): Promise<void> {
   const commitEnv = {
     ...env,
-    GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
-    GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
-    GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
-    GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
+    GIT_AUTHOR_NAME: env.GIT_AUTHOR_NAME ?? FORGE_COMMITTER_NAME,
+    GIT_AUTHOR_EMAIL: env.GIT_AUTHOR_EMAIL ?? FORGE_COMMITTER_EMAIL,
+    GIT_COMMITTER_NAME: env.GIT_COMMITTER_NAME ?? FORGE_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL: env.GIT_COMMITTER_EMAIL ?? FORGE_COMMITTER_EMAIL,
   };
   await git(["commit", "-m", `Merge ${defaultBranch} into ${headRef}`], { cwd: worktree, env: commitEnv });
 }
@@ -524,7 +533,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   }
 
   const configArgs = gitConfigArgs();
-  const env = gitEnv({ giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken });
+  let auth: GitAuth = { giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken };
+  let env = gitEnv(auth);
+  const refreshGitAuth = async () => {
+    auth = await resolveGitAuth(opts);
+    env = gitEnv(auth);
+  };
   const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
     git([...configArgs, ...args], runOpts);
   const detachWorktree = async () => {
@@ -585,6 +599,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
   try {
     throwIfAborted(opts.abortSignal);
+    await refreshGitAuth();
     const cloneUrl = validateCloneUrl(opts.job.cloneUrl, opts.giteaUrl);
     await mkdir(dirname(barePath), { recursive: true });
     if (await pathExists(barePath)) {
@@ -592,7 +607,13 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       await runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], { cwd: barePath, env });
     } else {
       log(`Cloning ${owner}/${repo} into bare cache`);
-      await runConfiguredGit(["clone", "--bare", cloneUrl, barePath], { cwd: dirname(barePath), env });
+      await runConfiguredGit(["clone", "--bare", gitRemoteUrl(cloneUrl, auth), barePath], {
+        cwd: dirname(barePath),
+        env,
+      });
+      if (auth.embedTokenInUrl) {
+        await runConfiguredGit(["remote", "set-url", "origin", cloneUrl], { cwd: barePath, env });
+      }
       await runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], { cwd: barePath, env });
     }
     throwIfAborted(opts.abortSignal);
@@ -678,14 +699,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       model: opts.model,
       home: opts.home,
       sanitizeOpenCodeEnv: sanitizeEnv,
-      extraEnv: workerOpenCodeChildEnv(
-        {
-          giteaUrl: opts.giteaUrl,
-          username: opts.botUsername,
-          token: opts.giteaToken,
-        },
-        worktree
-      ),
+      extraEnv: workerOpenCodeChildEnv(auth, worktree),
       maxOutputBytes: opts.maxOutputBytes,
       timeoutMs,
       openCodeRunner: engine,
@@ -748,14 +762,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             workdir: worktree,
             home: opts.home,
             sanitizeEnv,
-            extraEnv: workerOpenCodeChildEnv(
-              {
-                giteaUrl: opts.giteaUrl,
-                username: opts.botUsername,
-                token: opts.giteaToken,
-              },
-              worktree
-            ),
+            extraEnv: workerOpenCodeChildEnv(auth, worktree),
             timeoutMs,
             maxOutputBytes: opts.maxOutputBytes,
             reviewLabel: `${owner}/${repo}#${issueNumber}`,
@@ -802,10 +809,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       if (porcelain) {
         const commitEnv = {
           ...env,
-          GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
-          GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
-          GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
-          GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
+          GIT_AUTHOR_NAME: env.GIT_AUTHOR_NAME ?? FORGE_COMMITTER_NAME,
+          GIT_AUTHOR_EMAIL: env.GIT_AUTHOR_EMAIL ?? FORGE_COMMITTER_EMAIL,
+          GIT_COMMITTER_NAME: env.GIT_COMMITTER_NAME ?? FORGE_COMMITTER_NAME,
+          GIT_COMMITTER_EMAIL: env.GIT_COMMITTER_EMAIL ?? FORGE_COMMITTER_EMAIL,
         };
         await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
         await runConfiguredGit(["commit", "-m", `Implement #${issueNumber}: ${gate.snapshot.title}`], {
@@ -816,6 +823,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     }
 
     try {
+      await refreshGitAuth();
       await runConfiguredGit(["push", "-u", "origin", branch], { cwd: worktree, env });
     } catch (err) {
       await runConfiguredGit(["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], {

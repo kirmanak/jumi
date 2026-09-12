@@ -102,7 +102,7 @@ printf 'ARGS=%s\n' "$*"
     process.env.GITEA_BOT_TOKEN = "secret-token";
     await withFakeOpenCode(
       `#!/bin/sh
-printf 'JAVA_HOME=%s TMPOPT=%s GRADLE_HOME=%s DAEMON=%s SECRET=%s\\n' "$JAVA_HOME" "$JAVA_TOOL_OPTIONS" "$GRADLE_USER_HOME" "$GRADLE_OPTS" "$GITEA_BOT_TOKEN"
+printf 'JAVA_HOME=%s TMPOPT=%s GRADLE_HOME=%s DAEMON=%s SECRET=%s PEM=%s\\n' "$JAVA_HOME" "$JAVA_TOOL_OPTIONS" "$GRADLE_USER_HOME" "$GRADLE_OPTS" "$GITEA_BOT_TOKEN" "$GITHUB_APP_PRIVATE_KEY"
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -116,6 +116,7 @@ printf 'JAVA_HOME=%s TMPOPT=%s GRADLE_HOME=%s DAEMON=%s SECRET=%s\\n' "$JAVA_HOM
             GRADLE_USER_HOME: "/work/.gradle",
             GRADLE_OPTS: "-Dorg.gradle.daemon=false",
             GITEA_BOT_TOKEN: "should-not-pass",
+            GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\\nMII\\n-----END PRIVATE KEY-----",
           },
         });
         expect(result.status).toBe("ok");
@@ -124,6 +125,8 @@ printf 'JAVA_HOME=%s TMPOPT=%s GRADLE_HOME=%s DAEMON=%s SECRET=%s\\n' "$JAVA_HOM
         expect(result.stdout).toContain("GRADLE_HOME=/work/.gradle");
         expect(result.stdout).toContain("DAEMON=-Dorg.gradle.daemon=false");
         expect(result.stdout).toContain("SECRET=");
+        expect(result.stdout).toContain("PEM=");
+        expect(result.stdout).not.toContain("BEGIN PRIVATE KEY");
       }
     );
   });

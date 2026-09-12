@@ -33,7 +33,7 @@ import {
 } from "./webhook.ts";
 import { cancelLedgerWorkerJobs, type HandleWorkerWebhookDeps, handleWorkerWebhookEvent } from "./worker_webhook.ts";
 import type { GitRunner } from "./workspace.ts";
-import { createReviewWorkspace, removeReviewWorkspace } from "./workspace.ts";
+import { createReviewWorkspace, gitAuthResolverFor, removeReviewWorkspace } from "./workspace.ts";
 
 function log(message: string) {
   console.log(`[server] ${message}`);
@@ -97,6 +97,7 @@ export async function runReviewJob(
       workspace,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
+      gitAuthResolver: gitAuthResolverFor(config, api),
       botUsername: config.botUsername,
       home: config.home,
       sanitizeOpenCodeEnv: true,

@@ -4,11 +4,26 @@ import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import type { Pull, Repo } from "./ports.ts";
 import type { ReviewJob } from "./types.ts";
 
-interface GitAuth {
+export { GITHUB_GIT_USERNAME } from "./github_auth.ts";
+
+export interface GitAuth {
   giteaUrl: string;
   username: string;
   token: string;
+  embedTokenInUrl?: boolean;
+  authorName?: string;
+  authorEmail?: string;
 }
+
+export type GitAuthResolver = () => Promise<GitAuth>;
+
+export type GitCredentials = {
+  username: string;
+  token: string;
+  embedTokenInUrl?: boolean;
+  authorName: string;
+  authorEmail: string;
+};
 
 export type GitRunner = (
   args: string[],
@@ -22,6 +37,9 @@ export interface CheckoutPullRequestWorkspaceOptions {
   giteaUrl: string;
   username: string;
   token: string;
+  embedTokenInUrl?: boolean;
+  authorName?: string;
+  authorEmail?: string;
   gitRunner?: GitRunner;
   logger?: (message: string) => void;
 }
@@ -61,18 +79,78 @@ function normalizeGiteaUrl(value: string): string {
   return url.toString();
 }
 
-export function validateCloneUrl(value: string, giteaUrl: string): string {
+export function validateCloneUrl(value: string, forgeUrl: string): string {
   const clone = new URL(value);
-  const gitea = new URL(normalizeGiteaUrl(giteaUrl));
+  const forge = new URL(normalizeGiteaUrl(forgeUrl));
   if (clone.protocol !== "https:" && clone.protocol !== "http:")
     throw new Error(`Unsupported clone URL protocol: ${clone.protocol}`);
   if (clone.username || clone.password || clone.search || clone.hash)
     throw new Error("Clone URL must not include credentials, query, or fragment");
-  if (clone.origin !== gitea.origin) throw new Error("Clone URL origin does not match configured Gitea URL");
-  if (gitea.pathname !== "/" && !clone.pathname.startsWith(gitea.pathname)) {
-    throw new Error("Clone URL path is outside configured Gitea URL");
+  if (clone.origin !== forge.origin) throw new Error("Clone URL origin does not match configured forge URL");
+  if (forge.pathname !== "/" && !clone.pathname.startsWith(forge.pathname)) {
+    throw new Error("Clone URL path is outside configured forge URL");
   }
   return clone.toString();
+}
+
+export function authenticatedCloneUrl(cloneUrl: string, username: string, token: string): string {
+  const url = new URL(cloneUrl);
+  url.username = username;
+  url.password = token;
+  return url.toString();
+}
+
+export function gitRemoteUrl(cloneUrl: string, auth: GitAuth): string {
+  if (!auth.embedTokenInUrl) return cloneUrl;
+  return authenticatedCloneUrl(cloneUrl, auth.username, auth.token);
+}
+
+export function redactGitSecrets(text: string, secrets: readonly (string | undefined)[] = []): string {
+  let out = text.replace(/(:\/\/[^/@\s]+:)[^/@\s]+@/g, "$1***@");
+  for (const secret of secrets) {
+    if (secret) out = out.split(secret).join("***");
+  }
+  return out;
+}
+
+export async function resolveGitAuth(opts: {
+  giteaUrl: string;
+  giteaToken: string;
+  botUsername: string;
+  gitAuthResolver?: GitAuthResolver;
+}): Promise<GitAuth> {
+  if (opts.gitAuthResolver) return opts.gitAuthResolver();
+  return { giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken };
+}
+
+function hasGitCredentials(value: unknown): value is { resolveGitCredentials: () => Promise<GitCredentials> } {
+  return (
+    typeof value === "object" &&
+    value != null &&
+    "resolveGitCredentials" in value &&
+    typeof (value as { resolveGitCredentials?: unknown }).resolveGitCredentials === "function"
+  );
+}
+
+export function gitAuthResolverFor(
+  config: { giteaUrl: string; giteaToken: string; botUsername: string },
+  api?: unknown
+): GitAuthResolver {
+  return async () => {
+    if (hasGitCredentials(api)) {
+      const creds = await api.resolveGitCredentials();
+      return { giteaUrl: config.giteaUrl, ...creds };
+    }
+    return { giteaUrl: config.giteaUrl, username: config.botUsername, token: config.giteaToken };
+  };
+}
+
+function gitAuthorName(auth: GitAuth): string {
+  return auth.authorName ?? FORGE_COMMITTER_NAME;
+}
+
+function gitAuthorEmail(auth: GitAuth): string {
+  return auth.authorEmail ?? FORGE_COMMITTER_EMAIL;
 }
 
 function gitCredentialHelper(): string {
@@ -124,10 +202,10 @@ export function gitOpenCodeChildEnv(auth: GitAuth): Record<string, string> {
     GIT_AUTH_HOST: env.GIT_AUTH_HOST ?? "",
     GIT_AUTH_USERNAME: env.GIT_AUTH_USERNAME ?? "",
     GIT_AUTH_TOKEN: env.GIT_AUTH_TOKEN ?? "",
-    GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
-    GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
-    GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
-    GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
+    GIT_AUTHOR_NAME: gitAuthorName(auth),
+    GIT_AUTHOR_EMAIL: gitAuthorEmail(auth),
+    GIT_COMMITTER_NAME: gitAuthorName(auth),
+    GIT_COMMITTER_EMAIL: gitAuthorEmail(auth),
     GIT_CONFIG_COUNT: "3",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: "",
@@ -165,10 +243,10 @@ export function gitEnv(auth: GitAuth): Record<string, string | undefined> {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_LFS_SKIP_SMUDGE: "1",
-    GIT_AUTHOR_NAME: FORGE_COMMITTER_NAME,
-    GIT_AUTHOR_EMAIL: FORGE_COMMITTER_EMAIL,
-    GIT_COMMITTER_NAME: FORGE_COMMITTER_NAME,
-    GIT_COMMITTER_EMAIL: FORGE_COMMITTER_EMAIL,
+    GIT_AUTHOR_NAME: gitAuthorName(auth),
+    GIT_AUTHOR_EMAIL: gitAuthorEmail(auth),
+    GIT_COMMITTER_NAME: gitAuthorName(auth),
+    GIT_COMMITTER_EMAIL: gitAuthorEmail(auth),
     GIT_AUTH_HOST: gitea.host,
     GIT_AUTH_USERNAME: auth.username,
     GIT_AUTH_TOKEN: auth.token,
@@ -188,8 +266,10 @@ export async function runGit(
 
   const [stdout, stderr, exitCode] = await Promise.all([readStream(proc.stdout), readStream(proc.stderr), proc.exited]);
   if (exitCode !== 0) {
-    const details = [stdout, stderr].filter(Boolean).join("\n");
-    throw new Error(`git ${args.join(" ")} failed with exit code ${exitCode}${details ? `:\n${details}` : ""}`);
+    const secrets = [opts.env.GIT_AUTH_TOKEN];
+    const details = redactGitSecrets([stdout, stderr].filter(Boolean).join("\n"), secrets);
+    const command = redactGitSecrets(args.join(" "), secrets);
+    throw new Error(`git ${command} failed with exit code ${exitCode}${details ? `:\n${details}` : ""}`);
   }
   return stdout;
 }
@@ -209,7 +289,15 @@ export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWork
   const configArgs = gitConfigArgs();
   const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
     git([...configArgs, ...args], runOpts);
-  const env = gitEnv({ giteaUrl: opts.giteaUrl, username: opts.username, token: opts.token });
+  const auth: GitAuth = {
+    giteaUrl: opts.giteaUrl,
+    username: opts.username,
+    token: opts.token,
+    embedTokenInUrl: opts.embedTokenInUrl,
+    authorName: opts.authorName,
+    authorEmail: opts.authorEmail,
+  };
+  const env = gitEnv(auth);
   const headSha = assertSha(opts.pr.head.sha, "PR head");
   const baseSha = assertSha(opts.pr.base.sha, "PR target");
   const prRef = `refs/pull/${opts.pr.number}/head`;
@@ -218,7 +306,13 @@ export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWork
   const baseCloneUrl = validateCloneUrl(opts.repo.clone_url, opts.giteaUrl);
 
   opts.logger?.(`Cloning ${opts.repo.full_name} into review workspace`);
-  await runConfiguredGit(["clone", baseCloneUrl, opts.workdir], { cwd: dirname(opts.workdir), env });
+  await runConfiguredGit(["clone", gitRemoteUrl(baseCloneUrl, auth), opts.workdir], {
+    cwd: dirname(opts.workdir),
+    env,
+  });
+  if (auth.embedTokenInUrl) {
+    await runConfiguredGit(["remote", "set-url", "origin", baseCloneUrl], { cwd: opts.workdir, env });
+  }
 
   opts.logger?.(`Fetching target branch ${opts.pr.base.ref}`);
   await runConfiguredGit(
@@ -237,7 +331,13 @@ export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWork
     if (!opts.pr.head.repo?.clone_url) throw err;
     const headCloneUrl = validateCloneUrl(opts.pr.head.repo.clone_url, opts.giteaUrl);
     opts.logger?.(`Fetching PR head branch ${opts.pr.head.ref} from source repository`);
-    await runConfiguredGit(["remote", "add", "pr-head", headCloneUrl], { cwd: opts.workdir, env });
+    await runConfiguredGit(["remote", "add", "pr-head", gitRemoteUrl(headCloneUrl, auth)], {
+      cwd: opts.workdir,
+      env,
+    });
+    if (auth.embedTokenInUrl) {
+      await runConfiguredGit(["remote", "set-url", "pr-head", headCloneUrl], { cwd: opts.workdir, env });
+    }
     await runConfiguredGit(
       ["fetch", "pr-head", `+refs/heads/${opts.pr.head.ref}:refs/remotes/pr-head/${opts.pr.head.ref}`],
       {

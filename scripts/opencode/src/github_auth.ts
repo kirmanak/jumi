@@ -3,6 +3,7 @@ import { createPrivateKey, type KeyObject, sign } from "node:crypto";
 const JWT_IAT_SKEW_SEC = 60;
 const JWT_LIFETIME_SEC = 10 * 60;
 export const GITHUB_API_URL = "https://api.github.com";
+export const GITHUB_GIT_USERNAME = "x-access-token";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 

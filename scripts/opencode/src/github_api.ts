@@ -1,4 +1,4 @@
-import { GITHUB_API_URL } from "./github_auth.ts";
+import { GITHUB_API_URL, GITHUB_GIT_USERNAME } from "./github_auth.ts";
 import type {
   ActionJob,
   Check,
@@ -16,7 +16,18 @@ import type {
   Task,
 } from "./ports.ts";
 
-export type GithubAuth = { getInstallationToken(): Promise<string> };
+export type GithubAuth = {
+  getInstallationToken(): Promise<string>;
+  refreshInstallationToken?(): Promise<string>;
+};
+
+export type GithubGitCredentials = {
+  username: string;
+  token: string;
+  embedTokenInUrl: true;
+  authorName: string;
+  authorEmail: string;
+};
 
 export type GithubAPIOptions = {
   token?: string;
@@ -423,6 +434,7 @@ export class GithubAPI {
   private readonly auth: GithubAuth | undefined;
   private readonly base: string;
   private viewerLogin: string | undefined;
+  private viewerDatabaseId: number | undefined;
 
   constructor(opts: GithubAPIOptions) {
     const token = opts.token?.trim();
@@ -432,9 +444,16 @@ export class GithubAPI {
     this.base = (opts.apiUrl ?? GITHUB_API_URL).replace(/\/+$/, "");
   }
 
-  private async accessToken(): Promise<string> {
-    if (this.auth) return this.auth.getInstallationToken();
+  async gitAccessToken(opts?: { refresh?: boolean }): Promise<string> {
+    if (this.auth) {
+      if (opts?.refresh && this.auth.refreshInstallationToken) return this.auth.refreshInstallationToken();
+      return this.auth.getInstallationToken();
+    }
     return this.staticToken as string;
+  }
+
+  private async accessToken(): Promise<string> {
+    return this.gitAccessToken();
   }
 
   private async headers(): Promise<Record<string, string>> {
@@ -538,12 +557,44 @@ export class GithubAPI {
     return payload.data;
   }
 
+  private async loadViewer(): Promise<{ login?: string; databaseId?: number }> {
+    if (this.viewerLogin && this.viewerDatabaseId != null) {
+      return { login: this.viewerLogin, databaseId: this.viewerDatabaseId };
+    }
+    const data = await this.graphql<{ viewer?: { login?: string; databaseId?: number } }>(
+      "query { viewer { login databaseId } }"
+    );
+    const login = data.viewer?.login;
+    const databaseId = data.viewer?.databaseId;
+    if (login) this.viewerLogin = login;
+    if (typeof databaseId === "number") this.viewerDatabaseId = databaseId;
+    return { login: this.viewerLogin, databaseId: this.viewerDatabaseId };
+  }
+
   private async getViewerLogin(): Promise<string | undefined> {
     if (this.viewerLogin) return this.viewerLogin;
-    const data = await this.graphql<{ viewer?: { login?: string } }>("query { viewer { login } }");
-    const login = data.viewer?.login;
-    if (login) this.viewerLogin = login;
-    return login;
+    return (await this.loadViewer()).login;
+  }
+
+  async gitIdentity(): Promise<{ name: string; email: string }> {
+    const viewer = await this.loadViewer();
+    if (!viewer.login || viewer.databaseId == null) throw new Error("GitHub viewer identity is missing");
+    return {
+      name: viewer.login,
+      email: `${viewer.databaseId}+${viewer.login}@users.noreply.github.com`,
+    };
+  }
+
+  async resolveGitCredentials(): Promise<GithubGitCredentials> {
+    const token = await this.gitAccessToken({ refresh: true });
+    const identity = await this.gitIdentity();
+    return {
+      username: GITHUB_GIT_USERNAME,
+      token,
+      embedTokenInUrl: true,
+      authorName: identity.name,
+      authorEmail: identity.email,
+    };
   }
 
   async getRepo(owner: string, repo: string): Promise<Repo> {

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, SECRET_ENV_KEYS, SECRETS_FILE_ENV, scrubSecretEnv } from "../src/config.ts";
+import { validateCloneUrl } from "../src/workspace.ts";
 
 describe("loadConfig", () => {
   const required = {
@@ -18,6 +19,12 @@ describe("loadConfig", () => {
 
     expect(config.forge).toBe("gitea");
     expect(config.giteaUrl).toBe("https://gitea.kirmanak.stream");
+    expect(validateCloneUrl("https://gitea.kirmanak.stream/kirmanak/jumi.git", config.giteaUrl)).toBe(
+      "https://gitea.kirmanak.stream/kirmanak/jumi.git"
+    );
+    expect(() => validateCloneUrl("https://github.com/kirmanak/jumi.git", config.giteaUrl)).toThrow(
+      "Clone URL origin does not match configured forge URL"
+    );
     expect(config.allowedOrgs).toEqual(["kirmanak"]);
     expect(config.allowedRepos).toEqual([]);
     expect(config.botUsername).toBe("jumi");
@@ -262,6 +269,12 @@ describe("loadConfig", () => {
     expect(config.githubAppId).toBe("123");
     expect(config.githubAppPrivateKey).toBe(githubPem);
     expect(config.githubAppInstallationId).toBe("456");
+    expect(validateCloneUrl("https://github.com/kirmanak/jumi.git", config.giteaUrl)).toBe(
+      "https://github.com/kirmanak/jumi.git"
+    );
+    expect(() => validateCloneUrl("https://gitea.kirmanak.stream/kirmanak/jumi.git", config.giteaUrl)).toThrow(
+      "Clone URL origin does not match configured forge URL"
+    );
   });
 
   test("FORGE=github optional GITHUB_ALLOWED_REPOS and escaped PEM", () => {

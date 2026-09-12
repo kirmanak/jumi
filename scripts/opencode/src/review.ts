@@ -39,7 +39,13 @@ import {
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
 import { findingFingerprint, parseReviewFindings, parseReviewOutput, stripFindingLines } from "./verdict.ts";
-import { checkoutPullRequestWorkspace, type GitRunner, runGit } from "./workspace.ts";
+import {
+  checkoutPullRequestWorkspace,
+  type GitAuthResolver,
+  type GitRunner,
+  resolveGitAuth,
+  runGit,
+} from "./workspace.ts";
 
 async function logParentDiag(
   log: (message: string) => void,
@@ -66,6 +72,9 @@ export type WorkspacePreparer = (opts: {
   giteaUrl: string;
   username: string;
   token: string;
+  embedTokenInUrl?: boolean;
+  authorName?: string;
+  authorEmail?: string;
   logger?: (message: string) => void;
 }) => Promise<void>;
 
@@ -80,6 +89,7 @@ export interface ReviewOptions {
   giteaUrl: string;
   giteaToken: string;
   botUsername: string;
+  gitAuthResolver?: GitAuthResolver;
   home?: string;
   sanitizeOpenCodeEnv?: boolean;
   timeoutMs?: number;
@@ -940,13 +950,17 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     });
 
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
+    const gitAuth = await resolveGitAuth(opts);
     await prepareWorkspace({
       workdir: opts.workspace,
       repo: repoInfo,
       pr,
       giteaUrl: opts.giteaUrl,
-      username: opts.botUsername,
-      token: opts.giteaToken,
+      username: gitAuth.username,
+      token: gitAuth.token,
+      embedTokenInUrl: gitAuth.embedTokenInUrl,
+      authorName: gitAuth.authorName,
+      authorEmail: gitAuth.authorEmail,
       logger: log,
     });
 

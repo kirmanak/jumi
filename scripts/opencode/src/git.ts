@@ -154,7 +154,7 @@ function buildEnv(
   overlayReviewWebfetch(env, opts, configPath);
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
-      if (key.startsWith("GITEA_")) continue;
+      if (key.startsWith("GITEA_") || key.startsWith("GITHUB_APP_") || key === "GITHUB_WEBHOOK_SECRET") continue;
       env[key] = value;
     }
   }

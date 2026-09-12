@@ -817,4 +817,50 @@ describe("GithubAPI", () => {
     expect(repo.full_name).toBe("owner/repo");
     expect(urls[0]).toBe(`${GITHUB_API_URL}/repos/owner/repo`);
   });
+
+  test("gitIdentity uses viewer login and databaseId for the noreply email", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes("/graphql")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string };
+        expect(body.query).toContain("databaseId");
+        return Response.json({ data: { viewer: { login: "kirmanak-jumi[bot]", databaseId: 198765 } } });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    const identity = await api().gitIdentity();
+    expect(identity).toEqual({
+      name: "kirmanak-jumi[bot]",
+      email: "198765+kirmanak-jumi[bot]@users.noreply.github.com",
+    });
+  });
+
+  test("resolveGitCredentials refreshes the installation token and embeds x-access-token", async () => {
+    let refreshes = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/graphql")) {
+        return Response.json({ data: { viewer: { login: "kirmanak-jumi[bot]", databaseId: 42 } } });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    const client = new GithubAPI({
+      auth: {
+        getInstallationToken: async () => "ghs_cached",
+        refreshInstallationToken: async () => {
+          refreshes += 1;
+          return "ghs_fresh";
+        },
+      },
+    });
+    const creds = await client.resolveGitCredentials();
+    expect(refreshes).toBe(1);
+    expect(creds).toEqual({
+      username: "x-access-token",
+      token: "ghs_fresh",
+      embedTokenInUrl: true,
+      authorName: "kirmanak-jumi[bot]",
+      authorEmail: "42+kirmanak-jumi[bot]@users.noreply.github.com",
+    });
+  });
 });
