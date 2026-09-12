@@ -22,6 +22,8 @@ export interface EngineRunOptions {
   onPid?: (pid: number) => void | Promise<void>;
   logger?: (message: string) => void;
   trace?: TraceContext;
+  prompt?: string;
+  continueSession?: boolean;
 }
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";

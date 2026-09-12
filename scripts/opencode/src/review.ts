@@ -16,7 +16,7 @@ import type {
   ReviewApi,
   Task,
 } from "./ports.ts";
-import { buildPROpenedPrompt } from "./prompt.ts";
+import { buildIncompleteWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
 import {
   CONTRACT_PATH,
   contractEnvIssues,
@@ -35,6 +35,7 @@ import {
   reviewStuckStatePath,
   stuckComment,
   upsertStuckComment,
+  upsertStuckText,
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
 import { parseReviewFindings, parseReviewOutput } from "./verdict.ts";
@@ -94,6 +95,7 @@ export interface ReviewOptions {
   persistResult?: (result: PersistReviewResult) => Promise<void>;
   abortSignal?: AbortSignal;
   jobId?: string;
+  maxIncompleteRetries?: number;
 }
 
 export type PersistReviewResult =
@@ -383,6 +385,8 @@ const CHECK_CONTEXT = "jumi/opencode-review";
 const MAX_STATUS_DESCRIPTION_BYTES = 255;
 const REVIEW_ARTIFACT = "JUMI_REVIEW.md";
 const DEFAULT_MAX_OUTPUT_BYTES = 80_000;
+export const MAX_INCOMPLETE_RETRIES = 2;
+export const INCOMPLETE_REVIEW_STUCK = "stuck: incomplete review";
 
 function unquotePorcelainPath(path: string): string {
   let value = path;
@@ -402,12 +406,25 @@ function porcelainPaths(line: string): string[] {
   return parts.map(unquotePorcelainPath);
 }
 
+function isReviewEngineTempPath(path: string): boolean {
+  return path === ".jumi-tmp" || path.startsWith(".jumi-tmp/");
+}
+
 function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
   for (const line of porcelain.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT)) return false;
+    if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT && !isReviewEngineTempPath(path))) return false;
   }
   return true;
+}
+
+async function hasOpenCodeSession(workspace: string): Promise<boolean> {
+  try {
+    const info = await lstat(join(workspace, ".jumi-tmp", "opencode-session.db"));
+    return info.isFile();
+  } catch {
+    return false;
+  }
 }
 
 function porcelainIncludesReviewArtifact(porcelain: string): boolean {
@@ -624,6 +641,9 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   if (!opts.resultMarkdown) {
     const reason = opts.resultReason ?? "Incomplete review: no output";
     const result: ReviewResult = { status: "skipped", reason };
+    if (reason === "Incomplete review: no output") {
+      await upsertStuckText(opts.api, opts.owner, opts.repo, pr.number, opts.botUsername, INCOMPLETE_REVIEW_STUCK);
+    }
     const { state, description } = statusForResult(result);
     await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
     return result;
@@ -823,100 +843,132 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       taskTracked = false;
     }
 
-    await writeFile(join(opts.workspace, "JUMI_TASK.md"), prompt);
+    const restoreTaskFile = async () => {
+      if (taskTracked) {
+        await git(["checkout", "--", "JUMI_TASK.md"], { cwd: opts.workspace, env: gitCmdEnv });
+      } else {
+        await rm(join(opts.workspace, "JUMI_TASK.md"), { force: true }).catch(() => undefined);
+      }
+    };
 
-    log(`Running OpenCode for ${repoFullName}#${pr.number}`);
-    throwIfAborted(opts.abortSignal);
-    const engineResult = await engine({
-      model: opts.model,
-      workdir: opts.workspace,
-      home: opts.home,
-      sanitizeEnv: opts.sanitizeOpenCodeEnv,
-      timeoutMs: opts.timeoutMs,
-      maxOutputBytes: opts.maxOutputBytes,
-      reviewLabel,
-      logger: log,
-      abortSignal: opts.abortSignal,
-      trace: {
-        kind: "review",
-        owner: opts.owner,
-        repo: opts.repo,
-        sha: reviewedHeadSha,
-        jobId: opts.jobId,
-      },
-    });
-    throwIfEngineFailed(engineResult);
+    const runOpenCode = async (extra?: { prompt: string; continueSession: boolean }) => {
+      throwIfAborted(opts.abortSignal);
+      await writeFile(join(opts.workspace, "JUMI_TASK.md"), extra?.prompt ?? prompt);
+      log(`Running OpenCode for ${repoFullName}#${pr.number}`);
+      const engineResult = await engine({
+        model: opts.model,
+        workdir: opts.workspace,
+        home: opts.home,
+        sanitizeEnv: opts.sanitizeOpenCodeEnv,
+        timeoutMs: opts.timeoutMs,
+        maxOutputBytes: opts.maxOutputBytes,
+        reviewLabel,
+        logger: log,
+        abortSignal: opts.abortSignal,
+        ...(extra?.continueSession ? { continueSession: true } : {}),
+        trace: {
+          kind: "review",
+          owner: opts.owner,
+          repo: opts.repo,
+          sha: reviewedHeadSha,
+          jobId: opts.jobId,
+        },
+      });
+      throwIfEngineFailed(engineResult);
 
-    await logParentDiag(log, "post_opencode", {
-      review: reviewLabel,
-      output_bytes: byteLength(engineResult.stdout ?? ""),
-      output_bytes_h: formatBytes(byteLength(engineResult.stdout ?? "")),
-    });
+      await logParentDiag(log, "post_opencode", {
+        review: reviewLabel,
+        output_bytes: byteLength(engineResult.stdout ?? ""),
+        output_bytes_h: formatBytes(byteLength(engineResult.stdout ?? "")),
+      });
 
-    await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
-    if (taskTracked) {
-      await git(["checkout", "--", "JUMI_TASK.md"], { cwd: opts.workspace, env: gitCmdEnv });
-    } else {
-      await rm(join(opts.workspace, "JUMI_TASK.md"), { force: true }).catch(() => undefined);
-    }
+      await restoreTaskFile();
+      return engineResult;
+    };
+
+    let lastStdout = (await runOpenCode()).stdout;
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
-    const persistSkipAndStatus = async (reason: string, htmlUrl?: string): Promise<ReviewResult> => {
+    const persistSkipAndStatus = async (
+      reason: string,
+      htmlUrl?: string,
+      stuckText?: string
+    ): Promise<ReviewResult> => {
       const result: ReviewResult = { status: "skipped", reason };
       await persistOutcome({ kind: "skip", reason });
+      if (stuckText) {
+        await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckText);
+      }
       const { state, description } = statusForResult(result);
       await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, state, description, htmlUrl);
       return result;
     };
     try {
-      await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
-      const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
-      const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
-      if (currentSkipReason) return await persistSkipAndStatus(currentSkipReason, currentPR.html_url);
+      const extraCap = opts.maxIncompleteRetries ?? MAX_INCOMPLETE_RETRIES;
+      let extrasUsed = 0;
+      while (true) {
+        await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
+        const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+        const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
+        if (currentSkipReason) return await persistSkipAndStatus(currentSkipReason, currentPR.html_url);
 
-      const headAfter = (await git(["rev-parse", "HEAD"], { cwd: opts.workspace, env: gitCmdEnv })).trim();
-      if (headAfter !== reviewedHeadSha) {
-        return await persistSkipAndStatus("Incomplete review: HEAD moved", currentPR.html_url);
-      }
+        const headAfter = (await git(["rev-parse", "HEAD"], { cwd: opts.workspace, env: gitCmdEnv })).trim();
+        if (headAfter !== reviewedHeadSha) {
+          return await persistSkipAndStatus("Incomplete review: HEAD moved", currentPR.html_url);
+        }
 
-      const porcelain = await git(["status", "--porcelain"], { cwd: opts.workspace, env: gitCmdEnv });
-      if (!porcelainAllowsOnlyReviewArtifact(porcelain)) {
-        return await persistSkipAndStatus("Incomplete review: dirty tree", currentPR.html_url);
-      }
-      if (!porcelainIncludesReviewArtifact(porcelain)) {
-        return await persistSkipAndStatus("Incomplete review: no output", currentPR.html_url);
-      }
+        const porcelain = await git(["status", "--porcelain"], { cwd: opts.workspace, env: gitCmdEnv });
+        if (!porcelainAllowsOnlyReviewArtifact(porcelain)) {
+          return await persistSkipAndStatus("Incomplete review: dirty tree", currentPR.html_url);
+        }
 
-      const artifact = await readReviewArtifact(opts.workspace, opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
-      if (artifact.status === "too_large") {
-        return await persistSkipAndStatus("Incomplete review: output too large", currentPR.html_url);
-      }
-      if (artifact.status === "missing" || !artifact.content.trim()) {
-        return await persistSkipAndStatus("Incomplete review: no output", currentPR.html_url);
-      }
-
-      const markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
-      await persistOutcome({ kind: "markdown", markdown });
-      if (opts.home) {
-        const actionHash = fingerprintReviewArtifact(markdown);
-        if (actionHash) {
-          await appendStuckFingerprint(reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber), {
-            kind: "action",
-            hash: actionHash,
+        const noArtifact = !porcelainIncludesReviewArtifact(porcelain);
+        const artifact = noArtifact
+          ? ({ status: "missing" } as const)
+          : await readReviewArtifact(opts.workspace, opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+        if (artifact.status === "too_large") {
+          return await persistSkipAndStatus("Incomplete review: output too large", currentPR.html_url);
+        }
+        if (artifact.status !== "missing" && artifact.content.trim()) {
+          const markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
+          await persistOutcome({ kind: "markdown", markdown });
+          if (opts.home) {
+            const actionHash = fingerprintReviewArtifact(markdown);
+            if (actionHash) {
+              await appendStuckFingerprint(reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber), {
+                kind: "action",
+                hash: actionHash,
+              });
+            }
+          }
+          return await publishReviewResult({
+            api: opts.api,
+            owner: opts.owner,
+            repo: opts.repo,
+            prNumber: opts.prNumber,
+            expectedHeadSha: reviewedHeadSha,
+            botUsername: opts.botUsername,
+            resultMarkdown: markdown,
+            logger: log,
           });
         }
+
+        if (extrasUsed >= extraCap) {
+          return await persistSkipAndStatus(
+            "Incomplete review: no output",
+            currentPR.html_url,
+            INCOMPLETE_REVIEW_STUCK
+          );
+        }
+        extrasUsed++;
+        log(`Incomplete review: no output; write-only OpenCode retry (${extrasUsed}/${extraCap})`);
+        await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
+        const continueSession = await hasOpenCodeSession(opts.workspace);
+        const writePrompt = buildIncompleteWritePrompt(continueSession ? undefined : lastStdout);
+        lastStdout = (await runOpenCode({ prompt: writePrompt, continueSession })).stdout;
       }
-      return await publishReviewResult({
-        api: opts.api,
-        owner: opts.owner,
-        repo: opts.repo,
-        prNumber: opts.prNumber,
-        expectedHeadSha: reviewedHeadSha,
-        botUsername: opts.botUsername,
-        resultMarkdown: markdown,
-        logger: log,
-      });
     } finally {
       await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
+      await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
     }
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;

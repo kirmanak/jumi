@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ReviewApi } from "../src/review.ts";
+import { INCOMPLETE_REVIEW_STUCK, MAX_INCOMPLETE_RETRIES, type ReviewApi } from "../src/review.ts";
 import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
+import { stuckMarker } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
 
@@ -79,7 +80,7 @@ describe("processEngineTick", () => {
       await store.enqueue(makeJob());
       const api = makeApi();
       let ran = 0;
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
@@ -106,7 +107,7 @@ describe("processEngineTick", () => {
       await store.enqueue(makeJob());
       const api = makeApi();
       let ran = 0;
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async () => {
@@ -115,10 +116,12 @@ describe("processEngineTick", () => {
         },
       });
 
-      expect(ran).toBe(1);
+      expect(ran).toBe(1 + MAX_INCOMPLETE_RETRIES);
       const row = store.rows[0];
       expect(row?.state).toBe("skipped");
       expect(row?.resultReason).toBe("Incomplete review: no output");
+      expect(store.rows.some((entry) => entry.kind === "follow-up")).toBe(false);
+      expect(api.comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       expect(api.statuses.at(-1)).toMatchObject({ state: "failure", description: "Incomplete review: no output" });
 
       row!.state = "leased";
@@ -126,9 +129,12 @@ describe("processEngineTick", () => {
       row!.leasedUntil = 1;
       row!.publishedAt = null;
       api.statuses.length = 0;
+      api.comments.length = 0;
       await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
-      expect(ran).toBe(1);
+      expect(ran).toBe(1 + MAX_INCOMPLETE_RETRIES);
       expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows.some((entry) => entry.kind === "follow-up")).toBe(false);
+      expect(api.comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       expect(api.statuses.at(-1)).toMatchObject({ state: "failure", description: "Incomplete review: no output" });
     });
   });
@@ -276,7 +282,7 @@ describe("processEngineTick", () => {
 
       const api = makeApi();
       let ran = 0;
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-2", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
@@ -303,7 +309,7 @@ describe("processEngineTick", () => {
           return makeComment({ id: commentCalls, body });
         },
       });
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
@@ -328,7 +334,7 @@ describe("processEngineTick", () => {
         return originalSave(id, leasedBy, result);
       };
       const api = makeApi();
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
@@ -348,7 +354,7 @@ describe("processEngineTick", () => {
       expect(reclaimed.publish).toHaveLength(0);
 
       store.saveResult = originalSave;
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-2", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
@@ -372,7 +378,7 @@ describe("processEngineTick", () => {
         return originalSave(id, leasedBy, result);
       };
       const api = makeApi();
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async () => ({ status: "ok" }),
@@ -411,7 +417,7 @@ describe("processEngineTick", () => {
           throw new Error("gitea down");
         },
       });
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
@@ -471,20 +477,23 @@ describe("processEngineTick", () => {
       const gate = new Promise<void>((resolve) => {
         started = resolve;
       });
-      const reviewer = await startReviewer(makeConfig({ role: "engine", workdir: workspace, port: 0 }), {
-        store,
-        api: makeApi(),
-        signal: shutdown.signal,
-        ensureAuth: async () => undefined,
-        extras: {
-          gitRunner: frozenGit(),
-          workspacePreparer: async () => undefined,
-          openCodeRunner: async (opts) => {
-            started();
-            return hangUntilAbort(opts.abortSignal);
+      const reviewer = await startReviewer(
+        makeConfig({ role: "engine", workdir: workspace, home: workspace, port: 0 }),
+        {
+          store,
+          api: makeApi(),
+          signal: shutdown.signal,
+          ensureAuth: async () => undefined,
+          extras: {
+            gitRunner: frozenGit(),
+            workspacePreparer: async () => undefined,
+            openCodeRunner: async (opts) => {
+              started();
+              return hangUntilAbort(opts.abortSignal);
+            },
           },
-        },
-      });
+        }
+      );
       try {
         await gate;
         shutdown.abort();
@@ -513,7 +522,7 @@ describe("processEngineTick", () => {
       const gate = new Promise<void>((resolve) => {
         started = resolve;
       });
-      const tick = processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         abortSignal: abort.signal,
@@ -541,7 +550,7 @@ describe("processEngineTick", () => {
       const gate2 = new Promise<void>((resolve) => {
         started2 = resolve;
       });
-      const tick2 = processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-2", {
+      const tick2 = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         abortSignal: abort2.signal,
@@ -556,7 +565,7 @@ describe("processEngineTick", () => {
       expect(store.rows[0]?.state).toBe("queued");
       expect(store.rows[0]?.attempt).toBe(0);
 
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-3", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-3", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
@@ -586,7 +595,7 @@ describe("processEngineTick", () => {
         store.rows[0]!.leasedBy = "engine-other";
         return originalRelease(id, leasedBy);
       };
-      const tick = processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         abortSignal: abort.signal,

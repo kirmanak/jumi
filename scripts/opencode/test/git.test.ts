@@ -70,8 +70,28 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
         expect(result.stdout).toContain(`XDG_CONFIG=${workdir}/.jumi-tmp/xdg-config`);
         expect(result.stdout).toContain("SECRET=");
         expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
+        expect(result.stdout).not.toContain("--continue");
         expect(result.stdout).not.toContain("--print-logs");
         expect(result.stdout).not.toContain("\u001b[");
+      }
+    );
+  });
+
+  test("continues the last session when continueSession is set", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'ARGS=%s\n' "$*"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "write the artifact",
+          model: "openai/gpt-5.5",
+          workdir,
+          continueSession: true,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5 --continue`);
       }
     );
   });

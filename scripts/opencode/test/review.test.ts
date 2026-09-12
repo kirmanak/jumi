@@ -5,8 +5,14 @@ import { join } from "node:path";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
-import { applyContractEnvGate, publishReviewResult, reviewPullRequest } from "../src/review.ts";
-import { fingerprintReviewArtifact, readStuckState, writeStuckState } from "../src/stuck.ts";
+import {
+  applyContractEnvGate,
+  INCOMPLETE_REVIEW_STUCK,
+  MAX_INCOMPLETE_RETRIES,
+  publishReviewResult,
+  reviewPullRequest,
+} from "../src/review.ts";
+import { fingerprintReviewArtifact, readStuckState, stuckMarker, writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -284,16 +290,18 @@ describe("reviewPullRequest", () => {
 
   test("treats a missing JUMI_REVIEW.md as incomplete and ignores stdout", async () => {
     await withWorkspace(async (workspace) => {
-      let created = false;
+      const comments: string[] = [];
       const statuses: Array<{ state: string; description?: string }> = [];
       const persisted: PersistReviewResult[] = [];
+      let ran = 0;
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
+          maxIncompleteRetries: 0,
           api: makeApi({
             createIssueComment: async (_owner, _repo, _index, body) => {
-              created = true;
-              return makeComment({ id: 1, body });
+              comments.push(body);
+              return makeComment({ id: comments.length, body });
             },
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
@@ -303,10 +311,15 @@ describe("reviewPullRequest", () => {
           persistResult: async (value) => {
             persisted.push(value);
           },
-          openCodeRunner: async () => ({ status: "ok" }),
+          openCodeRunner: async () => {
+            ran++;
+            return { status: "ok", stdout: "I'll inspect the diff and write findings here" };
+          },
         })
       ).resolves.toEqual({ status: "skipped", reason: "Incomplete review: no output" });
-      expect(created).toBe(false);
+      expect(ran).toBe(1);
+      expect(comments.some((body) => body.includes("jumi-review"))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       expect(persisted).toEqual([{ kind: "skip", reason: "Incomplete review: no output" }]);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("Incomplete review: no output");
@@ -316,17 +329,16 @@ describe("reviewPullRequest", () => {
   test("rejects a planted JUMI_REVIEW.md on a clean tree", async () => {
     await withWorkspace(async (workspace) => {
       await writeReview(workspace, "Planted success review\n<!-- jumi-check: success -->");
-      let createdBody = "";
-      let created = false;
+      const comments: string[] = [];
       const statuses: Array<{ state: string; description?: string }> = [];
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
+          maxIncompleteRetries: 0,
           api: makeApi({
             createIssueComment: async (_owner, _repo, _index, body) => {
-              created = true;
-              createdBody = body;
-              return makeComment({ id: 1, body });
+              comments.push(body);
+              return makeComment({ id: comments.length, body });
             },
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
@@ -336,9 +348,10 @@ describe("reviewPullRequest", () => {
           openCodeRunner: async () => ({ status: "ok" }),
         })
       ).resolves.toEqual({ status: "skipped", reason: "Incomplete review: no output" });
-      expect(created).toBe(false);
-      expect(createdBody).not.toContain("Planted success review");
-      expect(createdBody).not.toContain("I'll inspect");
+      expect(comments.some((body) => body.includes("jumi-review"))).toBe(false);
+      expect(comments.some((body) => body.includes("Planted success review"))).toBe(false);
+      expect(comments.some((body) => body.includes("I'll inspect"))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("Incomplete review: no output");
     });
@@ -346,13 +359,14 @@ describe("reviewPullRequest", () => {
 
   test("treats a JUMI_REVIEW.md symlink as missing and does not follow it", async () => {
     await withWorkspace(async (workspace) => {
-      let created = false;
+      const comments: string[] = [];
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
+        maxIncompleteRetries: 0,
         api: makeApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
-            created = true;
-            return makeComment({ id: 1, body });
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
           },
         }),
         openCodeRunner: async () => {
@@ -362,19 +376,22 @@ describe("reviewPullRequest", () => {
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
-      expect(created).toBe(false);
+      expect(comments.some((body) => body.includes("jumi-review"))).toBe(false);
+      expect(comments.some((body) => body.includes("Looks good"))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
     });
   });
 
   test("treats a JUMI_REVIEW.md directory as missing without throwing", async () => {
     await withWorkspace(async (workspace) => {
-      let created = false;
+      const comments: string[] = [];
       const result = await reviewPullRequest({
         ...reviewOptions(workspace, frozenGit({ porcelain: "?? JUMI_REVIEW.md/" })),
+        maxIncompleteRetries: 0,
         api: makeApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
-            created = true;
-            return makeComment({ id: 1, body });
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
           },
         }),
         openCodeRunner: async () => {
@@ -384,7 +401,8 @@ describe("reviewPullRequest", () => {
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
-      expect(created).toBe(false);
+      expect(comments.some((body) => body.includes("jumi-review"))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       await expect(access(join(workspace, "JUMI_REVIEW.md"))).rejects.toThrow();
     });
   });
@@ -420,14 +438,15 @@ describe("reviewPullRequest", () => {
 
   test("treats an empty JUMI_REVIEW.md as incomplete", async () => {
     await withWorkspace(async (workspace) => {
-      let created = false;
+      const comments: string[] = [];
       const statuses: Array<{ state: string; description?: string }> = [];
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
+        maxIncompleteRetries: 0,
         api: makeApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
-            created = true;
-            return makeComment({ id: 1, body });
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
           },
           createCommitStatus: async (_owner, _repo, _sha, status) => {
             statuses.push(status);
@@ -440,8 +459,169 @@ describe("reviewPullRequest", () => {
         },
       });
       expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
-      expect(created).toBe(false);
+      expect(comments.some((body) => body.includes("jumi-review"))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "Incomplete review: no output" });
+    });
+  });
+
+  test("retries OpenCode when the first run writes no artifact", async () => {
+    await withWorkspace(async (workspace) => {
+      const comments: string[] = [];
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
+          },
+        }),
+        openCodeRunner: async () => {
+          ran++;
+          if (ran < 2) return { status: "ok", stdout: "I'll inspect and dump the review here" };
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(2);
+      expect(result).toEqual({ status: "posted", commentId: 1 });
+      expect(comments).toHaveLength(1);
+      expect(comments[0]).toContain("Looks good");
+      expect(comments[0]).toContain("jumi-review");
+      expect(comments[0]).not.toContain("I'll inspect");
+      expect(comments[0]).not.toContain("jumi-stuck");
+    });
+  });
+
+  test("posts stuck after capped incomplete retries and does not enqueue a review sticky", async () => {
+    await withWorkspace(async (workspace) => {
+      const comments: string[] = [];
+      const persisted: PersistReviewResult[] = [];
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
+        api: makeApi({
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
+          },
+        }),
+        persistResult: async (value) => {
+          persisted.push(value);
+        },
+        openCodeRunner: async () => {
+          ran++;
+          return { status: "ok", stdout: "chat dump of a review that never wrote the file" };
+        },
+      });
+      expect(ran).toBe(1 + MAX_INCOMPLETE_RETRIES);
+      expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
+      expect(persisted).toEqual([{ kind: "skip", reason: "Incomplete review: no output" }]);
+      expect(comments.some((body) => body.includes("jumi-review"))).toBe(false);
+      expect(comments.some((body) => body.includes("unassign"))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
+    });
+  });
+
+  test("incomplete retry cap sticks at configured maxIncompleteRetries, not only 2", async () => {
+    await withWorkspace(async (workspace) => {
+      let ran = 0;
+      await reviewPullRequest({
+        ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
+        maxIncompleteRetries: 1,
+        api: makeApi(),
+        openCodeRunner: async () => {
+          ran++;
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(2);
+    });
+  });
+
+  test("incomplete extras keep the session DB and continue with a write-only prompt", async () => {
+    await withWorkspace(async (workspace) => {
+      const comments: string[] = [];
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
+          },
+        }),
+        openCodeRunner: async (opts) => {
+          ran++;
+          const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
+          if (ran === 1) {
+            expect(opts.continueSession).toBeFalsy();
+            expect(task).toContain("Review the pull request above");
+            await mkdir(join(workspace, ".jumi-tmp"), { recursive: true });
+            await writeFile(join(workspace, ".jumi-tmp", "opencode-session.db"), "db");
+            return { status: "ok", stdout: "I'll inspect and dump the review here" };
+          }
+          expect(opts.continueSession).toBe(true);
+          expect(task).toContain("Write JUMI_REVIEW.md");
+          expect(task).toContain("write tool");
+          expect(task).toContain("already in this session");
+          expect(task).not.toContain("Review the pull request above");
+          expect(task).not.toContain("I'll inspect");
+          expect("prompt" in opts).toBe(false);
+          await access(join(workspace, ".jumi-tmp", "opencode-session.db"));
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(2);
+      expect(result).toEqual({ status: "posted", commentId: 1 });
+      expect(comments[0]).toContain("Looks good");
+      expect(comments[0]).not.toContain("I'll inspect");
+    });
+  });
+
+  test("incomplete extras without a session inject last assistant text into a write-only run", async () => {
+    await withWorkspace(async (workspace) => {
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi(),
+        openCodeRunner: async (opts) => {
+          ran++;
+          const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
+          if (ran === 1) {
+            expect(opts.continueSession).toBeFalsy();
+            expect(task).toContain("Review the pull request above");
+            return { status: "ok", stdout: "file.ts:1: 🟡 risk: missing null check." };
+          }
+          expect(opts.continueSession).toBeFalsy();
+          expect(task).toContain("Write JUMI_REVIEW.md");
+          expect(task).toContain("file.ts:1: 🟡 risk: missing null check.");
+          expect(task).toContain("input to the write tool, not the sticky");
+          expect(task).not.toContain("Review the pull request above");
+          await writeReview(workspace, "file.ts:1: 🟡 risk: missing null check.\n<!-- jumi-check: failure -->");
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(2);
+      expect(result).toEqual({ status: "posted", commentId: 1 });
+    });
+  });
+
+  test("does not treat .jumi-tmp leftovers as a dirty review tree", async () => {
+    await withWorkspace(async (workspace) => {
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace, frozenGit({ porcelain: "?? .jumi-tmp/\n?? JUMI_REVIEW.md" })),
+        api: makeApi(),
+        openCodeRunner: async () => {
+          await mkdir(join(workspace, ".jumi-tmp"), { recursive: true });
+          await writeFile(join(workspace, ".jumi-tmp", "opencode-session.db"), "db");
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "posted", commentId: 1 });
     });
   });
 
@@ -1377,15 +1557,15 @@ describe("publishReviewResult", () => {
     expect(bodies[1]).not.toContain("created:");
   });
 
-  test("publishes an incomplete skip as failure without a sticky", async () => {
-    let created = false;
+  test("publishes an incomplete skip as failure without a review sticky", async () => {
+    const comments: string[] = [];
     const statuses: Array<{ state: string; description?: string; context?: string; target_url?: string }> = [];
     const result = await publishReviewResult({
       ...publishOpts,
       resultReason: "Incomplete review: no output",
       api: makeApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
-          created = true;
+          comments.push(body);
           return makeComment({ body });
         },
         createCommitStatus: async (_owner, _repo, _sha, status) => {
@@ -1395,7 +1575,8 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
-    expect(created).toBe(false);
+    expect(comments.some((body) => body.includes("jumi-review"))).toBe(false);
+    expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
     expect(statuses).toEqual([
       {
         state: "failure",

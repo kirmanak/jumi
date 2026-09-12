@@ -31,6 +31,7 @@ export interface ServiceConfig {
   leaseMs: number;
   maxJobAttempts: number;
   maxFollowupRounds: number;
+  maxIncompleteRetries: number;
   phoenixOtlpEndpoint?: string;
 }
 
@@ -105,6 +106,7 @@ export function parseJumiRole(value: string | undefined): JumiRole {
 }
 
 const MAX_FOLLOWUP_ROUNDS_ENV = "MAX_FOLLOWUP_ROUNDS";
+const MAX_INCOMPLETE_RETRIES_ENV = "MAX_INCOMPLETE_RETRIES";
 
 export function loadConfig(env: Env = process.env): ServiceConfig {
   const resolved = overlaySecretsFromFile(env);
@@ -141,6 +143,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
     maxFollowupRounds: intEnv(resolved, MAX_FOLLOWUP_ROUNDS_ENV, 3),
+    maxIncompleteRetries: intEnv(resolved, MAX_INCOMPLETE_RETRIES_ENV, 2),
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
   };
 }

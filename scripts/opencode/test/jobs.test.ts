@@ -142,7 +142,7 @@ describe("review failure handover to worker lease", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       const api = makeReviewApi();
-      await processEngineTick(store, makeConfig({ workdir: workspace }), api, "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: async (args) => {
           if (args[0] === "rev-parse") return "headsha";
           if (args[0] === "status") return "?? JUMI_REVIEW.md";
@@ -193,7 +193,7 @@ describe("review failure handover to worker lease", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      await processEngineTick(store, makeConfig({ workdir: workspace }), makeReviewApi(), "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), makeReviewApi(), "engine-1", {
         gitRunner: async (args) => {
           if (args[0] === "rev-parse") return "headsha";
           if (args[0] === "status") return "?? JUMI_REVIEW.md";

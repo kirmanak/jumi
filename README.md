@@ -24,7 +24,7 @@ assign issue to bot
       → ledger kind conflict (capped, same branch)
 ```
 
-Unassign is the kill switch. Caps: 3 review-comment follow-up rounds and 3 conflict rounds per issue (CI follow-up is a separate per-`{head SHA, failed check}` budget). Stuck loops (same finding 4×, same error 3×, A→B→A) skip OpenCode that round and do not fail the review check.
+Unassign is the kill switch. Caps: 3 review-comment follow-up rounds and 3 conflict rounds per issue (CI follow-up is a separate per-`{head SHA, failed check}` budget). Missing `JUMI_REVIEW.md` after OpenCode exit 0 retries at most twice on that head, then posts stuck (not worker follow-up). Stuck loops (same finding 4×, same error 3×, A→B→A) skip OpenCode that round and do not fail the review check.
 
 ## Control plane
 
@@ -101,6 +101,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `JUMI_ROLE` | `monolith` | `monolith`, `router`, or `engine`. Unset is `monolith`. Worker is a separate image, not this flag |
 | `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
 | `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine or implementing worker aborts OpenCode and requeues the same job without consuming an attempt. Crash/OOM still uses reclaim |
+| `MAX_INCOMPLETE_RETRIES` | `2` | Extra write-only OpenCode runs when a review exits 0 with no `JUMI_REVIEW.md`, then public stuck. Same session when possible. Unset is 2. Does not enqueue worker follow-up |
 
 `deploy/contract.md` lists the same keys for GitOps.
 
@@ -112,7 +113,7 @@ It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `
 
 - `pending` while the review is running
 - `success` / `failure` from that trailer (❓ may still be `success`)
-- `failure` if OpenCode crashes, returns empty output, or omits the trailer
+- `failure` if OpenCode crashes, returns empty output, or omits the trailer. Missing/empty `JUMI_REVIEW.md` continues the same session with a write-only turn (see `MAX_INCOMPLETE_RETRIES`) then fails the check and posts `stuck: incomplete review`; stdout/chat is never the artifact
 - `warning` when a queued job is skipped after it already went pending (for example the PR head changed)
 
 The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure. Title-gated skips (`WIP:`, `[skip review]`) still post no status.

@@ -33,7 +33,6 @@ function stripAnsi(str: string): string {
  * When `prompt` is omitted, stdin is synthesized from those files / `trace.kind`.
  */
 export interface OpenCodeRunOptions extends EngineRunOptions {
-  prompt?: string;
   configPath?: string;
 }
 
@@ -288,7 +287,9 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   }
 
   try {
-    const proc = Bun.spawn(["opencode", "run", "--dir", opts.workdir, "-m", opts.model], {
+    const args = ["opencode", "run", "--dir", opts.workdir, "-m", opts.model];
+    if (opts.continueSession) args.push("--continue");
+    const proc = Bun.spawn(args, {
       stdin: Bun.file(tmpPath),
       stdout: "pipe",
       stderr: "pipe",

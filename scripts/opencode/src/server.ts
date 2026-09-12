@@ -104,6 +104,7 @@ export async function runReviewJob(
       maxFiles: config.maxFiles,
       maxPatchBytes: config.maxPatchBytes,
       maxOutputBytes: config.maxOutputBytes,
+      maxIncompleteRetries: config.maxIncompleteRetries,
       logger: (message) => logger(message),
       persistResult: extras.persistResult,
       engine: extras.engine ?? extras.openCodeRunner,

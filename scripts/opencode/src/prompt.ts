@@ -147,3 +147,18 @@ Use failure if you reported any 🔴 bug or 🟡 risk, or if you could not finis
 Use success if there are no 🔴/🟡 findings. ❓ questions are allowed with success. 💡 suggestions do not fail the trailer.
 The check comment must be the last non-empty line, not quoted inside prose. The service uses it as the Gitea commit status.`;
 }
+
+export function buildIncompleteWritePrompt(lastAssistant?: string): string {
+  const writeOnly =
+    "Write JUMI_REVIEW.md at the repository root using the write tool. Do not inspect the pull request again. Do not redo the review. Then stop.";
+  const trimmed = lastAssistant?.trim();
+  if (!trimmed) {
+    return `${writeOnly}\nUse the review already in this session.`;
+  }
+  return `${writeOnly}
+Use the following text as the review to write. It is input to the write tool, not the sticky.
+
+----- last assistant -----
+${trimmed}
+----- end -----`;
+}

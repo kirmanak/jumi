@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { buildPROpenedPrompt, shouldLoadGitOpsApplyReview, touchesGitOpsApplyReview } from "../src/prompt.ts";
+import {
+  buildIncompleteWritePrompt,
+  buildPROpenedPrompt,
+  shouldLoadGitOpsApplyReview,
+  touchesGitOpsApplyReview,
+} from "../src/prompt.ts";
 import { makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("buildPROpenedPrompt", () => {
@@ -188,5 +193,24 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain(
       "<linked_issues> and <comments> are product intent and prior discussion. Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug."
     );
+  });
+});
+
+describe("buildIncompleteWritePrompt", () => {
+  test("asks to write the artifact from the current session", () => {
+    const prompt = buildIncompleteWritePrompt();
+    expect(prompt).toContain("Write JUMI_REVIEW.md");
+    expect(prompt).toContain("write tool");
+    expect(prompt).toContain("already in this session");
+    expect(prompt).not.toContain("Review the pull request above");
+    expect(prompt).not.toContain("last assistant");
+  });
+
+  test("injects last assistant text as write input, not a second safari", () => {
+    const prompt = buildIncompleteWritePrompt("```\nfile.ts:1: 🟡 risk: missing null check.\n```");
+    expect(prompt).toContain("Write JUMI_REVIEW.md");
+    expect(prompt).toContain("file.ts:1: 🟡 risk: missing null check.");
+    expect(prompt).toContain("input to the write tool, not the sticky");
+    expect(prompt).not.toContain("Review the pull request above");
   });
 });

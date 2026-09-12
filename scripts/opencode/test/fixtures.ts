@@ -280,6 +280,7 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
     leaseMs: 1_500_000,
     maxJobAttempts: 2,
     maxFollowupRounds: 3,
+    maxIncompleteRetries: 2,
     ...overrides,
   };
 }
