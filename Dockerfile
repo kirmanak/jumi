@@ -4,6 +4,7 @@ ARG TEMURIN_TAG=21.0.12_8-jdk
 
 FROM public.ecr.aws/docker/library/debian:bookworm-slim AS tools
 
+ARG BUN_VERSION
 ARG OPENCODE_VERSION=1.15.5
 ARG HELM_VERSION=3.18.6
 ARG BUN_VERSION=1.2.5

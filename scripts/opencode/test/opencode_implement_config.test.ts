@@ -4,16 +4,16 @@ import { join } from "node:path";
 import { IMPLEMENT_PROMPT } from "../src/implement.ts";
 
 interface OpenCodeImplementConfig {
-  skills?: unknown;
+  skills?: { paths?: string[] };
   permission: {
     bash: Record<string, "allow" | "ask" | "deny">;
     edit: "allow" | "ask" | "deny";
     write: "allow" | "ask" | "deny";
     task: "allow" | "ask" | "deny";
-    skill: "allow" | "ask" | "deny";
+    skill: "allow" | "ask" | "deny" | { [pattern: string]: "allow" | "ask" | "deny" };
     todowrite: "allow" | "ask" | "deny";
     question: "allow" | "ask" | "deny";
-    external_directory: "allow" | "ask" | "deny";
+    external_directory: "allow" | "ask" | "deny" | { [pattern: string]: "allow" | "ask" | "deny" };
     webfetch: "allow" | "ask" | "deny";
     lsp: "allow" | "ask" | "deny";
   };
@@ -40,7 +40,7 @@ describe("opencode implement config", () => {
   ) as OpenCodeImplementConfig;
 
   test("allows skills, tasks, and edits for the implement worker", () => {
-    expect(config.skills).toBeUndefined();
+    expect(config.skills?.paths).toEqual(["/app/review-skills"]);
     expect(config.permission.skill).toBe("allow");
     expect(config.permission.task).toBe("allow");
     expect(config.permission.todowrite).toBe("allow");
@@ -49,7 +49,21 @@ describe("opencode implement config", () => {
     expect(config.permission.webfetch).toBe("allow");
     expect(config.permission.lsp).toBe("allow");
     expect(config.permission.question).toBe("deny");
-    expect(config.permission.external_directory).toBe("deny");
+  });
+
+  test("allows Read of baked review-skills after star deny (last-match)", () => {
+    const rules = config.permission.external_directory;
+    expect(rules).toEqual({ "*": "deny", "/app/review-skills/**": "allow" });
+    if (typeof rules === "string") throw new Error("expected last-match object, not scalar deny");
+    expect(Object.keys(rules)).toEqual(["*", "/app/review-skills/**"]);
+
+    expect(bashPermission(rules, "/app/review-skills/gitea-pull-review/*")).toBe("allow");
+    expect(bashPermission(rules, "/app/review-skills/gitops-apply-review/*")).toBe("allow");
+    expect(bashPermission(rules, "/app/review-skills/*")).toBe("allow");
+    expect(bashPermission(rules, "/app/*")).toBe("deny");
+    expect(bashPermission(rules, "/app/.gitea/*")).toBe("deny");
+    expect(bashPermission(rules, "/etc/*")).toBe("deny");
+    expect(bashPermission(rules, "/data/*")).toBe("deny");
   });
 
   test("defaults bash to allow instead of a git-only cathedral", () => {

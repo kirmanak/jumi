@@ -123,7 +123,7 @@ Work runs only when the issue or pull request is assigned to bot username `jumi`
 
 When `DATABASE_URL` is set, webhooks only enqueue (202) into the shared Postgres envelope and the worker leases with `FOR UPDATE SKIP LOCKED` (distinct owner per process; never the same row twice). First-run keeps that job row after the PR opens. Unassign cancels queued and leased worker rows; the running worker aborts when its lease is gone. The router does not kill processes. Without `DATABASE_URL`, a PID/heartbeat file under `{HOME}/worker/jobs/{owner}/{repo}/{number}.json` claims the issue (live only while that PID is alive **and** the heartbeat is newer than two minutes). With Postgres, the lease is the identity.
 
-The parent clones a bare cache and worktree from the default branch, writes `JUMI_TASK.md`, and runs OpenCode with `.gitea/opencode-implement.json`. Implement / follow-up / conflict prompts tell the child to stay in this clone, start from the injected `JUMI_*.md` files (not `glob **/*` or this Gitea/forge), ignore `.jumi-tmp`, use ripgrep syntax, and verify once at the end. After OpenCode, the **parent** reads `JUMI_PR.md` when present, commits, pushes a `jumi/issue-{n}-{slug}` branch (never the default branch, never force-push), and opens a PR whose body always includes `Fixes #n`. If the tree is clean it comments `no changes` and clears the live claim without unassigning.
+The parent clones a bare cache and worktree from the default branch, writes `JUMI_TASK.md`, and runs OpenCode with `.gitea/opencode-implement.json` (`skills.paths` `/app/review-skills`, blanket `skill` allow, last-match `external_directory` so Read can load the pack). Implement / follow-up / conflict prompts tell the child to stay in this clone, start from the injected `JUMI_*.md` files (not `glob **/*` or this Gitea/forge), ignore `.jumi-tmp`, use ripgrep syntax, and verify once at the end. After OpenCode, the **parent** reads `JUMI_PR.md` when present, commits, pushes a `jumi/issue-{n}-{slug}` branch (never the default branch, never force-push), and opens a PR whose body always includes `Fixes #n`. If the tree is clean it comments `no changes` and clears the live claim without unassigning.
 
 Only a current-head `failure` trailer enqueues re-implement. Missing trailer / stub / `success` is not a finding. Do not treat the Jumi review commit status as a trailer substitute. Follow-up does not open a second PR. It checks out the existing `pr.head.ref`, merges `origin/<default>` into that branch, writes `JUMI_TASK.md` plus `JUMI_FEEDBACK.md` (latest current-head Jumi review sticky/inlines, not an empty `workflow_job` or “address the earlier review” stub), and when the current head has a failed non-jumi check writes `JUMI_CI.md` (parent-injected log tail: last `##[error]` plus ~80 lines, 32–64 KiB, unpack noise dropped). If that wake has neither review findings nor a CI tail, follow-up is a no-op (no OpenCode, no commit). The OpenCode child has git push creds only — no bot token, no `tea`, no Actions fetch. Timeout 60 minutes. Stickies go on the PR. Empty/missing/incomplete/stub artifacts do not count toward stuck. CI follow-up is one OpenCode per `{head SHA, failed check name}` unless the log hash changes. Known infra flakes (GitHub `140.82` checkout/cache timeout or unreachable, Helm remote-schema timeout/429, GARM `Invalid cross-device link` on dpkg, tofu S3 state lock, Docker Hub `toomanyrequests`) comment for a human and do not burn an OpenCode round. Unknown red → OpenCode. If the default-branch merge is stuck, follow-up does not run the feedback OpenCode that round.
 
@@ -284,7 +284,7 @@ bun run server
 ```text
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
-  opencode-implement.json    # Implement config (edit/write allow; no git commit/push)
+  opencode-implement.json    # Implement config (edit/write allow; skills.paths /app/review-skills; blanket skill allow)
   tool-versions.env          # Pinned OpenCode/Bun/Helm/Temurin versions
   workflows/
     opencode-checks.yml      # PR lint/typecheck/test and image build checks
@@ -295,6 +295,7 @@ deploy/
   contract.md                # GitOps runtime contract (semver source of truth)
 review-skills/
   gitops-apply-review/       # Baked reviewer skill (copied to /app/review-skills)
+  gitea-pull-review/         # Baked worker skill: Gitea 1.27 pull-review API
 scripts/
   opencode/
     src/                     # Bun/TypeScript control plane (router, engine, worker)

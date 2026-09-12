@@ -112,6 +112,37 @@ verify_worker_jdk() {
 
 verify_worker_jdk
 
+verify_worker_skills() {
+  local ctr config_json
+  ctr="$(buildah from "${primary_tag}")"
+  if ! buildah run "${ctr}" -- test -f /app/review-skills/gitea-pull-review/SKILL.md; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "gitea-pull-review skill missing in worker image" >&2
+    exit 1
+  fi
+  if ! config_json="$(
+    buildah run \
+      --env OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+      --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
+      "${ctr}" -- \
+      timeout 120 sh -c 'cd /work && git init -q && opencode debug config'
+  )"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker opencode debug config failed" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null; then
+    printf '%s\n' "${config_json}" >&2
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker opencode debug config did not load skills.paths /app/review-skills" >&2
+    exit 1
+  fi
+  echo "Verified gitea-pull-review skill and opencode debug config"
+  buildah rm "${ctr}" >/dev/null
+}
+
+verify_worker_skills
+
 if [ "${PUSH_IMAGE:-false}" = "true" ]; then
   : "${REGISTRY:?REGISTRY is required when PUSH_IMAGE=true}"
   : "${CONTAINER_REGISTRY_USER:?CONTAINER_REGISTRY_USER is required when PUSH_IMAGE=true}"

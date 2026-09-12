@@ -69,6 +69,7 @@ describe("opencode review config", () => {
     expect(config.permission.edit).toBe("allow");
     expect(config.permission.write).toBe("allow");
     expect(config.permission.skill).toEqual({ "*": "deny", "gitops-apply-review": "allow" });
+    expect(config.permission.skill).not.toHaveProperty("gitea-pull-review");
     expect(config.permission.lsp).toBe("deny");
     expect(config.permission.task).toBe("deny");
     expect(config.permission.question).toBe("deny");
@@ -108,6 +109,7 @@ describe("opencode review config", () => {
 
     expect(bashPermission(rules, "/app/review-skills/gitops-apply-review/*")).toBe("allow");
     expect(bashPermission(rules, "/app/review-skills/gitops-apply-review/references/*")).toBe("allow");
+    expect(bashPermission(rules, "/app/review-skills/gitea-pull-review/*")).toBe("allow");
     expect(bashPermission(rules, "/app/review-skills/*")).toBe("allow");
     expect(bashPermission(rules, "/app/*")).toBe("deny");
     expect(bashPermission(rules, "/app/.gitea/*")).toBe("deny");
@@ -151,12 +153,28 @@ describe("reviewer image permissions", () => {
     expect(dockerfile).toContain("COPY review-skills /app/review-skills");
   });
 
+  test("copies gitea-pull-review into the same image pack without allowing it on the reviewer", () => {
+    const giteaSkillPath = join(repoRoot, "review-skills/gitea-pull-review/SKILL.md");
+    expect(existsSync(giteaSkillPath)).toBe(true);
+    expect(readFileSync(giteaSkillPath, "utf8")).toContain("name: gitea-pull-review");
+  });
+
   test("installs python3 and helm in the runtime image", () => {
     expect(dockerfile).toMatch(/python3/);
     expect(dockerfile).toMatch(/python3 --version/);
     expect(dockerfile).toMatch(/helm version --short/);
     expect(dockerfile).toMatch(/get\.helm\.sh\/helm-v\$\{HELM_VERSION\}/);
     expect(dockerfile).not.toMatch(/kubectl/);
+  });
+
+  test("does not pull base images from Docker Hub", () => {
+    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim AS tools/);
+    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim AS runtime/);
+    expect(dockerfile).toMatch(/github\.com\/oven-sh\/bun\/releases\/download\/bun-v\$\{BUN_VERSION\}/);
+    expect(dockerfile).not.toMatch(/oven\/bun/);
+    expect(dockerfile).not.toMatch(/docker\.io/);
+    expect(dockerfile).not.toMatch(/^FROM debian:/m);
+    expect(dockerfile).not.toMatch(/^FROM eclipse-temurin:/m);
   });
 });
 
@@ -176,6 +194,12 @@ describe("worker image JDK", () => {
     expect(workerStage).toContain("JAVA_HOME=/opt/java/openjdk");
     expect(beforeWorker).not.toContain("COPY --from=jdk");
     expect(beforeWorker).not.toContain("JAVA_HOME=");
+  });
+
+  test("inherits the baked skill pack and points OpenCode at implement config", () => {
+    expect(beforeWorker).toContain("COPY review-skills /app/review-skills");
+    expect(workerStage).toContain("OPENCODE_CONFIG=/app/.gitea/opencode-implement.json");
+    expect(workerStage).toContain("COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json");
   });
 
   test("does not pull debian, bun, or temurin via Docker Hub short names", () => {
