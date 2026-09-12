@@ -69,6 +69,17 @@ function usableFindingPath(path: string): string | undefined {
   return value;
 }
 
+export function normalizeFindingText(text: string): string {
+  return text
+    .replace(/<!--\s*jumi-review:[^>]*-->/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function findingFingerprint(path: string, text: string): string {
+  return `${path}\n${normalizeFindingText(text)}`;
+}
+
 export function parseReviewFindings(text: string, opts?: { singleFilePath?: string }): ReviewFinding[] {
   const findings: ReviewFinding[] = [];
   for (const original of text.split(/\r?\n/)) {

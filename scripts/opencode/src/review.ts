@@ -38,7 +38,7 @@ import {
   upsertStuckText,
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
-import { parseReviewFindings, parseReviewOutput } from "./verdict.ts";
+import { findingFingerprint, parseReviewFindings, parseReviewOutput } from "./verdict.ts";
 import { checkoutPullRequestWorkspace, type GitRunner, runGit } from "./workspace.ts";
 
 async function logParentDiag(
@@ -189,12 +189,53 @@ function isBotPullReview(review: PullReview, botUsername: string): boolean {
   return login.toLowerCase() === botUsername.toLowerCase();
 }
 
+type PullReviewEvent = "APPROVED" | "REQUEST_CHANGES" | "COMMENT";
+
+function loginEquals(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function reviewEventForVerdict(
+  state: "success" | "failure",
+  prAuthor: string | undefined,
+  botUsername: string
+): PullReviewEvent {
+  if (loginEquals(prAuthor, botUsername)) return "COMMENT";
+  return state === "success" ? "APPROVED" : "REQUEST_CHANGES";
+}
+
+function isSelfReviewRejection(err: unknown, prAuthor: string | undefined, botUsername: string): boolean {
+  if (loginEquals(prAuthor, botUsername)) return true;
+  const message = errorMessage(err).toLowerCase();
+  return /own pull|not allowed to (?:approve|reject|review)|author of (?:the )?pull|poster of (?:the )?pull/.test(
+    message
+  );
+}
+
+function isResolvedInline(comment: InlineComment): boolean {
+  return comment.resolved === true || comment.resolver != null;
+}
+
+function commentFingerprint(comment: { path?: string; body?: string | null }, marker: string): string | undefined {
+  if (!comment.path) return undefined;
+  if (!(comment.body ?? "").includes(marker)) return undefined;
+  const text = findingFingerprint(comment.path, comment.body ?? "");
+  return text.endsWith("\n") ? undefined : text;
+}
+
+function isPendingInline(comment: InlineComment, reviews: PullReview[]): boolean {
+  const reviewId = comment.pull_request_review_id;
+  if (reviewId == null) return false;
+  const review = reviews.find((item) => item.id === reviewId);
+  return review != null && isPendingPullReview(review);
+}
+
 async function submitPendingBotReviews(opts: {
   api: ReviewApi;
   owner: string;
   repo: string;
   prNumber: number;
-  headSha: string;
   marker: string;
   botUsername: string;
   log: (message: string) => void;
@@ -204,7 +245,6 @@ async function submitPendingBotReviews(opts: {
     const reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
     for (const review of reviews) {
       if (!isPendingPullReview(review) || !isBotPullReview(review, opts.botUsername)) continue;
-      if (review.commit_id && review.commit_id !== opts.headSha) continue;
       try {
         await opts.api.submitPullReview(opts.owner, opts.repo, opts.prNumber, review.id, opts.marker);
         submitted = true;
@@ -248,21 +288,63 @@ async function submitPendingAndRefreshPosted(
     opts.log(`existing reviews unavailable: ${errorMessage(err)}`);
   }
 
-  const attemptedKeys = new Set(
-    attempted.flatMap((comment) => {
-      const key = inlineKey(comment.path, comment.new_position);
-      return key ? [key] : [];
-    })
-  );
-  for (const key of postedInlineKeys(leftover, reviews, opts.marker, opts.headSha)) {
-    if (attemptedKeys.has(key)) posted.add(key);
-  }
-  if (submitted) {
-    for (const key of leftoverAttemptedKeys(leftover, attempted, opts.marker, existingIds)) posted.add(key);
+  for (const key of leftoverAttemptedFingerprints(leftover, attempted, opts.marker, existingIds, reviews, submitted)) {
+    posted.add(key);
   }
 }
 
-async function postReviewInlines(opts: {
+async function reconcileReviewInlines(opts: {
+  api: ReviewApi;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  marker: string;
+  findings: Array<{ path: string; body: string }>;
+  existing: InlineComment[];
+  reviews: PullReview[];
+  log: (message: string) => void;
+}): Promise<Set<string>> {
+  const current = new Set(opts.findings.map((finding) => findingFingerprint(finding.path, finding.body)));
+  const byFingerprint = new Map<string, InlineComment[]>();
+  for (const comment of opts.existing) {
+    const fingerprint = commentFingerprint(comment, opts.marker);
+    if (!fingerprint) continue;
+    const list = byFingerprint.get(fingerprint) ?? [];
+    list.push(comment);
+    byFingerprint.set(fingerprint, list);
+  }
+
+  const open = new Set<string>();
+  for (const [fingerprint, comments] of byFingerprint) {
+    const published = comments.filter((comment) => !isPendingInline(comment, opts.reviews));
+    const unresolved = published.filter((comment) => !isResolvedInline(comment));
+    if (!current.has(fingerprint)) {
+      for (const comment of comments.filter((item) => !isResolvedInline(item))) {
+        try {
+          await opts.api.resolvePullComment(opts.owner, opts.repo, comment.id);
+        } catch (err) {
+          opts.log(`resolve skipped ${comment.id}: ${errorMessage(err)}`);
+        }
+      }
+      continue;
+    }
+    if (unresolved.length > 0) {
+      open.add(fingerprint);
+      continue;
+    }
+    if (published.length === 0) continue;
+    const latest = published[published.length - 1];
+    try {
+      await opts.api.unresolvePullComment(opts.owner, opts.repo, latest.id);
+      open.add(fingerprint);
+    } catch (err) {
+      opts.log(`unresolve skipped ${latest.id}: ${errorMessage(err)}`);
+    }
+  }
+  return open;
+}
+
+async function postPullReview(opts: {
   api: ReviewApi;
   owner: string;
   repo: string;
@@ -271,13 +353,15 @@ async function postReviewInlines(opts: {
   marker: string;
   comment: string;
   botUsername: string;
+  prAuthor: string | undefined;
+  event: PullReviewEvent;
+  body: string;
   log: (message: string) => void;
 }): Promise<void> {
   const singleFilePath = needsSingleFilePath(opts.comment)
     ? await resolveSingleFilePath(opts.api, opts.owner, opts.repo, opts.prNumber, opts.log)
     : undefined;
   const findings = parseReviewFindings(opts.comment, { singleFilePath });
-  if (findings.length === 0) return;
 
   await submitPendingBotReviews(opts);
 
@@ -293,90 +377,111 @@ async function postReviewInlines(opts: {
   } catch (err) {
     opts.log(`existing reviews unavailable: ${errorMessage(err)}`);
   }
-  const posted = postedInlineKeys(existing, reviews, opts.marker, opts.headSha);
   const existingIds = new Set(existing.map((comment) => comment.id));
 
-  const comments: CreatePullReviewComment[] = findings
-    .filter((finding) => !posted.has(`${finding.path}:${finding.line}`))
-    .map((finding) => ({
+  const posted = await reconcileReviewInlines({
+    api: opts.api,
+    owner: opts.owner,
+    repo: opts.repo,
+    prNumber: opts.prNumber,
+    marker: opts.marker,
+    findings,
+    existing,
+    reviews,
+    log: opts.log,
+  });
+
+  const comments: CreatePullReviewComment[] = [];
+  const queued = new Set<string>();
+  for (const finding of findings) {
+    const fingerprint = findingFingerprint(finding.path, finding.body);
+    if (posted.has(fingerprint) || queued.has(fingerprint)) continue;
+    queued.add(fingerprint);
+    comments.push({
       path: finding.path,
       new_position: finding.line,
       body: `${finding.body}\n\n${opts.marker}`,
-    }));
-  if (comments.length === 0) return;
-
-  const post = (reviewComments: CreatePullReviewComment[]) =>
-    opts.api.createPullReview(opts.owner, opts.repo, opts.prNumber, {
-      commit_id: opts.headSha,
-      event: "COMMENT",
-      comments: reviewComments,
     });
-
-  try {
-    await post(comments);
-    return;
-  } catch (err) {
-    opts.log(`batch inlines rejected, retrying individually: ${errorMessage(err)}`);
   }
 
-  await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+  const create = (event: PullReviewEvent, reviewComments: CreatePullReviewComment[]) =>
+    opts.api.createPullReview(opts.owner, opts.repo, opts.prNumber, {
+      commit_id: opts.headSha,
+      event,
+      body: opts.body,
+      ...(reviewComments.length > 0 ? { comments: reviewComments } : {}),
+    });
 
-  for (const comment of comments) {
-    const key = `${comment.path}:${comment.new_position}`;
-    if (posted.has(key)) continue;
+  const createWithFallback = async (
+    event: PullReviewEvent,
+    reviewComments: CreatePullReviewComment[]
+  ): Promise<PullReviewEvent> => {
     try {
-      await post([comment]);
-      posted.add(key);
+      await create(event, reviewComments);
+      return event;
     } catch (err) {
+      if (event !== "COMMENT" && isSelfReviewRejection(err, opts.prAuthor, opts.botUsername)) {
+        opts.log(`review event ${event} rejected as self-review, falling back to COMMENT`);
+        await create("COMMENT", reviewComments);
+        return "COMMENT";
+      }
+      throw err;
+    }
+  };
+
+  try {
+    await createWithFallback(opts.event, comments);
+  } catch (err) {
+    if (comments.length === 0) {
+      opts.log(`review event skipped: ${errorMessage(err)}`);
+    } else {
+      opts.log(`batch inlines rejected, retrying individually: ${errorMessage(err)}`);
       await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
-      if (posted.has(key)) continue;
-      opts.log(`inline skipped ${key}: ${errorMessage(err)}`);
+      for (const comment of comments) {
+        const fingerprint = commentFingerprint(comment, opts.marker);
+        if (fingerprint && posted.has(fingerprint)) continue;
+        try {
+          await create("COMMENT", [comment]);
+          if (fingerprint) posted.add(fingerprint);
+        } catch (inner) {
+          await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+          if (fingerprint && posted.has(fingerprint)) continue;
+          opts.log(`inline skipped ${comment.path}:${comment.new_position}: ${errorMessage(inner)}`);
+        }
+      }
+      try {
+        await createWithFallback(opts.event, []);
+      } catch (eventErr) {
+        opts.log(`review event skipped: ${errorMessage(eventErr)}`);
+      }
     }
   }
 }
 
-function inlineKey(path: string | undefined, position: number | undefined): string | undefined {
-  if (!path || typeof position !== "number") return undefined;
-  return `${path}:${position}`;
-}
-
-function leftoverAttemptedKeys(
+function leftoverAttemptedFingerprints(
   comments: InlineComment[],
   attempted: CreatePullReviewComment[],
   marker: string,
-  existingIds: Set<number>
+  existingIds: Set<number>,
+  reviews: PullReview[],
+  submitted: boolean
 ): Set<string> {
   const attemptedKeys = new Set(
     attempted.flatMap((comment) => {
-      const key = inlineKey(comment.path, comment.new_position);
+      const key = commentFingerprint(comment, marker);
       return key ? [key] : [];
     })
   );
   return new Set(
     comments.flatMap((comment) => {
       if (existingIds.has(comment.id)) return [];
-      if (!(comment.body ?? "").includes(marker)) return [];
-      const key = inlineKey(comment.path, comment.new_position);
-      return key && attemptedKeys.has(key) ? [key] : [];
-    })
-  );
-}
-
-function postedInlineKeys(
-  comments: InlineComment[],
-  reviews: PullReview[],
-  marker: string,
-  headSha: string
-): Set<string> {
-  const reviewById = new Map(reviews.map((review) => [review.id, review]));
-  return new Set(
-    comments.flatMap((comment) => {
-      if (!(comment.body ?? "").includes(marker)) return [];
+      const key = commentFingerprint(comment, marker);
+      if (!key || !attemptedKeys.has(key)) return [];
+      if (submitted) return [key];
       const reviewId = comment.pull_request_review_id;
-      const review = reviewId == null ? undefined : reviewById.get(reviewId);
-      if (!review || review.commit_id !== headSha || isPendingPullReview(review)) return [];
-      const key = inlineKey(comment.path, comment.new_position);
-      return key ? [key] : [];
+      const review = reviewId == null ? undefined : reviews.find((item) => item.id === reviewId);
+      if (review && !isPendingPullReview(review)) return [key];
+      return [];
     })
   );
 }
@@ -678,7 +783,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   if (!parsed.verdict.incomplete) {
     try {
-      await postReviewInlines({
+      await postPullReview({
         api: opts.api,
         owner: opts.owner,
         repo: opts.repo,
@@ -687,10 +792,13 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         marker,
         comment: parsed.comment,
         botUsername: opts.botUsername,
+        prAuthor: pr.user?.login,
+        event: reviewEventForVerdict(parsed.verdict.state, pr.user?.login, opts.botUsername),
+        body: parsed.verdict.description,
         log,
       });
     } catch (err) {
-      log(`inlines failed: ${errorMessage(err)}`);
+      log(`pull review not posted: ${errorMessage(err)}`);
     }
   }
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });

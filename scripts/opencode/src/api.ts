@@ -135,6 +135,7 @@ export function toPullReview(review: GiteaPullReview): PullReview {
     user: review.user ? actor(review.user) : review.user,
     state: review.state,
     type: review.type,
+    dismissed: review.dismissed === true,
     commit_id: review.commit_id,
     submitted_at: review.submitted_at,
     updated_at: review.updated_at,
@@ -150,6 +151,8 @@ export function toInlineComment(comment: GiteaPullReviewComment): InlineComment 
     new_position: comment.new_position ?? comment.line ?? comment.position,
     pull_request_review_id: comment.pull_request_review_id,
     html_url: comment.html_url,
+    resolved: comment.resolved === true || comment.resolver != null,
+    resolver: comment.resolver ? actor(comment.resolver) : undefined,
   };
 }
 
@@ -408,13 +411,36 @@ export class GiteaAPI {
     repo: string,
     index: number,
     reviewId: number,
-    body: string
+    body?: string
   ): Promise<PullReview> {
     return toPullReview(
       await this.post<GiteaPullReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews/${reviewId}`, {
-        body,
+        ...(body != null ? { body } : {}),
         event: "COMMENT",
       })
+    );
+  }
+
+  async resolvePullComment(owner: string, repo: string, commentId: number): Promise<void> {
+    await this.post(`/repos/${this.repoPath(owner, repo)}/pulls/comments/${commentId}/resolve`, {});
+  }
+
+  async unresolvePullComment(owner: string, repo: string, commentId: number): Promise<void> {
+    await this.post(`/repos/${this.repoPath(owner, repo)}/pulls/comments/${commentId}/unresolve`, {});
+  }
+
+  async dismissPullReview(
+    owner: string,
+    repo: string,
+    index: number,
+    reviewId: number,
+    opts?: { message?: string; priors?: boolean }
+  ): Promise<PullReview> {
+    return toPullReview(
+      await this.post<GiteaPullReview>(
+        `/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews/${reviewId}/dismissals`,
+        { message: opts?.message ?? "superseded", priors: opts?.priors ?? false }
+      )
     );
   }
 

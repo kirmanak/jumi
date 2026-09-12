@@ -2332,6 +2332,7 @@ describe("collectFollowUpItems", () => {
           state: "COMMENT",
           type: "pull_request_review_comment",
         }),
+        makeReview({ id: 3, body: "please review this", state: "REQUEST_REVIEW" }),
       ],
     });
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
@@ -2356,6 +2357,23 @@ describe("collectFollowUpItems", () => {
     });
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
     expect(items.reviews).toEqual([]);
+  });
+
+  test("skips jumi REQUEST_CHANGES reviews so the worker does not follow up itself", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({
+          id: 1,
+          body: "Review requested changes",
+          state: "REQUEST_CHANGES",
+          user: makeUser({ login: "jumi" }),
+        }),
+        makeReview({ id: 2, body: "please change this", state: "REQUEST_CHANGES", user: makeUser({ login: "alice" }) }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
+    expect(items.reviews.map((review) => review.id)).toEqual([2]);
   });
 
   test("skips bot inlines the same way stickies are ignored", async () => {

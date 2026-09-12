@@ -74,6 +74,24 @@ describe("GiteaAPI", () => {
     ).toBe("headsha");
   });
 
+  test("toPullReview maps Gitea's dismissed boolean while state stays REQUEST_CHANGES", () => {
+    expect(
+      toPullReview({
+        id: 9,
+        state: "REQUEST_CHANGES",
+        dismissed: true,
+        user: makeUser({ login: "jumi" }),
+      })
+    ).toMatchObject({ state: "REQUEST_CHANGES", dismissed: true });
+    expect(
+      toPullReview({
+        id: 10,
+        state: "REQUEST_CHANGES",
+        user: makeUser({ login: "jumi" }),
+      }).dismissed
+    ).toBe(false);
+  });
+
   test("toInlineComment prefers new_position then line then position", () => {
     const base = {
       id: 1,
@@ -86,6 +104,9 @@ describe("GiteaAPI", () => {
     expect(toInlineComment({ ...base, new_position: 9, line: 8, position: 7 }).new_position).toBe(9);
     expect(toInlineComment({ ...base, line: 8, position: 7 }).new_position).toBe(8);
     expect(toInlineComment({ ...base, position: 7 }).new_position).toBe(7);
+    expect(toInlineComment({ ...base, resolver: makeUser({ login: "jumi" }) }).resolved).toBe(true);
+    expect(toInlineComment({ ...base, resolved: true }).resolved).toBe(true);
+    expect(toInlineComment(base).resolved).toBe(false);
   });
 
   test("creates a pull review with inline comments", async () => {
@@ -120,12 +141,58 @@ describe("GiteaAPI", () => {
     }) as unknown as typeof fetch;
 
     const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.submitPullReview("owner", "repo", 7, 99);
+    expect(requests[0]).toEqual({
+      url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/reviews/99",
+      method: "POST",
+      body: JSON.stringify({ event: "COMMENT" }),
+    });
+  });
+
+  test("submits a pending pull review with a body marker", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      return Response.json({ id: 99 });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
     await api.submitPullReview("owner", "repo", 7, 99, "<!-- jumi-review:owner/repo#7 -->");
     expect(requests[0]).toEqual({
       url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/reviews/99",
       method: "POST",
       body: JSON.stringify({ body: "<!-- jumi-review:owner/repo#7 -->", event: "COMMENT" }),
     });
+  });
+
+  test("resolves, unresolves, and dismisses pull review comments", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      return Response.json({ id: 9 });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.resolvePullComment("owner", "repo", 11);
+    await api.unresolvePullComment("owner", "repo", 11);
+    await api.dismissPullReview("owner", "repo", 7, 9);
+    expect(requests).toEqual([
+      {
+        url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/comments/11/resolve",
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+      {
+        url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/comments/11/unresolve",
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+      {
+        url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/reviews/9/dismissals",
+        method: "POST",
+        body: JSON.stringify({ message: "superseded", priors: false }),
+      },
+    ]);
   });
 
   test("closes a pull request with state closed", async () => {

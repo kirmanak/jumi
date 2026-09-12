@@ -79,10 +79,25 @@ export interface GiteaPullReview {
   user?: GiteaUser;
   state?: string;
   type?: string;
+  dismissed?: boolean;
   commit_id?: string;
   submitted_at?: string;
   updated_at?: string;
   created_at?: string;
+}
+
+export interface GiteaCreatePullReviewComment {
+  body: string;
+  path: string;
+  new_position?: number;
+  old_position?: number;
+}
+
+export interface GiteaCreatePullReviewOptions {
+  body?: string;
+  commit_id: string;
+  comments?: GiteaCreatePullReviewComment[];
+  event?: string;
 }
 
 export interface GiteaPullReviewComment extends GiteaComment {
@@ -93,6 +108,13 @@ export interface GiteaPullReviewComment extends GiteaComment {
   line?: number;
   pull_request_review_id?: number;
   html_url?: string;
+  resolved?: boolean;
+  resolver?: GiteaUser | null;
+}
+
+export interface GiteaDismissPullReviewOptions {
+  message?: string;
+  priors?: boolean;
 }
 
 export interface GiteaPRReviewRef {

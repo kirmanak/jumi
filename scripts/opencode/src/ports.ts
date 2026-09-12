@@ -78,6 +78,7 @@ export interface PullReview {
   user?: Actor;
   state?: string;
   type?: string;
+  dismissed?: boolean;
   commit_id?: string;
   submitted_at?: string;
   updated_at?: string;
@@ -104,6 +105,8 @@ export interface InlineComment extends Comment {
   new_position?: number;
   pull_request_review_id?: number;
   html_url?: string;
+  resolved?: boolean;
+  resolver?: Actor;
 }
 
 export interface Check {
@@ -176,7 +179,16 @@ export interface Forge {
   listPullReviewComments(owner: string, repo: string, index: number): Promise<InlineComment[]>;
   listPullReviews(owner: string, repo: string, index: number): Promise<PullReview[]>;
   createPullReview(owner: string, repo: string, index: number, review: CreatePullReviewOptions): Promise<PullReview>;
-  submitPullReview(owner: string, repo: string, index: number, reviewId: number, body: string): Promise<PullReview>;
+  submitPullReview(owner: string, repo: string, index: number, reviewId: number, body?: string): Promise<PullReview>;
+  resolvePullComment(owner: string, repo: string, commentId: number): Promise<void>;
+  unresolvePullComment(owner: string, repo: string, commentId: number): Promise<void>;
+  dismissPullReview(
+    owner: string,
+    repo: string,
+    index: number,
+    reviewId: number,
+    opts?: { message?: string; priors?: boolean }
+  ): Promise<PullReview>;
   createCommitStatus(owner: string, repo: string, sha: string, status: CheckPayload): Promise<CheckPayload>;
   listCommitStatuses(owner: string, repo: string, sha: string): Promise<Check[]>;
   listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]>;
@@ -196,6 +208,9 @@ export type ReviewApi = Pick<
   | "listPullReviews"
   | "createPullReview"
   | "submitPullReview"
+  | "resolvePullComment"
+  | "unresolvePullComment"
+  | "dismissPullReview"
   | "createCommitStatus"
 > &
   Pick<Tracker, "getIssue">;

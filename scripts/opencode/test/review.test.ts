@@ -39,6 +39,9 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     listPullReviews: async () => [],
     createPullReview: async () => ({ id: 1 }),
     submitPullReview: async () => ({ id: 1 }),
+    resolvePullComment: async () => undefined,
+    unresolvePullComment: async () => undefined,
+    dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
   };
   return { ...defaults, ...overrides };
@@ -762,7 +765,8 @@ describe("reviewPullRequest", () => {
       expect(reviews).toEqual([
         {
           commit_id: "headsha",
-          event: "COMMENT",
+          event: "APPROVED",
+          body: "No blocking issues",
           comments: [
             {
               path: "src/demo.ts",
@@ -1616,7 +1620,8 @@ describe("publishReviewResult", () => {
     expect(reviews).toEqual([
       {
         commit_id: "headsha",
-        event: "COMMENT",
+        event: "REQUEST_CHANGES",
+        body: "1 blocking",
         comments: [
           {
             path: "src/foo.ts",
@@ -1649,7 +1654,8 @@ describe("publishReviewResult", () => {
     expect(reviews).toEqual([
       {
         commit_id: "headsha",
-        event: "COMMENT",
+        event: "APPROVED",
+        body: "No blocking issues",
         comments: [
           {
             path: "src/demo.ts",
@@ -1674,7 +1680,13 @@ describe("publishReviewResult", () => {
         },
       }),
     });
-    expect(reviews).toEqual([]);
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
+      },
+    ]);
   });
 
   test("retries inlines individually when the batch is rejected and still publishes the sticky", async () => {
@@ -1704,11 +1716,119 @@ describe("publishReviewResult", () => {
     });
     expect(result).toEqual({ status: "posted", commentId: 44 });
     expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
-    expect(reviews).toHaveLength(3);
+    expect(reviews).toHaveLength(4);
     expect(reviews[1]).toMatchObject({
+      event: "COMMENT",
       comments: [{ path: "src/foo.ts", new_position: 12 }],
     });
+    expect(reviews[3]).toMatchObject({
+      commit_id: "headsha",
+      event: "REQUEST_CHANGES",
+      body: "Review requested changes",
+    });
     expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
+  });
+
+  test("submits pending reviews after a batch reject then retries only unpublished inlines", async () => {
+    const reviews: unknown[] = [];
+    const submitted: number[] = [];
+    let batchRejected = false;
+    let pendingSubmitted = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        listPullReviews: async () =>
+          batchRejected && !pendingSubmitted ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
+        listPullReviewComments: async () =>
+          pendingSubmitted
+            ? [
+                {
+                  ...makeComment({
+                    id: 11,
+                    body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+                    user: makeUser({ login: "jumi" }),
+                  }),
+                  path: "src/foo.ts",
+                  commit_id: "blamesha",
+                  new_position: 12,
+                },
+              ]
+            : [],
+        submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
+          expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
+          pendingSubmitted = true;
+          submitted.push(reviewId);
+          return { id: reviewId };
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) {
+            batchRejected = true;
+            throw new Error("batch rejected");
+          }
+          if (review.comments?.[0]?.new_position === 40) throw new Error("line not in diff");
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 1 });
+    expect(submitted).toEqual([99]);
+    expect(reviews).toHaveLength(3);
+    expect(reviews[1]).toMatchObject({
+      event: "COMMENT",
+      comments: [{ path: "src/foo.ts", new_position: 40 }],
+    });
+    expect(reviews[2]).toMatchObject({
+      commit_id: "headsha",
+      event: "REQUEST_CHANGES",
+      body: "Review requested changes",
+    });
+  });
+
+  test("skips remaining inlines when pending submit fails and still publishes the sticky", async () => {
+    const reviews: unknown[] = [];
+    const logs: string[] = [];
+    let sticky = "";
+    let batchRejected = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      logger: (message) => logs.push(message),
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: first.",
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        listPullReviews: async () =>
+          batchRejected ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
+        submitPullReview: async () => {
+          throw new Error("submit rejected");
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if ((review.comments?.length ?? 0) > 1) {
+            batchRejected = true;
+            throw new Error("batch rejected");
+          }
+          throw new Error("pending review already exists");
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 44 });
+    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
+    expect(logs.some((line) => line.includes("pending review 99 not submitted"))).toBe(true);
+    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:12"))).toBe(true);
+    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
+    expect(reviews).toHaveLength(4);
   });
 
   test("does not retry inlines when a lost batch 200 already submitted them", async () => {
@@ -1771,103 +1891,12 @@ describe("publishReviewResult", () => {
     });
     expect(result).toEqual({ status: "posted", commentId: 44 });
     expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
-    expect(reviews).toHaveLength(1);
-  });
-
-  test("submits pending reviews after a batch reject then retries only unpublished inlines", async () => {
-    const reviews: unknown[] = [];
-    const submitted: number[] = [];
-    let batchRejected = false;
-    let pendingSubmitted = false;
-    const result = await publishReviewResult({
-      ...publishOpts,
-      resultMarkdown: [
-        "src/foo.ts:12: 🔴 bug: first.",
-        "src/foo.ts:40: 🟡 risk: second.",
-        "<!-- jumi-check: failure -->",
-      ].join("\n"),
-      api: makeApi({
-        listPullReviews: async () =>
-          batchRejected && !pendingSubmitted ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
-        listPullReviewComments: async () =>
-          pendingSubmitted
-            ? [
-                {
-                  ...makeComment({
-                    id: 11,
-                    body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-                    user: makeUser({ login: "jumi" }),
-                  }),
-                  path: "src/foo.ts",
-                  commit_id: "blamesha",
-                  new_position: 12,
-                },
-              ]
-            : [],
-        submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
-          expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
-          pendingSubmitted = true;
-          submitted.push(reviewId);
-          return { id: reviewId };
-        },
-        createPullReview: async (_owner, _repo, _index, review) => {
-          reviews.push(review);
-          if ((review.comments?.length ?? 0) > 1) {
-            batchRejected = true;
-            throw new Error("batch rejected");
-          }
-          if (review.comments?.[0]?.new_position === 40) throw new Error("line not in diff");
-          return { id: reviews.length };
-        },
-      }),
-    });
-    expect(result).toEqual({ status: "posted", commentId: 1 });
-    expect(submitted).toEqual([99]);
     expect(reviews).toHaveLength(2);
     expect(reviews[1]).toMatchObject({
-      comments: [{ path: "src/foo.ts", new_position: 40 }],
+      commit_id: "headsha",
+      event: "REQUEST_CHANGES",
+      body: "Review requested changes",
     });
-  });
-
-  test("skips remaining inlines when pending submit fails and still publishes the sticky", async () => {
-    const reviews: unknown[] = [];
-    const logs: string[] = [];
-    let sticky = "";
-    let batchRejected = false;
-    const result = await publishReviewResult({
-      ...publishOpts,
-      logger: (message) => logs.push(message),
-      resultMarkdown: [
-        "src/foo.ts:12: 🔴 bug: first.",
-        "src/foo.ts:40: 🟡 risk: second.",
-        "<!-- jumi-check: failure -->",
-      ].join("\n"),
-      api: makeApi({
-        createIssueComment: async (_owner, _repo, _index, body) => {
-          sticky = body;
-          return makeComment({ id: 44, body });
-        },
-        listPullReviews: async () =>
-          batchRejected ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
-        submitPullReview: async () => {
-          throw new Error("submit rejected");
-        },
-        createPullReview: async (_owner, _repo, _index, review) => {
-          reviews.push(review);
-          if ((review.comments?.length ?? 0) > 1) {
-            batchRejected = true;
-            throw new Error("batch rejected");
-          }
-          throw new Error("pending review already exists");
-        },
-      }),
-    });
-    expect(result).toEqual({ status: "posted", commentId: 44 });
-    expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: failure -->");
-    expect(logs.some((line) => line.includes("pending review 99 not submitted"))).toBe(true);
-    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:12"))).toBe(true);
-    expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
-    expect(reviews).toHaveLength(3);
   });
 
   test("retries leftover inlines when pending submit fails", async () => {
@@ -1923,7 +1952,7 @@ describe("publishReviewResult", () => {
     expect(logs.some((line) => line.includes("pending review 99 not submitted"))).toBe(true);
     expect(logs.some((line) => line.includes("inline skipped src/foo.ts:12"))).toBe(true);
     expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
-    expect(reviews).toHaveLength(3);
+    expect(reviews).toHaveLength(4);
   });
 
   test("submits a pending bot review for this SHA before treating inlines as posted", async () => {
@@ -1967,7 +1996,13 @@ describe("publishReviewResult", () => {
     });
     expect(result).toEqual({ status: "posted", commentId: 1 });
     expect(submitted).toEqual([99]);
-    expect(reviews).toEqual([]);
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
+      },
+    ]);
   });
 
   test("failed pending submit still publishes sticky and does not treat inlines as posted", async () => {
@@ -2021,7 +2056,8 @@ describe("publishReviewResult", () => {
     expect(reviews).toEqual([
       {
         commit_id: "headsha",
-        event: "COMMENT",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
         comments: [
           {
             path: "src/foo.ts",
@@ -2033,7 +2069,7 @@ describe("publishReviewResult", () => {
     ]);
   });
 
-  test("skips inlines already posted with the same marker path, new_position, and head SHA", async () => {
+  test("skips inlines already posted with the same path and normalized text", async () => {
     const reviews: unknown[] = [];
     const result = await publishReviewResult({
       ...publishOpts,
@@ -2081,7 +2117,8 @@ describe("publishReviewResult", () => {
     expect(reviews).toEqual([
       {
         commit_id: "headsha",
-        event: "COMMENT",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
         comments: [
           {
             path: "src/foo.ts",
@@ -2093,11 +2130,11 @@ describe("publishReviewResult", () => {
     ]);
   });
 
-  test("posts inlines again when existing bot comments are on a previous head SHA", async () => {
+  test("leaves an unresolved fingerprint on a new SHA and still posts the review event", async () => {
     const reviews: unknown[] = [];
     const result = await publishReviewResult({
       ...publishOpts,
-      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      resultMarkdown: "src/foo.ts:18: 🔴 bug: first.\n<!-- jumi-check: failure -->",
       api: makeApi({
         listPullReviews: async () => [{ id: 5, commit_id: "oldsha", user: makeUser({ login: "jumi" }) }],
         listPullReviewComments: async () => [
@@ -2123,19 +2160,13 @@ describe("publishReviewResult", () => {
     expect(reviews).toEqual([
       {
         commit_id: "headsha",
-        event: "COMMENT",
-        comments: [
-          {
-            path: "src/foo.ts",
-            new_position: 12,
-            body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
       },
     ]);
   });
 
-  test("does not post a review when every inline already exists", async () => {
+  test("still posts REQUEST_CHANGES when every inline already exists", async () => {
     const reviews: unknown[] = [];
     await publishReviewResult({
       ...publishOpts,
@@ -2161,13 +2192,17 @@ describe("publishReviewResult", () => {
         },
       }),
     });
-    expect(reviews).toEqual([]);
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
+      },
+    ]);
   });
 
   test("does not duplicate a leftover inline whose comment commit_id is a blame SHA", async () => {
     const reviews: unknown[] = [];
-    let batchRejected = false;
-    let pendingSubmitted = false;
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: [
@@ -2176,45 +2211,80 @@ describe("publishReviewResult", () => {
         "<!-- jumi-check: failure -->",
       ].join("\n"),
       api: makeApi({
-        listPullReviews: async () =>
-          batchRejected && !pendingSubmitted ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
-        listPullReviewComments: async () =>
-          pendingSubmitted
-            ? [
-                {
-                  ...makeComment({
-                    id: 11,
-                    body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-                    user: makeUser({ login: "jumi" }),
-                  }),
-                  path: "src/foo.ts",
-                  commit_id: "blamesha",
-                  new_position: 12,
-                },
-              ]
-            : [],
-        submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
-          expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
-          pendingSubmitted = true;
-          return { id: reviewId };
-        },
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            commit_id: "blamesha",
+            new_position: 12,
+          },
+        ],
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
-          if ((review.comments?.length ?? 0) > 1) {
-            batchRejected = true;
-            throw new Error("batch rejected");
-          }
+          if ((review.comments?.length ?? 0) > 1) throw new Error("batch rejected");
           return { id: reviews.length };
         },
       }),
     });
-    expect(reviews).toHaveLength(2);
-    expect(reviews[1]).toMatchObject({
-      comments: [{ path: "src/foo.ts", new_position: 40 }],
-    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
+        comments: [
+          {
+            path: "src/foo.ts",
+            new_position: 40,
+            body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
   });
 
-  test("does not submit a pending review from a previous head SHA", async () => {
+  test("submits leftover pending bot reviews from a previous SHA before creating a new review", async () => {
+    const submitted: number[] = [];
+    const reviews: unknown[] = [];
+    let pendingSubmitted = false;
+    const pendingReview = {
+      id: 99,
+      state: "PENDING",
+      commit_id: "oldsha",
+      user: makeUser({ login: "jumi" }),
+    };
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      api: makeApi({
+        listPullReviews: async () => (pendingSubmitted ? [] : [pendingReview]),
+        submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
+          expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
+          pendingSubmitted = true;
+          submitted.push(reviewId);
+          return { id: reviewId };
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted", commentId: 1 });
+    expect(submitted).toEqual([99]);
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "APPROVED",
+        body: "No blocking issues",
+      },
+    ]);
+  });
+
+  test("submits a pending review from a previous head SHA after a batch reject", async () => {
     const submitted: number[] = [];
     const reviews: unknown[] = [];
     let batchRejected = false;
@@ -2238,47 +2308,12 @@ describe("publishReviewResult", () => {
         },
       }),
     });
-    expect(submitted).toEqual([]);
-    expect(reviews).toHaveLength(2);
-  });
-
-  test("retries inlines on a new head SHA when an old leftover shares path and line", async () => {
-    const reviews: unknown[] = [];
-    await publishReviewResult({
-      ...publishOpts,
-      resultMarkdown: [
-        "src/foo.ts:12: 🔴 bug: first.",
-        "src/foo.ts:40: 🟡 risk: second.",
-        "<!-- jumi-check: failure -->",
-      ].join("\n"),
-      api: makeApi({
-        listPullReviews: async () => [{ id: 5, commit_id: "oldsha", user: makeUser({ login: "jumi" }) }],
-        listPullReviewComments: async () => [
-          {
-            ...makeComment({
-              id: 11,
-              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-              user: makeUser({ login: "jumi" }),
-            }),
-            path: "src/foo.ts",
-            commit_id: "blamesha",
-            new_position: 12,
-            pull_request_review_id: 5,
-          },
-        ],
-        createPullReview: async (_owner, _repo, _index, review) => {
-          reviews.push(review);
-          if ((review.comments?.length ?? 0) > 1) throw new Error("batch rejected");
-          return { id: reviews.length };
-        },
-      }),
-    });
+    expect(submitted).toEqual([99]);
     expect(reviews).toHaveLength(3);
-    expect(reviews[1]).toMatchObject({
-      comments: [{ path: "src/foo.ts", new_position: 12 }],
-    });
     expect(reviews[2]).toMatchObject({
-      comments: [{ path: "src/foo.ts", new_position: 40 }],
+      commit_id: "headsha",
+      event: "REQUEST_CHANGES",
+      body: "Review requested changes",
     });
   });
 
@@ -2320,5 +2355,196 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(reviews).toEqual([]);
+  });
+
+  test("self-review on a jumi-authored PR falls back to COMMENT", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "jumi" }) }),
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "COMMENT",
+        body: "No blocking issues",
+      },
+    ]);
+  });
+
+  test("falls back to COMMENT when Gitea rejects APPROVED as self-review", async () => {
+    const reviews: unknown[] = [];
+    const logs: string[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      logger: (message) => logs.push(message),
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if (review.event === "APPROVED") throw new Error("not allowed to approve your own pull request");
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "APPROVED",
+        body: "No blocking issues",
+      },
+      {
+        commit_id: "headsha",
+        event: "COMMENT",
+        body: "No blocking issues",
+      },
+    ]);
+    expect(logs.some((line) => line.includes("falling back to COMMENT"))).toBe(true);
+  });
+
+  test("COMMENT fallback on success does not dismiss earlier REQUEST_CHANGES", async () => {
+    const dismissed: number[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      api: makeApi({
+        listPullReviews: async () => [
+          { id: 9, state: "REQUEST_CHANGES", user: makeUser({ login: "jumi" }) },
+          { id: 10, state: "REQUEST_CHANGES", dismissed: true, user: makeUser({ login: "jumi" }) },
+        ],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          if (review.event === "APPROVED") throw new Error("not allowed to approve your own pull request");
+          return { id: 11 };
+        },
+        dismissPullReview: async (_owner, _repo, _index, reviewId) => {
+          dismissed.push(reviewId);
+          return { id: reviewId };
+        },
+      }),
+    });
+    expect(dismissed).toEqual([]);
+  });
+
+  test("resolves gone inlines and unresolves a finding that came back", async () => {
+    const resolved: number[] = [];
+    const unresolved: number[] = [];
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            new_position: 12,
+            resolved: true,
+          },
+          {
+            ...makeComment({
+              id: 12,
+              body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            new_position: 40,
+          },
+        ],
+        resolvePullComment: async (_owner, _repo, commentId) => {
+          resolved.push(commentId);
+        },
+        unresolvePullComment: async (_owner, _repo, commentId) => {
+          unresolved.push(commentId);
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(resolved).toEqual([12]);
+    expect(unresolved).toEqual([11]);
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
+      },
+    ]);
+  });
+
+  test("posts a new inline when unresolve fails for a finding that came back", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:18: 🔴 bug: first.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            new_position: 12,
+            resolved: true,
+          },
+        ],
+        unresolvePullComment: async () => {
+          throw new Error("unresolve rejected");
+        },
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "REQUEST_CHANGES",
+        body: "Review requested changes",
+        comments: [
+          {
+            path: "src/foo.ts",
+            new_position: 18,
+            body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("success with no locatable findings still posts APPROVED", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "APPROVED",
+        body: "No blocking issues",
+      },
+    ]);
   });
 });

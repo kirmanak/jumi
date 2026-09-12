@@ -315,12 +315,7 @@ export function parsePrHeadChangedReason(reason: string): { from: string; to: st
 
 export function isRequestChangesReview(review: PullReview): boolean {
   const blob = `${review.state ?? ""} ${review.type ?? ""}`.toLowerCase();
-  return (
-    blob.includes("request") ||
-    blob.includes("reject") ||
-    blob.includes("request_changes") ||
-    blob.includes("pull_request_review_rejected")
-  );
+  return blob.includes("request_changes") || blob.includes("reject");
 }
 
 export function isCommentReview(review: PullReview): boolean {

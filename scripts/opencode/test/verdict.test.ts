@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseReviewFindings, parseReviewOutput } from "../src/verdict.ts";
+import { findingFingerprint, parseReviewFindings, parseReviewOutput } from "../src/verdict.ts";
 
 describe("parseReviewOutput", () => {
   test("reads an explicit success check and strips it from the comment", () => {
@@ -98,5 +98,14 @@ describe("parseReviewFindings", () => {
       { path: "src/demo.ts", line: 40, body: "❓ q: why swallow errors?" },
     ]);
     expect(parseReviewFindings(text, { singleFilePath: "../oops.ts" })).toEqual([]);
+  });
+
+  test("fingerprints findings by path and normalized text, not line", () => {
+    expect(findingFingerprint("src/foo.ts", "🔴 bug: first.")).toBe(
+      findingFingerprint("src/foo.ts", "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->")
+    );
+    expect(findingFingerprint("src/foo.ts", "🔴 bug: first.")).not.toBe(
+      findingFingerprint("src/bar.ts", "🔴 bug: first.")
+    );
   });
 });
