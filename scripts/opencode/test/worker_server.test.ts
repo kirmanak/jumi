@@ -9,8 +9,10 @@ import {
   encodeJson,
   makeIssue,
   makeIssuePayload,
+  makeLinkedIssue,
   makePayload,
   makePR,
+  makeRepo,
   makeUser,
   makeWorkerConfig,
   responseJson,
@@ -344,6 +346,84 @@ describe("createWorkerFetchHandler", () => {
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "pull request issue" });
     expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed of a blocker wakes assigned blocked issues and does not enqueue the blocker", async () => {
+    const queue = makeQueue();
+    const blocks: number[] = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async (_owner, _repo, index) => {
+          blocks.push(index);
+          if (index !== 196) return [];
+          return [
+            makeLinkedIssue({
+              number: 206,
+              title: "stale",
+              body: "stale",
+              html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/206",
+            }),
+          ];
+        },
+        getIssue: async (_owner, _repo, index) =>
+          makeIssue({
+            number: index,
+            title: "Slice two",
+            body: "Depends on #196",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/206",
+            updated_at: "2026-05-24T00:00:00Z",
+          }),
+        getRepo: async () => makeRepo(),
+      },
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) }))
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#206", queued: true });
+    expect(blocks).toEqual([196, 206]);
+    expect(queue.jobs).toHaveLength(1);
+    expect(queue.jobs[0]?.issueNumber).toBe(206);
+    expect(queue.jobs[0]?.title).toBe("Slice two");
+    expect(queue.jobs[0]?.body).toBe("Depends on #196");
+    expect(queue.jobs[0]?.issueUpdatedAt).toBe("2026-05-24T00:00:00Z");
+  });
+
+  test("closed without a blocks API still 202-skips the closed issue", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) }))
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action closed" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("reopened of a blocker enqueues the blocker and wakes assigned blocked issues", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => [makeLinkedIssue({ number: 206 })],
+        getIssue: async (_owner, _repo, index) =>
+          makeIssue({
+            number: index,
+            title: index === 206 ? "Slice two" : "Slice one",
+            html_url: `https://gitea.kirmanak.stream/kirmanak/demo/issues/${index}`,
+          }),
+        getRepo: async () => makeRepo(),
+      },
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "reopened", issue: makeIssue({ number: 196 }) }))
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#196", "kirmanak/demo#206"] });
+    expect(queue.jobs.map((job) => job.issueNumber)).toEqual([196, 206]);
   });
 
   test("returns bad request for valid signatures with invalid payloads", async () => {

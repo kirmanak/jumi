@@ -685,6 +685,18 @@ describe("processWorkerTick", () => {
     });
   });
 
+  test("blocked skip is not a terminal implement outcome", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeIssueJob();
+    await store.enqueueIssue(job);
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      implement: async () => ({ status: "skipped", reason: "blocked on #196" }),
+    });
+    expect(store.rows[0]?.state).toBe("skipped");
+    expect(store.rows[0]?.resultReason).toBe("blocked on #196");
+    expect(await store.enqueueIssue(job)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+  });
+
   test("maps implement no-changes to skipped so an issue edit can re-enqueue", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeIssueJob();

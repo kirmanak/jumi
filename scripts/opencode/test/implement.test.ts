@@ -8,7 +8,16 @@ import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import {
+  emptyCiMethods,
+  makeComment,
+  makeIssue,
+  makeIssueJob,
+  makeLinkedIssue,
+  makePR,
+  makeRepo,
+  makeUser,
+} from "./fixtures.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -264,6 +273,97 @@ describe("implementIssue", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "skipped", reason: "assigned PR is the job for this repo" });
+      const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
+      expect(claim).toBeUndefined();
+    });
+  });
+
+  test("skips first-run before clone when a Gitea blocker is still open", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueDependencies: async (_owner, _repo, index) => (index === 12 ? [makeLinkedIssue({ number: 196 })] : []),
+      });
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "blocked on #196" });
+      expect(api.comments.some((body) => body.includes("blocked on #196"))).toBe(true);
+      expect(api.comments.filter((body) => body.includes("blocked on #196"))).toHaveLength(1);
+      const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
+      expect(claim).toBeUndefined();
+    });
+  });
+
+  test("keeps today's skip when an open PR already closes the blocked issue", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12" })],
+        listIssueDependencies: async () => [makeLinkedIssue({ number: 196 })],
+      });
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "open PR already closes #12" });
+      expect(api.comments.some((body) => body.includes("blocked on"))).toBe(false);
+    });
+  });
+
+  test("fail-closes a dependency cycle without running the engine", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueDependencies: async (_owner, _repo, index) =>
+          index === 12 ? [makeLinkedIssue({ number: 196 })] : [makeLinkedIssue({ number: 12 })],
+      });
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "stuck: dependency cycle" });
+      expect(api.comments.some((body) => body.includes("stuck: dependency cycle"))).toBe(true);
       const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
       expect(claim).toBeUndefined();
     });

@@ -1,4 +1,5 @@
 import type { ServiceConfig } from "../src/config.ts";
+import type { LinkedIssue } from "../src/ports.ts";
 import type {
   GiteaActionJob,
   GiteaComment,
@@ -171,15 +172,38 @@ export function makeIssuePayload(overrides: Partial<GiteaIssuePayload> = {}): Gi
   };
 }
 
+export function makeLinkedIssue(overrides: Partial<LinkedIssue> = {}): LinkedIssue {
+  const owner = overrides.owner ?? "kirmanak";
+  const repo = overrides.repo ?? "demo";
+  const number = overrides.number ?? 196;
+  return {
+    owner,
+    repo,
+    number,
+    title: "Blocker",
+    state: "open",
+    html_url: `https://gitea.kirmanak.stream/${owner}/${repo}/issues/${number}`,
+    body: "",
+    assignee: { login: "jumi" },
+    assignees: [{ login: "jumi" }],
+    updated_at: "2026-05-23T00:00:00Z",
+    ...overrides,
+  };
+}
+
 export function emptyCiMethods(): {
   listCommitStatuses: () => Promise<GiteaCommitStatus[]>;
   listActionJobs: () => Promise<GiteaActionJob[]>;
   getActionJobLogs: () => Promise<string>;
+  listIssueDependencies: () => Promise<LinkedIssue[]>;
+  listIssueBlocks: () => Promise<LinkedIssue[]>;
 } {
   return {
     listCommitStatuses: async () => [],
     listActionJobs: async () => [],
     getActionJobLogs: async () => "",
+    listIssueDependencies: async () => [],
+    listIssueBlocks: async () => [],
   };
 }
 

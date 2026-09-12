@@ -1,5 +1,7 @@
 import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
-import type { GiteaIssue, GiteaIssuePayload, IssueJob } from "./types.ts";
+import { DEPENDENCY_GRAPH_CAP } from "./dependencies.ts";
+import type { LinkedIssue, Repo, Task } from "./ports.ts";
+import type { GiteaIssuePayload, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
@@ -47,7 +49,7 @@ export type IssueWebhookDecision =
 export function issueJobFrom(
   owner: string,
   repo: string,
-  issue: GiteaIssue,
+  issue: { number: number; title: string; body?: string | null; html_url: string; updated_at: string },
   repository: { default_branch: string; clone_url: string },
   action: string
 ): Omit<IssueJob, "delivery" | "receivedAt"> {
@@ -91,4 +93,87 @@ export function shouldEnqueueIssue(payload: GiteaIssuePayload, policy: IssueWebh
     type: "enqueue",
     job: issueJobFrom(owner, repo, payload.issue, payload.repository, payload.action),
   };
+}
+
+const WAKE_ACTIONS = new Set(["closed", "reopened"]);
+
+export function isDependencyWakeAction(action: string): boolean {
+  return WAKE_ACTIONS.has(action);
+}
+
+function issueKey(owner: string, repo: string, number: number): string {
+  return `${owner}/${repo}#${number}`;
+}
+
+export async function blockedIssueJobsToEnqueue(
+  payload: GiteaIssuePayload,
+  policy: IssueWebhookPolicy,
+  api: {
+    listIssueBlocks(owner: string, repo: string, index: number): Promise<LinkedIssue[]>;
+    getIssue(owner: string, repo: string, index: number): Promise<Task>;
+    getRepo?(owner: string, repo: string): Promise<Repo>;
+  }
+): Promise<Omit<IssueJob, "delivery" | "receivedAt">[]> {
+  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
+  const jobs: Omit<IssueJob, "delivery" | "receivedAt">[] = [];
+  const seen = new Set<string>();
+  const stack = new Set<string>();
+
+  const enqueueIfEligible = async (row: LinkedIssue): Promise<void> => {
+    let issue: Task;
+    try {
+      issue = await api.getIssue(row.owner, row.repo, row.number);
+    } catch {
+      return;
+    }
+    if (isPullRequestIssue(issue) || issue.state !== "open") return;
+    if (!isAssignedToBot(issue, policy.botUsername)) return;
+
+    let repository: { default_branch: string; clone_url: string };
+    if (row.owner === owner && row.repo === repo) {
+      repository = payload.repository;
+    } else if (api.getRepo) {
+      try {
+        const fetched = await api.getRepo(row.owner, row.repo);
+        try {
+          assertRepositoryPolicy(fetched, policy);
+        } catch {
+          return;
+        }
+        repository = fetched;
+      } catch {
+        return;
+      }
+    } else {
+      return;
+    }
+
+    jobs.push(issueJobFrom(row.owner, row.repo, issue, repository, payload.action));
+  };
+
+  const walk = async (curOwner: string, curRepo: string, number: number): Promise<void> => {
+    const key = issueKey(curOwner, curRepo, number);
+    if (stack.has(key)) return;
+    if (seen.has(key)) return;
+    if (seen.size >= DEPENDENCY_GRAPH_CAP) return;
+    seen.add(key);
+    stack.add(key);
+
+    const blocked = await api.listIssueBlocks(curOwner, curRepo, number);
+    for (const row of blocked) {
+      const rowKey = issueKey(row.owner, row.repo, row.number);
+      if (stack.has(rowKey) || seen.has(rowKey)) continue;
+      try {
+        assertRepositoryPolicy({ full_name: `${row.owner}/${row.repo}`, html_url: row.html_url }, policy);
+      } catch {
+        continue;
+      }
+      await enqueueIfEligible(row);
+      await walk(row.owner, row.repo, row.number);
+    }
+    stack.delete(key);
+  };
+
+  await walk(owner, repo, payload.issue.number);
+  return jobs;
 }

@@ -29,6 +29,22 @@ export interface Task {
   is_pull?: boolean;
 }
 
+/** Gitea issue dependency / blocks row, possibly in another repo. */
+export interface LinkedIssue {
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  state: "open" | "closed";
+  html_url: string;
+  body: string | null;
+  assignee?: Actor | null;
+  assignees?: Actor[] | null;
+  updated_at: string;
+  pull_request?: unknown;
+  is_pull?: boolean;
+}
+
 export interface PullHead {
   ref: string;
   sha: string;
@@ -152,6 +168,8 @@ export interface Tracker {
   ): Promise<{ id: number } | undefined>;
   createIssueComment(owner: string, repo: string, index: number, body: string): Promise<Comment>;
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment>;
+  listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]>;
+  listIssueBlocks(owner: string, repo: string, index: number): Promise<LinkedIssue[]>;
 }
 
 /** Forge: clone + PR + sticky + status (git host identity). */

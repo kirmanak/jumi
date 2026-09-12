@@ -484,11 +484,15 @@ function engineId(): string {
   return `engine-${hostname()}-${process.pid}-${crypto.randomUUID()}`;
 }
 
-function workerMailboxApi(api: ReviewApi): Pick<IssueApi, "listOpenPulls" | "getIssue"> {
-  const extra = api as ReviewApi & Partial<Pick<IssueApi, "listOpenPulls">>;
+function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
+  const extra = api as ReviewApi & Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks">>;
   return {
     getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
+    getRepo: (owner, repo) => api.getRepo(owner, repo),
     listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
+    listIssueBlocks: extra.listIssueBlocks
+      ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)
+      : undefined,
   };
 }
 

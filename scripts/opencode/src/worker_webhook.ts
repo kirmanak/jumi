@@ -7,7 +7,12 @@ import {
   shouldEnqueuePullRejectedFollowUp,
 } from "./followup_webhook.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
-import { parseIssuesPayload, shouldEnqueueIssue } from "./issue_webhook.ts";
+import {
+  blockedIssueJobsToEnqueue,
+  isDependencyWakeAction,
+  parseIssuesPayload,
+  shouldEnqueueIssue,
+} from "./issue_webhook.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
@@ -23,9 +28,12 @@ export interface WorkerWebhookQueue {
   enqueue(job: IssueJob): EnqueueResult | Promise<EnqueueResult>;
 }
 
+export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
+  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks">>;
+
 export interface HandleWorkerWebhookDeps {
   queue: WorkerWebhookQueue;
-  api?: Pick<IssueApi, "listOpenPulls" | "getIssue">;
+  api?: WorkerWebhookApi;
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
 }
@@ -254,7 +262,6 @@ export async function handleWorkerWebhookEvent(
     const payload = parseIssuesPayload(rawBody);
     const decision = shouldEnqueueIssue(payload, policy);
 
-    if (decision.type === "skip") return skipped(decision.reason, logger);
     if (decision.type === "cancel") {
       const result = deps.cancel
         ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)
@@ -263,14 +270,53 @@ export async function handleWorkerWebhookEvent(
       return json(202, result);
     }
 
-    const job: IssueJob = {
-      ...decision.job,
-      delivery,
-      receivedAt: new Date().toISOString(),
+    const receivedAt = new Date().toISOString();
+    const jobs: IssueJob[] = [];
+    const seen = new Set<string>();
+    const addJob = (partial: Omit<IssueJob, "delivery" | "receivedAt">) => {
+      const key = `${partial.owner}/${partial.repo}#${partial.issueNumber}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      jobs.push({ ...partial, delivery, receivedAt });
     };
-    const result: EnqueueResult = await deps.queue.enqueue(job);
-    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
-    return json(202, result);
+
+    if (decision.type === "enqueue") addJob(decision.job);
+
+    if (isDependencyWakeAction(payload.action) && deps.api?.listIssueBlocks) {
+      try {
+        const woken = await blockedIssueJobsToEnqueue(payload, policy, {
+          listIssueBlocks: deps.api.listIssueBlocks,
+          getIssue: deps.api.getIssue,
+          getRepo: deps.api.getRepo,
+        });
+        for (const partial of woken) addJob(partial);
+      } catch (err) {
+        if (jobs.length === 0) {
+          return skipped(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`, logger);
+        }
+      }
+    }
+
+    if (jobs.length === 0) {
+      if (decision.type === "skip") return skipped(decision.reason, logger);
+      return skipped("no blocked issues to wake", logger);
+    }
+
+    if (jobs.length === 1) {
+      const job = jobs[0];
+      if (!job) return skipped("no blocked issues to wake", logger);
+      const result: EnqueueResult = await deps.queue.enqueue(job);
+      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      return json(202, result);
+    }
+
+    const keys: string[] = [];
+    for (const job of jobs) {
+      const result: EnqueueResult = await deps.queue.enqueue(job);
+      keys.push(result.key);
+      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    }
+    return json(202, { queued: true, keys });
   } catch (err) {
     if (isQueueUnavailable(err)) {
       logger(`queue unavailable: ${err.message}`);

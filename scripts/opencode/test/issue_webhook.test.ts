@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { parseIssuesPayload, shouldEnqueueIssue } from "../src/issue_webhook.ts";
-import { encodeJson, makeIssue, makeIssuePayload, makeRepo, makeUser } from "./fixtures.ts";
+import { DEPENDENCY_GRAPH_CAP } from "../src/dependencies.ts";
+import { blockedIssueJobsToEnqueue, parseIssuesPayload, shouldEnqueueIssue } from "../src/issue_webhook.ts";
+import { encodeJson, makeIssue, makeIssuePayload, makeLinkedIssue, makeRepo, makeUser } from "./fixtures.ts";
 
 const policy = {
   giteaUrl: "https://gitea.kirmanak.stream",
@@ -79,6 +80,13 @@ describe("shouldEnqueueIssue", () => {
     expect(decision).toEqual({ type: "skip", reason: "pull request issue" });
   });
 
+  test("does not first-run a closed issue; closed is a wake of blockers", () => {
+    expect(shouldEnqueueIssue(makeIssuePayload({ action: "closed" }), policy)).toEqual({
+      type: "skip",
+      reason: "unsupported action closed",
+    });
+  });
+
   test("skips other actions and issues not assigned to the bot", () => {
     expect(shouldEnqueueIssue(makeIssuePayload({ action: "edited" }), policy)).toEqual({
       type: "skip",
@@ -109,5 +117,159 @@ describe("shouldEnqueueIssue", () => {
         policy
       )
     ).toThrow("does not match configured Gitea origin");
+  });
+});
+
+describe("blockedIssueJobsToEnqueue", () => {
+  test("enqueues open issues assigned to the bot from GET /blocks with a fresh GET", async () => {
+    const jobs = await blockedIssueJobsToEnqueue(
+      makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196 }) }),
+      policy,
+      {
+        listIssueBlocks: async () => [
+          makeLinkedIssue({
+            number: 206,
+            title: "stale title",
+            body: "stale body",
+            updated_at: "2026-01-01T00:00:00Z",
+          }),
+        ],
+        getIssue: async () =>
+          makeIssue({
+            number: 206,
+            title: "fresh title",
+            body: "fresh body",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/206",
+            updated_at: "2026-05-24T00:00:00Z",
+          }),
+      }
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.issueNumber).toBe(206);
+    expect(jobs[0]?.title).toBe("fresh title");
+    expect(jobs[0]?.body).toBe("fresh body");
+    expect(jobs[0]?.issueUpdatedAt).toBe("2026-05-24T00:00:00Z");
+    expect(jobs[0]?.action).toBe("closed");
+    expect(jobs[0]?.cloneUrl).toBe("https://gitea.kirmanak.stream/kirmanak/demo.git");
+  });
+
+  test("skips closed, unassigned, and pull-request blocked issues", async () => {
+    const loaded: number[] = [];
+    const jobs = await blockedIssueJobsToEnqueue(makeIssuePayload({ action: "closed" }), policy, {
+      listIssueBlocks: async () => [
+        makeLinkedIssue({ number: 1 }),
+        makeLinkedIssue({ number: 2 }),
+        makeLinkedIssue({ number: 3 }),
+      ],
+      getIssue: async (_owner, _repo, index) => {
+        loaded.push(index);
+        if (index === 1) return makeIssue({ number: 1, state: "closed" });
+        if (index === 2) return makeIssue({ number: 2, assignee: makeUser({ login: "alice" }), assignees: [] });
+        return makeIssue({ number: 3, pull_request: { merged_at: null } });
+      },
+    });
+    expect(loaded).toEqual([1, 2, 3]);
+    expect(jobs).toEqual([]);
+  });
+
+  test("honors cross-repo rows via getRepo and still clones only that repo", async () => {
+    const other = makeRepo({ name: "other", full_name: "kirmanak/other" });
+    const jobs = await blockedIssueJobsToEnqueue(makeIssuePayload({ action: "closed" }), policy, {
+      listIssueBlocks: async () => [makeLinkedIssue({ owner: "kirmanak", repo: "other", number: 10 })],
+      getIssue: async (owner, repo, index) =>
+        makeIssue({
+          number: index,
+          title: "cross",
+          html_url: `https://gitea.kirmanak.stream/${owner}/${repo}/issues/${index}`,
+        }),
+      getRepo: async () => other,
+    });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.owner).toBe("kirmanak");
+    expect(jobs[0]?.repo).toBe("other");
+    expect(jobs[0]?.issueNumber).toBe(10);
+    expect(jobs[0]?.cloneUrl).toBe(other.clone_url);
+  });
+
+  test("walks transitive /blocks through a closed parent", async () => {
+    const blocks: number[] = [];
+    const jobs = await blockedIssueJobsToEnqueue(
+      makeIssuePayload({ action: "closed", issue: makeIssue({ number: 180, state: "closed" }) }),
+      policy,
+      {
+        listIssueBlocks: async (_owner, _repo, index) => {
+          blocks.push(index);
+          if (index === 180) return [makeLinkedIssue({ number: 196, state: "closed" })];
+          if (index === 196) return [makeLinkedIssue({ number: 12 })];
+          return [];
+        },
+        getIssue: async (_owner, _repo, index) => {
+          if (index === 196) {
+            return makeIssue({
+              number: 196,
+              state: "closed",
+              assignee: makeUser({ login: "alice" }),
+              assignees: [],
+            });
+          }
+          return makeIssue({
+            number: 12,
+            title: "Slice two",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/12",
+          });
+        },
+      }
+    );
+    expect(blocks).toEqual([180, 196, 12]);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.issueNumber).toBe(12);
+    expect(jobs[0]?.title).toBe("Slice two");
+  });
+
+  test("does not loop a /blocks cycle and still enqueues open assigned issues", async () => {
+    let calls = 0;
+    const jobs = await blockedIssueJobsToEnqueue(
+      makeIssuePayload({ action: "closed", issue: makeIssue({ number: 180, state: "closed" }) }),
+      policy,
+      {
+        listIssueBlocks: async (_owner, _repo, index) => {
+          calls += 1;
+          if (calls > 8) throw new Error("cycle walk did not terminate");
+          if (index === 180) return [makeLinkedIssue({ number: 196 })];
+          if (index === 196) return [makeLinkedIssue({ number: 180, state: "closed" })];
+          return [];
+        },
+        getIssue: async (_owner, _repo, index) =>
+          makeIssue({
+            number: index,
+            state: index === 180 ? "closed" : "open",
+            html_url: `https://gitea.kirmanak.stream/kirmanak/demo/issues/${index}`,
+          }),
+      }
+    );
+    expect(calls).toBe(2);
+    expect(jobs.map((job) => job.issueNumber)).toEqual([196]);
+  });
+
+  test("stops walking /blocks at the dependency graph cap", async () => {
+    let calls = 0;
+    const jobs = await blockedIssueJobsToEnqueue(
+      makeIssuePayload({ action: "closed", issue: makeIssue({ number: 0, state: "closed" }) }),
+      policy,
+      {
+        listIssueBlocks: async (_owner, _repo, index) => {
+          calls += 1;
+          if (calls > DEPENDENCY_GRAPH_CAP + 5) throw new Error("cap walk did not terminate");
+          return [makeLinkedIssue({ number: index + 1 })];
+        },
+        getIssue: async (_owner, _repo, index) =>
+          makeIssue({
+            number: index,
+            html_url: `https://gitea.kirmanak.stream/kirmanak/demo/issues/${index}`,
+          }),
+      }
+    );
+    expect(calls).toBe(DEPENDENCY_GRAPH_CAP);
+    expect(jobs).toHaveLength(DEPENDENCY_GRAPH_CAP);
   });
 });

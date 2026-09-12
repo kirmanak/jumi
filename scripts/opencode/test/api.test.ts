@@ -272,6 +272,58 @@ describe("GiteaAPI", () => {
     expect(urls[1]).toContain("/issues/7/comments?limit=50&page=2");
   });
 
+  test("lists issue dependencies and blocks with paging and cross-repo rows", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("/dependencies")) {
+        return Response.json([
+          {
+            number: 196,
+            title: "one",
+            body: "",
+            state: "open",
+            html_url: "https://gitea.example.test/owner/repo/issues/196",
+            user: { login: "alice" },
+            updated_at: "2026-05-23T00:00:00Z",
+            created_at: "2026-05-23T00:00:00Z",
+            repository: { full_name: "owner/other", name: "other", owner: "owner" },
+          },
+        ]);
+      }
+      if (String(url).includes("/blocks")) {
+        return Response.json([
+          {
+            number: 206,
+            title: "two",
+            body: "",
+            state: "open",
+            html_url: "https://gitea.example.test/owner/repo/issues/206",
+            user: { login: "alice" },
+            updated_at: "2026-05-23T00:00:00Z",
+            created_at: "2026-05-23T00:00:00Z",
+          },
+        ]);
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const deps = await api.listIssueDependencies("owner", "repo", 206);
+    const blocks = await api.listIssueBlocks("owner", "repo", 196);
+    expect(deps).toEqual([expect.objectContaining({ owner: "owner", repo: "other", number: 196, state: "open" })]);
+    expect(blocks).toEqual([expect.objectContaining({ owner: "owner", repo: "repo", number: 206 })]);
+    expect(urls[0]).toContain("/issues/206/dependencies?limit=50&page=1");
+    expect(urls[1]).toContain("/issues/196/blocks?limit=50&page=1");
+  });
+
+  test("treats 404 on issue dependencies and blocks as an empty list", async () => {
+    globalThis.fetch = (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch;
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listIssueDependencies("owner", "repo", 206)).resolves.toEqual([]);
+    await expect(api.listIssueBlocks("owner", "repo", 196)).resolves.toEqual([]);
+  });
+
   test("lists pull reviews with exact-50 paging", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {

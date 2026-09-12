@@ -5,6 +5,7 @@ import type {
   Comment,
   CreatePullReviewOptions,
   InlineComment,
+  LinkedIssue,
   Pull,
   PullFile,
   PullReview,
@@ -53,6 +54,42 @@ export function toTask(issue: GiteaIssue): Task {
     assignees: issue.assignees?.map(actor) ?? issue.assignees,
     updated_at: issue.updated_at,
     created_at: issue.created_at,
+    pull_request: issue.pull_request,
+    is_pull: issue.is_pull,
+  };
+}
+
+function ownerRepoOf(issue: GiteaIssue, fallbackOwner: string, fallbackRepo: string): { owner: string; repo: string } {
+  const meta = issue.repository;
+  if (meta && typeof meta.full_name === "string") {
+    const [owner, repo] = meta.full_name.split("/");
+    if (owner && repo) return { owner, repo };
+  }
+  const name = meta && "name" in meta && typeof meta.name === "string" ? meta.name : undefined;
+  const ownerField = meta && "owner" in meta ? meta.owner : undefined;
+  const ownerLogin =
+    typeof ownerField === "string"
+      ? ownerField
+      : ownerField && typeof ownerField === "object" && typeof ownerField.login === "string"
+        ? ownerField.login
+        : undefined;
+  if (ownerLogin && name) return { owner: ownerLogin, repo: name };
+  return { owner: fallbackOwner, repo: fallbackRepo };
+}
+
+export function toLinkedIssue(issue: GiteaIssue, fallbackOwner: string, fallbackRepo: string): LinkedIssue {
+  const { owner, repo } = ownerRepoOf(issue, fallbackOwner, fallbackRepo);
+  return {
+    owner,
+    repo,
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    html_url: issue.html_url,
+    body: issue.body,
+    assignee: issue.assignee ? actor(issue.assignee) : issue.assignee,
+    assignees: issue.assignees?.map(actor) ?? issue.assignees,
+    updated_at: issue.updated_at,
     pull_request: issue.pull_request,
     is_pull: issue.is_pull,
   };
@@ -302,6 +339,29 @@ export class GiteaAPI {
 
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {
     return toTask(await this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
+  }
+
+  private async getAllOrEmptyOn404<T>(path: string): Promise<T[]> {
+    try {
+      return await this.getAll<T>(path);
+    } catch (err) {
+      if (isNotFoundError(err)) return [];
+      throw err;
+    }
+  }
+
+  async listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]> {
+    const issues = await this.getAllOrEmptyOn404<GiteaIssue>(
+      `/repos/${this.repoPath(owner, repo)}/issues/${index}/dependencies`
+    );
+    return issues.map((issue) => toLinkedIssue(issue, owner, repo));
+  }
+
+  async listIssueBlocks(owner: string, repo: string, index: number): Promise<LinkedIssue[]> {
+    const issues = await this.getAllOrEmptyOn404<GiteaIssue>(
+      `/repos/${this.repoPath(owner, repo)}/issues/${index}/blocks`
+    );
+    return issues.map((issue) => toLinkedIssue(issue, owner, repo));
   }
 
   async getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]> {

@@ -15,6 +15,7 @@ import {
   writeClaim,
 } from "./claim.ts";
 import type { ConflictResult } from "./conflict.ts";
+import { blockedOnComment, checkIssueBlockers } from "./dependencies.ts";
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
@@ -230,6 +231,27 @@ export async function implementIssue(
   } catch (err) {
     await forgetClaim();
     return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  try {
+    const blockers = await checkIssueBlockers(opts.api, owner, repo, issueNumber);
+    if (blockers.status === "stuck") {
+      await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, blockers.reason);
+      await forgetClaim();
+      return { status: "skipped", reason: blockers.reason };
+    }
+    if (blockers.status === "blocked") {
+      const reason = blockedOnComment(blockers.blockers, owner, repo);
+      await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, reason);
+      await forgetClaim();
+      return { status: "skipped", reason };
+    }
+  } catch (err) {
+    await forgetClaim();
+    return {
+      status: "skipped",
+      reason: `failed to load dependencies: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 
   const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);

@@ -1,7 +1,7 @@
 import { isAssignedToBot } from "./assignee.ts";
 import type { Forge, Pull, Tracker } from "./ports.ts";
 
-export type { IssueApi, Tracker } from "./ports.ts";
+export type { IssueApi, LinkedIssue, Tracker } from "./ports.ts";
 
 export function workerMarker(owner: string, repo: string, issueNumber: number): string {
   return `<!-- jumi-worker:${owner}/${repo}#${issueNumber} -->`;

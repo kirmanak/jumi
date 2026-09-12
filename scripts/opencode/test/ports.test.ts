@@ -116,6 +116,8 @@ describe("Engine, Tracker, and Forge ports", () => {
       findStickyIssueComment: async () => undefined,
       createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
       updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
+      listIssueDependencies: async () => [],
+      listIssueBlocks: async () => [],
     };
     const forge: Forge = {
       getRepo: async () => makeRepo(),
@@ -142,7 +144,9 @@ describe("Engine, Tracker, and Forge ports", () => {
       "createIssueComment",
       "findStickyIssueComment",
       "getIssue",
+      "listIssueBlocks",
       "listIssueComments",
+      "listIssueDependencies",
       "updateIssueComment",
     ]);
     expect("getPR" in tracker).toBe(false);
