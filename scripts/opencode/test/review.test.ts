@@ -863,7 +863,7 @@ describe("reviewPullRequest", () => {
     });
   });
 
-  test("monolith posts failure status when sticky write fails after a good review", async () => {
+  test("without persist, posts failure status when sticky write fails after a good review", async () => {
     await withWorkspace(async (workspace) => {
       const statuses: Array<{ state: string; description?: string }> = [];
       await expect(
@@ -973,7 +973,7 @@ describe("reviewPullRequest", () => {
     });
   });
 
-  test("monolith posts failure status when skip status write fails", async () => {
+  test("without persist, posts failure status when skip status write fails", async () => {
     await withWorkspace(async (workspace) => {
       const statuses: Array<{ state: string; description?: string }> = [];
       await expect(

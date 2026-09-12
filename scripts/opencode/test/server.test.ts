@@ -232,7 +232,6 @@ describe("shouldSeedOpenCodeAuth", () => {
   test("router does not seed OpenCode auth", () => {
     expect(shouldSeedOpenCodeAuth("router")).toBe(false);
     expect(shouldSeedOpenCodeAuth("engine")).toBe(true);
-    expect(shouldSeedOpenCodeAuth("monolith")).toBe(true);
   });
 });
 

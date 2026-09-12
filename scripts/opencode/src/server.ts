@@ -8,7 +8,6 @@ import type { IssueApi } from "./gitea_issues.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { ReviewQueue } from "./queue.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import { publishReviewResult, reviewJobKey, reviewPullRequest } from "./review.ts";
 import {
@@ -136,35 +135,6 @@ export async function runReviewJob(
       cgroup_h: formatBytes(after.cgroupBytes),
     });
   }
-}
-
-export function createReviewQueue(
-  config: ServiceConfig,
-  api: ReviewApi = createGiteaForge(config.giteaUrl, config.giteaToken),
-  logger: (message: string) => void = log
-): ReviewQueue {
-  const aborts = new Map<string, AbortController>();
-  const queue = new ReviewQueue(
-    async (job: ReviewJob) => {
-      const key = reviewJobKey(job);
-      const abort = new AbortController();
-      aborts.set(key, abort);
-      try {
-        await runReviewJob(config, job, api, logger, { abortSignal: abort.signal });
-      } finally {
-        aborts.delete(key);
-      }
-    },
-    config.queueConcurrency,
-    logger
-  );
-  (queue as ReviewQueue & { aborts: Map<string, AbortController> }).aborts = aborts;
-  return queue;
-}
-
-function abortReviewQueue(queue: ReviewQueue): void {
-  const withAborts = queue as ReviewQueue & { aborts?: Map<string, AbortController> };
-  for (const abort of withAborts.aborts?.values() ?? []) abort.abort();
 }
 
 function isAbortError(err: unknown): boolean {
@@ -566,23 +536,6 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       token: config.opencodeWellKnownToken,
       logger,
     });
-  }
-
-  if (config.role === "monolith") {
-    const queue = createReviewQueue(config, api, logger);
-    const started = await serveAndWait(
-      config,
-      createFetchHandler(config, { queue, logger, getPR: (owner, repo, index) => api.getPR(owner, repo, index) }),
-      logger,
-      deps
-    );
-    const httpStop = started.stop;
-    started.stop = () => {
-      abortReviewQueue(queue);
-      httpStop();
-    };
-    bindAbort(deps.signal, () => started.stop());
-    return started;
   }
 
   const store = deps.store ?? (await createPgReviewJobStore(config.databaseUrl ?? ""));

@@ -35,11 +35,10 @@ One `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `confli
 | `router` | reviewer image, `JUMI_ROLE=router` | Org-hook **HMAC mailbox**: verify signature, persist rows, reclaim expired leases, queue metrics. No OpenCode, no HOME, no auth seed. |
 | `engine` | reviewer image, `JUMI_ROLE=engine` | Lease `review` only, run OpenCode, persist `JUMI_REVIEW.md` before workspace teardown, publish sticky/status. |
 | `worker` | worker image (`bun run src/worker_server.ts`) | Lease `implement` / `follow-up` / `conflict`. Not `JUMI_ROLE=router`. |
-| `monolith` | reviewer image, default `JUMI_ROLE` | In-process review queue so existing images stay live until GitOps flips. Ignores `DATABASE_URL`. |
 
 Router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). Cheap 202 skips log the reason. After the engine publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned to the bot, persist inserts a `follow-up` row.
 
-`router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is not required for `engine`; required on `router` / `monolith` / worker. GitOps must set `DATABASE_URL` on the worker; process start stays fail-closed if unset (first-run assign then uses the in-memory queue — do not 202 those jobs into RAM).
+`router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is not required for `engine`; required on `router` / worker. GitOps must set `DATABASE_URL` on the worker; process start stays fail-closed if unset (first-run assign then uses the in-memory queue — do not 202 those jobs into RAM).
 
 The org hook hits the **router** mailbox. Worker pods do not need a public webhook path. Worker HTTP (`POST /webhooks/gitea`) still exists for local/dev and healthz/metrics.
 
@@ -65,8 +64,9 @@ Required:
 |------|-----|-------------|
 | `GITEA_URL` | all | Trusted Gitea base URL (your origin, not another cluster’s) |
 | `GITEA_BOT_TOKEN` | all | Bot token to fetch PR data and post comments |
-| `GITEA_WEBHOOK_SECRET` | `monolith` / `router` / worker | HMAC-SHA256 of the raw body (`X-Gitea-Signature`). Not required for `engine` |
+| `GITEA_WEBHOOK_SECRET` | `router` / worker | HMAC-SHA256 of the raw body (`X-Gitea-Signature`). Not required for `engine` |
 | `DATABASE_URL` | `router` / `engine` / worker | Postgres URL for the shared ledger |
+| `JUMI_ROLE` | reviewer | `router` or `engine`. Unset, empty, or unknown fails process start. Worker is a separate image, not this flag |
 
 Optional (unset keeps the compiled default; set your own owners and well-known origin):
 
@@ -98,7 +98,6 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics`. Phoenix project name for OpenCode traces. Worker image sets `jumi-worker` |
 | `PHOENIX_OTLP_ENDPOINT` | unset | In-cluster Phoenix OTLP HTTP base URL (app port, `/v1/traces`). Unset skips export. Use an in-cluster URL, not a public hostname |
-| `JUMI_ROLE` | `monolith` | `monolith`, `router`, or `engine`. Unset is `monolith`. Worker is a separate image, not this flag |
 | `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
 | `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine or implementing worker aborts OpenCode and requeues the same job without consuming an attempt. Crash/OOM still uses reclaim |
 | `MAX_INCOMPLETE_RETRIES` | `2` | Extra write-only OpenCode runs when a review exits 0 with no `JUMI_REVIEW.md`, then public stuck. Same session when possible. Unset is 2. Does not enqueue worker follow-up |

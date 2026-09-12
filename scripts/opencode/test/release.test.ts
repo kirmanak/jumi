@@ -259,7 +259,7 @@ describe("deploy/contract.md", () => {
   test("parses live contract from origin/main intent", async () => {
     const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
     const parsed = parseContract(markdown);
-    expect(parsed.reviewer.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
+    expect(parsed.reviewer.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET", "JUMI_ROLE"]);
     expect(parsed.reviewer.optionalEnv).toEqual([
       "HOST",
       "PORT",
@@ -281,7 +281,6 @@ describe("deploy/contract.md", () => {
       "MAX_OUTPUT_BYTES",
       "MAX_WEBHOOK_BYTES",
       "OPENCODE_TIMEOUT_MS",
-      "JUMI_ROLE",
       "DATABASE_URL",
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",

@@ -1,6 +1,6 @@
 import { readFileSync, unlinkSync } from "node:fs";
 
-export type JumiRole = "monolith" | "router" | "engine";
+export type JumiRole = "router" | "engine";
 
 export interface ServiceConfig {
   host: string;
@@ -100,8 +100,8 @@ function normalizeUrl(value: string): string {
 }
 
 export function parseJumiRole(value: string | undefined): JumiRole {
-  if (!value || value === "monolith") return "monolith";
   if (value === "router" || value === "engine") return value;
+  if (!value) throw new Error("Missing required environment variable: JUMI_ROLE");
   throw new Error(`Invalid JUMI_ROLE: ${value}`);
 }
 
@@ -110,7 +110,7 @@ const MAX_INCOMPLETE_RETRIES_ENV = "MAX_INCOMPLETE_RETRIES";
 
 export function loadConfig(env: Env = process.env): ServiceConfig {
   const resolved = overlaySecretsFromFile(env);
-  const role = parseJumiRole(resolved.JUMI_ROLE);
+  const role = parseJumiRole(requireEnv(resolved, "JUMI_ROLE"));
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
@@ -139,7 +139,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
     opencodeTimeoutMs,
     role,
-    databaseUrl: role === "monolith" ? undefined : requireEnv(resolved, "DATABASE_URL"),
+    databaseUrl: requireEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
     maxFollowupRounds: intEnv(resolved, MAX_FOLLOWUP_ROUNDS_ENV, 3),

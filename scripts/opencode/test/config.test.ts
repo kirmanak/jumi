@@ -9,6 +9,8 @@ describe("loadConfig", () => {
     GITEA_URL: "https://gitea.kirmanak.stream/",
     GITEA_BOT_TOKEN: "bot-token",
     GITEA_WEBHOOK_SECRET: "secret",
+    JUMI_ROLE: "router",
+    DATABASE_URL: "postgres://jumi",
   };
 
   test("loads defaults and normalizes values", () => {
@@ -23,8 +25,8 @@ describe("loadConfig", () => {
     expect(config.opencodeWellKnownKey).toBe("OPENCODE_WELLKNOWN_TOKEN");
     expect(config.opencodeWellKnownToken).toBe("unused");
     expect(config.queueConcurrency).toBe(1);
-    expect(config.role).toBe("monolith");
-    expect(config.databaseUrl).toBeUndefined();
+    expect(config.role).toBe("router");
+    expect(config.databaseUrl).toBe("postgres://jumi");
     expect(config.leaseMs).toBe(900_000 + 10 * 60 * 1000);
     expect(config.maxJobAttempts).toBe(2);
     expect(config.maxFollowupRounds).toBe(3);
@@ -54,19 +56,11 @@ describe("loadConfig", () => {
     expect(config.phoenixOtlpEndpoint).toBe("http://phoenix.phoenix.svc:6006");
   });
 
-  test("ignores DATABASE_URL for monolith", () => {
-    const config = loadConfig({ ...required, DATABASE_URL: "postgres://ignored" });
-    expect(config.role).toBe("monolith");
-    expect(config.databaseUrl).toBeUndefined();
-  });
-
   test("requires DATABASE_URL for router and engine", () => {
-    expect(() => loadConfig({ ...required, JUMI_ROLE: "router" })).toThrow("DATABASE_URL");
-    expect(() => loadConfig({ ...required, JUMI_ROLE: "engine" })).toThrow("DATABASE_URL");
-    expect(loadConfig({ ...required, JUMI_ROLE: "router", DATABASE_URL: "postgres://jumi" }).role).toBe("router");
-    expect(loadConfig({ ...required, JUMI_ROLE: "engine", DATABASE_URL: "postgres://jumi" }).databaseUrl).toBe(
-      "postgres://jumi"
-    );
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "router", DATABASE_URL: "" })).toThrow("DATABASE_URL");
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "engine", DATABASE_URL: "" })).toThrow("DATABASE_URL");
+    expect(loadConfig({ ...required, JUMI_ROLE: "router" }).role).toBe("router");
+    expect(loadConfig({ ...required, JUMI_ROLE: "engine" }).databaseUrl).toBe("postgres://jumi");
   });
 
   test("parses LEASE_MS and MAX_JOB_ATTEMPTS", () => {
@@ -81,8 +75,12 @@ describe("loadConfig", () => {
     expect(config.maxJobAttempts).toBe(3);
   });
 
-  test("rejects invalid JUMI_ROLE", () => {
+  test("rejects missing, empty, and unknown JUMI_ROLE", () => {
+    expect(() => loadConfig({ ...required, JUMI_ROLE: undefined })).toThrow("JUMI_ROLE");
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "" })).toThrow("JUMI_ROLE");
     expect(() => loadConfig({ ...required, JUMI_ROLE: "worker" })).toThrow("Invalid JUMI_ROLE");
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "monolith" })).toThrow("Invalid JUMI_ROLE");
+    expect(() => loadConfig({ ...required, JUMI_ROLE: "garbage" })).toThrow("Invalid JUMI_ROLE");
   });
 
   test("parses CSV and integer options", () => {
@@ -120,14 +118,19 @@ describe("loadConfig", () => {
   });
 
   test("requires secrets and rejects invalid positive integers", () => {
-    expect(() => loadConfig({ GITEA_URL: "https://gitea.kirmanak.stream", GITEA_BOT_TOKEN: "token" })).toThrow(
-      "GITEA_WEBHOOK_SECRET"
-    );
+    expect(() =>
+      loadConfig({
+        GITEA_URL: "https://gitea.kirmanak.stream",
+        GITEA_BOT_TOKEN: "token",
+        JUMI_ROLE: "router",
+        DATABASE_URL: "postgres://jumi",
+      })
+    ).toThrow("GITEA_WEBHOOK_SECRET");
     expect(() => loadConfig({ ...required, MAX_FILES: "0" })).toThrow("Invalid positive integer");
     expect(() => loadConfig({ ...required, PORT: "abc" })).toThrow("Invalid positive integer");
   });
 
-  test("engine does not require GITEA_WEBHOOK_SECRET; router and monolith still do", () => {
+  test("engine does not require GITEA_WEBHOOK_SECRET; router still does", () => {
     const config = loadConfig({
       JUMI_ROLE: "engine",
       DATABASE_URL: "postgres://jumi",
@@ -145,9 +148,6 @@ describe("loadConfig", () => {
         GITEA_BOT_TOKEN: "token",
       })
     ).toThrow("GITEA_WEBHOOK_SECRET");
-    expect(() => loadConfig({ GITEA_URL: "https://gitea.kirmanak.stream", GITEA_BOT_TOKEN: "token" })).toThrow(
-      "GITEA_WEBHOOK_SECRET"
-    );
   });
 
   test("scrubSecretEnv unsets Gitea secrets after they have been copied into config", () => {
@@ -197,6 +197,8 @@ describe("loadConfig", () => {
 
     const config = loadConfig({
       GITEA_URL: "https://gitea.kirmanak.stream",
+      JUMI_ROLE: "router",
+      DATABASE_URL: "postgres://jumi",
       [SECRETS_FILE_ENV]: file,
     });
 
