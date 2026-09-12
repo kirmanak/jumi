@@ -4,7 +4,6 @@ import {
   isUniqueViolation,
   MemoryReviewJobStore,
   PgReviewJobStore,
-  pgTextArrayLiteral,
   QueueUnavailableError,
   RECLAIM_LEASED_BY,
   REVIEW_JOBS_SCHEMA_SQL,
@@ -643,18 +642,6 @@ describe("PgReviewJobStore.lease unique violation", () => {
     const row = await store.lease("worker-1", 60_000, new Date(0), WORKER_JOB_KINDS);
     expect(row?.id).toBe(9);
     expect(calls).toBe(2);
-  });
-});
-
-describe("pgTextArrayLiteral", () => {
-  test("formats closed job kinds as a postgres array literal, not a comma-string", () => {
-    expect(pgTextArrayLiteral(["review"])).toBe("{review}");
-    expect(pgTextArrayLiteral(["implement", "follow-up", "conflict"])).toBe("{implement,follow-up,conflict}");
-    expect(pgTextArrayLiteral([])).toBe("{}");
-  });
-
-  test("refuses elements that would break the literal", () => {
-    expect(() => pgTextArrayLiteral(["review,queued"])).toThrow(/refusing to bind/);
   });
 });
 

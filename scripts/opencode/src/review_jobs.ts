@@ -1,7 +1,14 @@
-import { SQL } from "bun";
 import type { EnqueueResult } from "./queue.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
+import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
+
+export {
+  createBunSqlClient,
+  isQueueUnavailable,
+  pgTextArrayLiteral,
+  QueueUnavailableError,
+} from "./sql_client.ts";
 
 export const REVIEW_JOB_STATES = ["queued", "leased", "succeeded", "skipped", "failed", "cancelled"] as const;
 export type ReviewJobState = (typeof REVIEW_JOB_STATES)[number];
@@ -27,20 +34,6 @@ export const MAX_ATTEMPTS_REASON = "Jumi review failed: max attempts exceeded";
 export const HEARTBEAT_MS = 30_000;
 export const QUEUE_POLL_MS = 1_000;
 export const RECLAIM_LEASED_BY = "reclaim";
-
-export class QueueUnavailableError extends Error {
-  readonly cause: unknown;
-
-  constructor(cause?: unknown) {
-    super(cause instanceof Error ? cause.message : cause ? String(cause) : "queue unavailable");
-    this.name = "QueueUnavailableError";
-    this.cause = cause;
-  }
-}
-
-export function isQueueUnavailable(err: unknown): err is QueueUnavailableError {
-  return err instanceof QueueUnavailableError;
-}
 
 export type { PersistReviewResult };
 
@@ -305,27 +298,6 @@ function workerIssueIsLeased(
 
 function leasesWorkerKinds(kinds: readonly JobKind[]): boolean {
   return kinds.some((kind) => isWorkerKind(kind));
-}
-
-const PG_TEXT_ARRAY_ELEMENT = /^[A-Za-z0-9_-]+$/;
-
-/**
- * Bun `SQL.unsafe` stringifies JS arrays as `"a,b"`. Postgres then rejects
- * `ANY($n::text[])` with 22P02 (`malformed array literal: "review"`).
- */
-export function pgTextArrayLiteral(values: readonly string[]): string {
-  if (values.length === 0) return "{}";
-  for (const value of values) {
-    if (!PG_TEXT_ARRAY_ELEMENT.test(value)) {
-      throw new Error(`refusing to bind ${JSON.stringify(value)} as a postgres text[] element`);
-    }
-  }
-  return `{${values.join(",")}}`;
-}
-
-function bindUnsafeParams(params?: unknown[]): unknown[] | undefined {
-  if (!params) return params;
-  return params.map((value) => (Array.isArray(value) ? pgTextArrayLiteral(value.map(String)) : value));
 }
 
 function isImplementTerminal(
@@ -664,12 +636,6 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   }
 }
 
-type SqlClient = {
-  unsafe(query: string, params?: unknown[]): Promise<unknown>;
-  begin<T>(fn: (tx: SqlClient) => Promise<T>): Promise<T>;
-  close?: () => Promise<void>;
-};
-
 type ReviewJobRow = {
   id: unknown;
   job_key: unknown;
@@ -705,11 +671,6 @@ export function isUniqueViolation(err: unknown): boolean {
     current = rec.cause;
   }
   return false;
-}
-
-function wrapSqlError(err: unknown): never {
-  if (err instanceof QueueUnavailableError) throw err;
-  throw new QueueUnavailableError(err);
 }
 
 function asRows<T>(result: unknown): T[] {
@@ -779,31 +740,6 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     createdAt: epochRequired(row.created_at),
     updatedAt: epochRequired(row.updated_at),
   };
-}
-
-function wrapClient(client: SqlClient): SqlClient {
-  return {
-    async unsafe(query, params) {
-      try {
-        return await client.unsafe(query, bindUnsafeParams(params));
-      } catch (err) {
-        wrapSqlError(err);
-      }
-    },
-    async begin(fn) {
-      try {
-        return await client.begin((tx) => fn(wrapClient(tx)));
-      } catch (err) {
-        wrapSqlError(err);
-      }
-    },
-    close: client.close ? () => client.close?.() ?? Promise.resolve() : undefined,
-  };
-}
-
-export function createBunSqlClient(databaseUrl: string): SqlClient {
-  const sql = new SQL(databaseUrl) as unknown as SqlClient;
-  return wrapClient(sql);
 }
 
 export class PgReviewJobStore implements ReviewJobStore {
