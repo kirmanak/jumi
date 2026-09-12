@@ -10,7 +10,7 @@ import {
 } from "./claim.ts";
 import { implementConflict } from "./conflict.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
-import { createGiteaForge } from "./forge.ts";
+import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
@@ -39,7 +39,7 @@ function log(message: string) {
 
 export function createIssueQueue(
   config: WorkerConfig,
-  api: IssueApi = createGiteaForge(config.giteaUrl, config.giteaToken),
+  api: IssueApi = createForge(config),
   logger: (message: string) => void = log
 ): ReviewQueue<IssueJob> {
   const aborts = new Map<string, AbortController>();

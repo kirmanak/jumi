@@ -1,15 +1,20 @@
 import { readFileSync, unlinkSync } from "node:fs";
-import { SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
+import { loadForgeBind, SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
+import { type ForgeKind, parseForge } from "./forge.ts";
 
 export interface WorkerConfig {
   host: string;
   port: number;
+  forge: ForgeKind;
   giteaUrl: string;
   giteaToken: string;
   webhookSecret: string;
   webhookAuthToken?: string;
   allowedOrgs: string[];
   allowedRepos: string[];
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
   botUsername: string;
   followupIgnoreLogins: string[];
   model: string;
@@ -89,15 +94,23 @@ function normalizeUrl(value: string): string {
 export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
   const resolved = overlaySecretsFromFile(env);
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
+  const forge = parseForge(resolved.FORGE);
+  const forgeBind =
+    forge === "github"
+      ? loadForgeBind(resolved, { requireWebhookSecret: true })
+      : {
+          forge,
+          giteaUrl: normalizeUrl(requireEnv(resolved, "GITEA_URL")),
+          giteaToken: requireEnv(resolved, "GITEA_BOT_TOKEN"),
+          webhookSecret: requireEnv(resolved, "GITEA_WEBHOOK_SECRET"),
+          webhookAuthToken: optionalEnv(resolved, "GITEA_WEBHOOK_AUTH_TOKEN"),
+          allowedOrgs: csvEnv(resolved, "GITEA_ALLOWED_ORGS", ["kirmanak"]),
+          allowedRepos: csvEnv(resolved, "GITEA_ALLOWED_REPOS"),
+        };
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
-    giteaUrl: normalizeUrl(requireEnv(resolved, "GITEA_URL")),
-    giteaToken: requireEnv(resolved, "GITEA_BOT_TOKEN"),
-    webhookSecret: requireEnv(resolved, "GITEA_WEBHOOK_SECRET"),
-    webhookAuthToken: optionalEnv(resolved, "GITEA_WEBHOOK_AUTH_TOKEN"),
-    allowedOrgs: csvEnv(resolved, "GITEA_ALLOWED_ORGS", ["kirmanak"]),
-    allowedRepos: csvEnv(resolved, "GITEA_ALLOWED_REPOS"),
+    ...forgeBind,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",

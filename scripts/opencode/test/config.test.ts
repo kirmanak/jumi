@@ -16,6 +16,7 @@ describe("loadConfig", () => {
   test("loads defaults and normalizes values", () => {
     const config = loadConfig(required);
 
+    expect(config.forge).toBe("gitea");
     expect(config.giteaUrl).toBe("https://gitea.kirmanak.stream");
     expect(config.allowedOrgs).toEqual(["kirmanak"]);
     expect(config.allowedRepos).toEqual([]);
@@ -169,10 +170,14 @@ describe("loadConfig", () => {
       expect(config.webhookSecret).toBe("live-webhook-secret");
       expect(config.webhookAuthToken).toBe("live-auth-token");
 
+      process.env.GITHUB_APP_PRIVATE_KEY = "live-github-pem";
+      process.env.GITHUB_WEBHOOK_SECRET = "live-gh-webhook";
       scrubSecretEnv();
       expect(process.env.GITEA_BOT_TOKEN).toBeUndefined();
       expect(process.env.GITEA_WEBHOOK_SECRET).toBeUndefined();
       expect(process.env.GITEA_WEBHOOK_AUTH_TOKEN).toBeUndefined();
+      expect(process.env.GITHUB_APP_PRIVATE_KEY).toBeUndefined();
+      expect(process.env.GITHUB_WEBHOOK_SECRET).toBeUndefined();
       expect(config.giteaToken).toBe("live-bot-token");
     } finally {
       for (const key of SECRET_ENV_KEYS) {
@@ -205,6 +210,103 @@ describe("loadConfig", () => {
     expect(config.giteaToken).toBe("file-bot-token");
     expect(config.webhookSecret).toBe("file-webhook-secret");
     expect(config.webhookAuthToken).toBe("file-auth-token");
+    expect(() => readFileSync(file)).toThrow();
+  });
+
+  const githubPem = "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----";
+  const githubRequired = {
+    FORGE: "github",
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: githubPem,
+    GITHUB_APP_INSTALLATION_ID: "456",
+    GITHUB_WEBHOOK_SECRET: "gh-secret",
+    FORGE_URL: "https://github.com/",
+    GITHUB_ALLOWED_ORGS: "acme",
+    JUMI_ROLE: "router",
+    DATABASE_URL: "postgres://jumi",
+  };
+
+  test("FORGE unset or empty or gitea keeps GITEA_* requirements", () => {
+    expect(loadConfig(required).forge).toBe("gitea");
+    expect(loadConfig({ ...required, FORGE: "" }).forge).toBe("gitea");
+    expect(loadConfig({ ...required, FORGE: "gitea" }).forge).toBe("gitea");
+    expect(() => loadConfig({ ...required, FORGE: "gitea", GITEA_URL: "" })).toThrow("GITEA_URL");
+    expect(() => loadConfig({ ...required, FORGE: "gitea", GITEA_BOT_TOKEN: "" })).toThrow("GITEA_BOT_TOKEN");
+  });
+
+  test("invalid FORGE fails closed", () => {
+    expect(() => loadConfig({ ...required, FORGE: "gitlab" })).toThrow("Invalid FORGE");
+  });
+
+  test("FORGE=github without GitHub env fails closed", () => {
+    expect(() => loadConfig({ ...required, FORGE: "github" })).toThrow("GITHUB_APP_ID");
+    expect(() => loadConfig({ FORGE: "github", JUMI_ROLE: "router", DATABASE_URL: "postgres://jumi" })).toThrow(
+      "GITHUB_APP_ID"
+    );
+    expect(() => loadConfig({ ...githubRequired, GITHUB_APP_PRIVATE_KEY: "" })).toThrow("GITHUB_APP_PRIVATE_KEY");
+    expect(() => loadConfig({ ...githubRequired, GITHUB_APP_INSTALLATION_ID: "" })).toThrow(
+      "GITHUB_APP_INSTALLATION_ID"
+    );
+    expect(() => loadConfig({ ...githubRequired, FORGE_URL: "" })).toThrow("FORGE_URL");
+    expect(() => loadConfig({ ...githubRequired, GITHUB_ALLOWED_ORGS: "" })).toThrow("GITHUB_ALLOWED_ORGS");
+  });
+
+  test("FORGE=github dual-binds URL/orgs/webhook and requires GitHub App env", () => {
+    const config = loadConfig(githubRequired);
+    expect(config.forge).toBe("github");
+    expect(config.giteaUrl).toBe("https://github.com");
+    expect(config.giteaToken).toBe("");
+    expect(config.webhookSecret).toBe("gh-secret");
+    expect(config.allowedOrgs).toEqual(["acme"]);
+    expect(config.allowedRepos).toEqual([]);
+    expect(config.githubAppId).toBe("123");
+    expect(config.githubAppPrivateKey).toBe(githubPem);
+    expect(config.githubAppInstallationId).toBe("456");
+  });
+
+  test("FORGE=github optional GITHUB_ALLOWED_REPOS and escaped PEM", () => {
+    const config = loadConfig({
+      ...githubRequired,
+      GITHUB_ALLOWED_REPOS: "acme/a, acme/b",
+      GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\\nMII\\n-----END PRIVATE KEY-----",
+    });
+    expect(config.allowedRepos).toEqual(["acme/a", "acme/b"]);
+    expect(config.githubAppPrivateKey).toBe(githubPem);
+  });
+
+  test("FORGE=github engine still requires GITHUB_WEBHOOK_SECRET; invalid PEM fails", () => {
+    expect(loadConfig({ ...githubRequired, JUMI_ROLE: "engine" }).webhookSecret).toBe("gh-secret");
+    expect(() => loadConfig({ ...githubRequired, JUMI_ROLE: "engine", GITHUB_WEBHOOK_SECRET: "" })).toThrow(
+      "GITHUB_WEBHOOK_SECRET"
+    );
+    expect(() => loadConfig({ ...githubRequired, GITHUB_APP_PRIVATE_KEY: "not-a-key" })).toThrow("Invalid PEM");
+  });
+
+  test("loadConfig reads GitHub secrets from JUMI_SECRETS_FILE and unlinks it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jumi-gh-secrets-"));
+    const file = join(dir, "secrets.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        GITHUB_APP_PRIVATE_KEY: githubPem,
+        GITHUB_WEBHOOK_SECRET: "file-gh-secret",
+      }),
+      { mode: 0o600 }
+    );
+
+    const config = loadConfig({
+      FORGE: "github",
+      GITHUB_APP_ID: "123",
+      GITHUB_APP_INSTALLATION_ID: "456",
+      FORGE_URL: "https://github.com/",
+      GITHUB_ALLOWED_ORGS: "acme",
+      JUMI_ROLE: "router",
+      DATABASE_URL: "postgres://jumi",
+      [SECRETS_FILE_ENV]: file,
+    });
+
+    expect(config.githubAppPrivateKey).toBe(githubPem);
+    expect(config.webhookSecret).toBe("file-gh-secret");
     expect(() => readFileSync(file)).toThrow();
   });
 });

@@ -1,16 +1,21 @@
 import { readFileSync, unlinkSync } from "node:fs";
+import { type ForgeKind, parseForge } from "./forge.ts";
 
 export type JumiRole = "router" | "engine";
 
 export interface ServiceConfig {
   host: string;
   port: number;
+  forge: ForgeKind;
   giteaUrl: string;
   giteaToken: string;
   webhookSecret: string;
   webhookAuthToken?: string;
   allowedOrgs: string[];
   allowedRepos: string[];
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
   botUsername: string;
   followupIgnoreLogins: string[];
   model: string;
@@ -37,11 +42,17 @@ export interface ServiceConfig {
 
 type Env = Record<string, string | undefined>;
 
-export const SECRET_ENV_KEYS = ["GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET", "GITEA_WEBHOOK_AUTH_TOKEN"] as const;
+export const SECRET_ENV_KEYS = [
+  "GITEA_BOT_TOKEN",
+  "GITEA_WEBHOOK_SECRET",
+  "GITEA_WEBHOOK_AUTH_TOKEN",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_WEBHOOK_SECRET",
+] as const;
 export const SECRETS_FILE_ENV = "JUMI_SECRETS_FILE";
 export const ENV_SCRUBBED_FLAG = "JUMI_ENV_SCRUBBED";
 
-/** Drop Gitea secrets from the libc environment. Does not rewrite /proc/pid/environ. */
+/** Drop forge secrets from the libc environment. Does not rewrite /proc/pid/environ. */
 export function scrubSecretEnv(env: Env = process.env): void {
   for (const key of SECRET_ENV_KEYS) {
     delete env[key];
@@ -99,6 +110,75 @@ function normalizeUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+const PEM_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/;
+const PEM_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/;
+
+function requirePem(env: Env, name: string): string {
+  const raw = requireEnv(env, name);
+  const pem = raw.includes("\n") ? raw : raw.replace(/\\n/g, "\n");
+  if (!PEM_BEGIN.test(pem) || !PEM_END.test(pem)) {
+    throw new Error(`Invalid PEM for ${name}`);
+  }
+  return pem;
+}
+
+export type ForgeBind = {
+  forge: ForgeKind;
+  giteaUrl: string;
+  giteaToken: string;
+  webhookSecret: string;
+  webhookAuthToken?: string;
+  allowedOrgs: string[];
+  allowedRepos: string[];
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
+};
+
+const GITHUB_ENV = {
+  appId: "GITHUB_APP_ID",
+  appPrivateKey: "GITHUB_APP_PRIVATE_KEY",
+  appInstallationId: "GITHUB_APP_INSTALLATION_ID",
+  webhookSecret: "GITHUB_WEBHOOK_SECRET",
+  url: "FORGE_URL",
+  allowedOrgs: "GITHUB_ALLOWED_ORGS",
+  allowedRepos: "GITHUB_ALLOWED_REPOS",
+} as const;
+
+export function loadForgeBind(env: Env, opts: { requireWebhookSecret: boolean }): ForgeBind {
+  const forge = parseForge(env.FORGE);
+  if (forge === "github") {
+    const githubAppId = requireEnv(env, GITHUB_ENV.appId);
+    const githubAppPrivateKey = requirePem(env, GITHUB_ENV.appPrivateKey);
+    const githubAppInstallationId = requireEnv(env, GITHUB_ENV.appInstallationId);
+    const webhookSecret = requireEnv(env, GITHUB_ENV.webhookSecret);
+    const giteaUrl = normalizeUrl(requireEnv(env, GITHUB_ENV.url));
+    requireEnv(env, GITHUB_ENV.allowedOrgs);
+    return {
+      forge,
+      giteaUrl,
+      giteaToken: "",
+      webhookSecret,
+      allowedOrgs: csvEnv(env, GITHUB_ENV.allowedOrgs),
+      allowedRepos: csvEnv(env, GITHUB_ENV.allowedRepos),
+      githubAppId,
+      githubAppPrivateKey,
+      githubAppInstallationId,
+    };
+  }
+  return {
+    forge,
+    giteaUrl: normalizeUrl(requireEnv(env, "GITEA_URL")),
+    giteaToken: requireEnv(env, "GITEA_BOT_TOKEN"),
+    webhookSecret: opts.requireWebhookSecret
+      ? requireEnv(env, "GITEA_WEBHOOK_SECRET")
+      : (env.GITEA_WEBHOOK_SECRET ?? ""),
+    webhookAuthToken: optionalEnv(env, "GITEA_WEBHOOK_AUTH_TOKEN"),
+    allowedOrgs: csvEnv(env, "GITEA_ALLOWED_ORGS", ["kirmanak"]),
+    allowedRepos: csvEnv(env, "GITEA_ALLOWED_REPOS"),
+  };
+}
+
 export function parseJumiRole(value: string | undefined): JumiRole {
   if (value === "router" || value === "engine") return value;
   if (!value) throw new Error("Missing required environment variable: JUMI_ROLE");
@@ -112,16 +192,11 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   const resolved = overlaySecretsFromFile(env);
   const role = parseJumiRole(requireEnv(resolved, "JUMI_ROLE"));
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
+  const forgeBind = loadForgeBind(resolved, { requireWebhookSecret: role !== "engine" });
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
-    giteaUrl: normalizeUrl(requireEnv(resolved, "GITEA_URL")),
-    giteaToken: requireEnv(resolved, "GITEA_BOT_TOKEN"),
-    webhookSecret:
-      role === "engine" ? (resolved.GITEA_WEBHOOK_SECRET ?? "") : requireEnv(resolved, "GITEA_WEBHOOK_SECRET"),
-    webhookAuthToken: optionalEnv(resolved, "GITEA_WEBHOOK_AUTH_TOKEN"),
-    allowedOrgs: csvEnv(resolved, "GITEA_ALLOWED_ORGS", ["kirmanak"]),
-    allowedRepos: csvEnv(resolved, "GITEA_ALLOWED_REPOS"),
+    ...forgeBind,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",

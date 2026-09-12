@@ -6,7 +6,7 @@ import { GiteaAPI } from "../src/api.ts";
 import type { Engine, EngineRunOptions } from "../src/engine.ts";
 import { resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
 import type { Forge, Tracker } from "../src/forge.ts";
-import { createGiteaForge, FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "../src/forge.ts";
+import { createForge, createGiteaForge, FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "../src/forge.ts";
 import { openCodeEngine, runOpenCode } from "../src/git.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { implementIssue } from "../src/implement.ts";
@@ -110,6 +110,13 @@ describe("Engine, Tracker, and Forge ports", () => {
     expect(openCodeEngine).toBe(runOpenCode);
     const host = createGiteaForge("https://gitea.example.test", "token-1");
     expect(host).toBeInstanceOf(GiteaAPI);
+    expect(createForge({ giteaUrl: "https://gitea.example.test", giteaToken: "token-1" })).toBeInstanceOf(GiteaAPI);
+    expect(
+      createForge({ forge: "gitea", giteaUrl: "https://gitea.example.test", giteaToken: "token-1" })
+    ).toBeInstanceOf(GiteaAPI);
+    expect(() => createForge({ forge: "github", giteaUrl: "https://github.com", giteaToken: "" })).toThrow(
+      "GitHub forge is not implemented"
+    );
     expect(FORGE_COMMITTER_NAME).toBe("jumi");
     expect(FORGE_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
   });

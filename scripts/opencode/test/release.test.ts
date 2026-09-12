@@ -263,6 +263,7 @@ describe("deploy/contract.md", () => {
     expect(parsed.reviewer.optionalEnv).toEqual([
       "HOST",
       "PORT",
+      "FORGE",
       "GITEA_WEBHOOK_AUTH_TOKEN",
       "GITEA_ALLOWED_ORGS",
       "GITEA_ALLOWED_REPOS",
@@ -290,6 +291,7 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.optionalEnv).toEqual([
       "HOST",
       "PORT",
+      "FORGE",
       "GITEA_WEBHOOK_AUTH_TOKEN",
       "GITEA_ALLOWED_ORGS",
       "GITEA_ALLOWED_REPOS",

@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 import { scrubSecretEnv } from "./config.ts";
-import { createGiteaForge } from "./forge.ts";
+import { createForge } from "./forge.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { ReviewQueue } from "./queue.ts";
 import { createPgReviewJobStore, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
@@ -145,7 +145,7 @@ async function main() {
     token: config.opencodeWellKnownToken,
     logger: log,
   });
-  const api = createGiteaForge(config.giteaUrl, config.giteaToken);
+  const api = createForge(config);
   const store: ReviewJobStore | undefined = config.databaseUrl
     ? await createPgReviewJobStore(config.databaseUrl)
     : undefined;

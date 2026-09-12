@@ -3,7 +3,7 @@ import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
-import { createGiteaForge } from "./forge.ts";
+import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
@@ -526,7 +526,7 @@ async function serveAndWait(
 
 export async function startReviewer(config: ServiceConfig, deps: StartReviewerDeps = {}): Promise<StartedReviewer> {
   const logger = deps.logger ?? log;
-  const api = deps.api ?? createGiteaForge(config.giteaUrl, config.giteaToken);
+  const api = deps.api ?? createForge(config);
 
   if (shouldSeedOpenCodeAuth(config.role)) {
     await (deps.ensureAuth ?? ensureOpenCodeWellKnownAuth)({

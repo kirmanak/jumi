@@ -285,6 +285,7 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
   return {
     host: "127.0.0.1",
     port: 3000,
+    forge: "gitea",
     giteaUrl: "https://gitea.kirmanak.stream",
     giteaToken: "bot-token",
     webhookSecret: "webhook-secret",
@@ -318,6 +319,7 @@ export function makeWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerC
   return {
     host: "127.0.0.1",
     port: 3000,
+    forge: "gitea",
     giteaUrl: "https://gitea.kirmanak.stream",
     giteaToken: "bot-token",
     webhookSecret: "webhook-secret",

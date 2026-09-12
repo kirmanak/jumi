@@ -16,6 +16,7 @@ describe("loadWorkerConfig", () => {
       ...required,
       JUMI_ROLE: "router",
     });
+    expect(config.forge).toBe("gitea");
     expect(config.giteaUrl).toBe("https://gitea.kirmanak.stream");
     expect(config.databaseUrl).toBeUndefined();
     expect(config).not.toHaveProperty("role");
@@ -101,6 +102,49 @@ describe("loadWorkerConfig", () => {
     expect(
       loadWorkerConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: "tapio, renovate-bot, " }).followupIgnoreLogins
     ).toEqual(["tapio", "renovate-bot"]);
+  });
+
+  const githubPem = "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----";
+  const githubRequired = {
+    FORGE: "github",
+    GITHUB_APP_ID: "123",
+    GITHUB_APP_PRIVATE_KEY: githubPem,
+    GITHUB_APP_INSTALLATION_ID: "456",
+    GITHUB_WEBHOOK_SECRET: "gh-secret",
+    FORGE_URL: "https://github.com/",
+    GITHUB_ALLOWED_ORGS: "acme",
+  };
+
+  test("FORGE unset or gitea still requires GITEA_URL / GITEA_BOT_TOKEN", () => {
+    expect(loadWorkerConfig(required).forge).toBe("gitea");
+    expect(loadWorkerConfig({ ...required, FORGE: "" }).forge).toBe("gitea");
+    expect(loadWorkerConfig({ ...required, FORGE: "gitea" }).giteaToken).toBe("bot-token");
+    expect(() => loadWorkerConfig({ ...required, FORGE: "gitea", GITEA_URL: "" })).toThrow("GITEA_URL");
+    expect(() => loadWorkerConfig({ ...required, FORGE: "gitea", GITEA_BOT_TOKEN: "" })).toThrow("GITEA_BOT_TOKEN");
+    expect(() => loadWorkerConfig({ ...required, FORGE: "gitlab" })).toThrow("Invalid FORGE");
+  });
+
+  test("FORGE=github without GitHub env fails closed", () => {
+    expect(() => loadWorkerConfig({ ...required, FORGE: "github" })).toThrow("GITHUB_APP_ID");
+    expect(() => loadWorkerConfig({ FORGE: "github" })).toThrow("GITHUB_APP_ID");
+    expect(() => loadWorkerConfig({ ...githubRequired, GITHUB_WEBHOOK_SECRET: "" })).toThrow("GITHUB_WEBHOOK_SECRET");
+    expect(() => loadWorkerConfig({ ...githubRequired, FORGE_URL: "" })).toThrow("FORGE_URL");
+    expect(() => loadWorkerConfig({ ...githubRequired, GITHUB_ALLOWED_ORGS: "" })).toThrow("GITHUB_ALLOWED_ORGS");
+  });
+
+  test("FORGE=github dual-binds URL/orgs/webhook and optional repos", () => {
+    const config = loadWorkerConfig({
+      ...githubRequired,
+      GITHUB_ALLOWED_REPOS: "acme/a",
+    });
+    expect(config.forge).toBe("github");
+    expect(config.giteaUrl).toBe("https://github.com");
+    expect(config.webhookSecret).toBe("gh-secret");
+    expect(config.allowedOrgs).toEqual(["acme"]);
+    expect(config.allowedRepos).toEqual(["acme/a"]);
+    expect(config.githubAppId).toBe("123");
+    expect(config.githubAppPrivateKey).toBe(githubPem);
+    expect(config.githubAppInstallationId).toBe("456");
   });
 });
 
