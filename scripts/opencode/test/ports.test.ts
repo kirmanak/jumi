@@ -6,9 +6,16 @@ import { GiteaAPI } from "../src/api.ts";
 import type { Engine, EngineRunOptions } from "../src/engine.ts";
 import { resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
 import type { Forge, Tracker } from "../src/forge.ts";
-import { createForge, createGiteaForge, FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "../src/forge.ts";
+import {
+  createForge,
+  createGiteaForge,
+  createGithubForge,
+  FORGE_COMMITTER_EMAIL,
+  FORGE_COMMITTER_NAME,
+} from "../src/forge.ts";
 import { openCodeEngine, runOpenCode } from "../src/git.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
+import { GithubAPI } from "../src/github_api.ts";
 import { implementIssue } from "../src/implement.ts";
 import { forgeRefOf, trackerRefOf } from "../src/ports.ts";
 import { reviewPullRequest } from "../src/review.ts";
@@ -115,7 +122,12 @@ describe("Engine, Tracker, and Forge ports", () => {
       createForge({ forge: "gitea", giteaUrl: "https://gitea.example.test", giteaToken: "token-1" })
     ).toBeInstanceOf(GiteaAPI);
     expect(() => createForge({ forge: "github", giteaUrl: "https://github.com", giteaToken: "" })).toThrow(
-      "GitHub forge is not implemented"
+      "GitHub credentials are missing"
+    );
+    const github: Tracker & Forge = createGithubForge({ token: "token-1" });
+    expect(github).toBeInstanceOf(GithubAPI);
+    expect(createForge({ forge: "github", giteaUrl: "https://github.com", giteaToken: "token-1" })).toBeInstanceOf(
+      GithubAPI
     );
     expect(FORGE_COMMITTER_NAME).toBe("jumi");
     expect(FORGE_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");

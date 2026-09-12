@@ -1,0 +1,859 @@
+import { GITHUB_API_URL } from "./github_auth.ts";
+import type {
+  ActionJob,
+  Check,
+  CheckPayload,
+  CheckState,
+  Comment,
+  CreatePullReviewComment,
+  CreatePullReviewOptions,
+  InlineComment,
+  LinkedIssue,
+  Pull,
+  PullFile,
+  PullReview,
+  Repo,
+  Task,
+} from "./ports.ts";
+
+export type GithubAuth = { getInstallationToken(): Promise<string> };
+
+export type GithubAPIOptions = {
+  token?: string;
+  auth?: GithubAuth;
+  apiUrl?: string;
+};
+
+type GithubUser = { login?: string };
+
+type GithubRepo = {
+  name: string;
+  full_name: string;
+  html_url: string;
+  clone_url: string;
+  default_branch: string;
+  owner?: GithubUser;
+};
+
+type GithubIssue = {
+  id?: number;
+  number: number;
+  title: string;
+  body?: string | null;
+  state: "open" | "closed";
+  html_url: string;
+  repository_url?: string;
+  user?: GithubUser;
+  assignee?: GithubUser;
+  assignees?: GithubUser[] | null;
+  updated_at: string;
+  created_at?: string;
+  pull_request?: unknown;
+  repository?: {
+    full_name?: string;
+    name?: string;
+    owner?: GithubUser | string;
+  };
+};
+
+type GithubPR = {
+  number: number;
+  title: string;
+  body?: string | null;
+  state: "open" | "closed";
+  html_url: string;
+  user?: GithubUser;
+  head: {
+    ref: string;
+    sha: string;
+    repo?: { full_name: string; clone_url?: string } | null;
+  };
+  base: { ref: string; sha: string };
+  merged?: boolean;
+  merged_at?: string | null;
+  draft?: boolean;
+  mergeable?: boolean | null;
+  assignee?: GithubUser;
+  assignees?: GithubUser[] | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type GithubComment = {
+  id: number;
+  body?: string | null;
+  user?: GithubUser;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type GithubReviewComment = GithubComment & {
+  path?: string;
+  commit_id?: string;
+  line?: number | null;
+  original_line?: number | null;
+  position?: number | null;
+  pull_request_review_id?: number;
+  html_url?: string;
+  pull_request_url?: string;
+};
+
+type GithubReview = {
+  id: number;
+  body?: string | null;
+  user?: GithubUser;
+  state?: string;
+  commit_id?: string;
+  submitted_at?: string;
+  html_url?: string;
+};
+
+type GithubFile = {
+  filename: string;
+  status?: string;
+  additions?: number;
+  deletions?: number;
+  changes?: number;
+  patch?: string;
+};
+
+type GithubStatus = {
+  id?: number;
+  context?: string;
+  state?: CheckState;
+  description?: string;
+  target_url?: string;
+  created_at?: string;
+  updated_at?: string;
+  url?: string;
+};
+
+type GithubJob = {
+  id: number;
+  name: string;
+  status?: string;
+  conclusion?: string;
+  head_sha?: string;
+  html_url?: string;
+  run_id?: number;
+};
+
+type GithubWorkflowRun = {
+  id: number;
+  head_branch?: string;
+};
+
+type ReviewThreadNode = {
+  id?: string;
+  isResolved?: boolean;
+  comments?: { nodes?: { databaseId?: number }[] };
+};
+
+type ReviewThreadConn = { nodes?: ReviewThreadNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } };
+
+type GraphqlError = { message?: string };
+
+const PAGE_SIZE = 50;
+const MAX_PAGES = 40;
+const LOG_MAX_BYTES = 1_048_576;
+
+function actor(user: GithubUser | null | undefined): { login: string } {
+  return { login: user?.login ?? "" };
+}
+
+function isNotFoundError(err: unknown): boolean {
+  return err instanceof Error && /→ 404\b/.test(err.message);
+}
+
+function ownerRepoFromUrl(url: string | undefined): { owner: string; repo: string } | undefined {
+  if (typeof url !== "string") return undefined;
+  const repos = url.match(/\/repos\/([^/?#]+)\/([^/?#]+)/);
+  if (repos?.[1] && repos[2]) return { owner: repos[1], repo: repos[2] };
+  const html = url.match(/\/([^/?#]+)\/([^/?#]+)\/(?:issues|pull)\//);
+  if (html?.[1] && html[2]) return { owner: html[1], repo: html[2] };
+  return undefined;
+}
+
+function ownerRepoOf(issue: GithubIssue, fallbackOwner: string, fallbackRepo: string): { owner: string; repo: string } {
+  const meta = issue.repository;
+  if (meta && typeof meta.full_name === "string") {
+    const [owner, repo] = meta.full_name.split("/");
+    if (owner && repo) return { owner, repo };
+  }
+  const name = meta && typeof meta.name === "string" ? meta.name : undefined;
+  const ownerField = meta?.owner;
+  const ownerLogin =
+    typeof ownerField === "string"
+      ? ownerField
+      : ownerField && typeof ownerField === "object" && typeof ownerField.login === "string"
+        ? ownerField.login
+        : undefined;
+  if (ownerLogin && name) return { owner: ownerLogin, repo: name };
+  return (
+    ownerRepoFromUrl(issue.repository_url) ??
+    ownerRepoFromUrl(issue.html_url) ?? { owner: fallbackOwner, repo: fallbackRepo }
+  );
+}
+
+export function toRepo(repo: GithubRepo): Repo {
+  return {
+    name: repo.name,
+    full_name: repo.full_name,
+    html_url: repo.html_url,
+    clone_url: repo.clone_url,
+    default_branch: repo.default_branch,
+    owner: actor(repo.owner),
+  };
+}
+
+export function toTask(issue: GithubIssue): Task {
+  return {
+    trackerRef: String(issue.number),
+    number: issue.number,
+    title: issue.title,
+    body: issue.body ?? null,
+    state: issue.state,
+    html_url: issue.html_url,
+    user: actor(issue.user),
+    assignee: issue.assignee ? actor(issue.assignee) : (issue.assignee ?? null),
+    assignees: issue.assignees == null ? issue.assignees : issue.assignees.map(actor),
+    updated_at: issue.updated_at,
+    created_at: issue.created_at ?? issue.updated_at,
+    pull_request: issue.pull_request,
+    is_pull: issue.pull_request != null,
+  };
+}
+
+export function toLinkedIssue(issue: GithubIssue, fallbackOwner: string, fallbackRepo: string): LinkedIssue {
+  const { owner, repo } = ownerRepoOf(issue, fallbackOwner, fallbackRepo);
+  return {
+    owner,
+    repo,
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    html_url: issue.html_url,
+    body: issue.body ?? null,
+    assignee: issue.assignee ? actor(issue.assignee) : (issue.assignee ?? null),
+    assignees: issue.assignees == null ? issue.assignees : issue.assignees.map(actor),
+    updated_at: issue.updated_at,
+    pull_request: issue.pull_request,
+    is_pull: issue.pull_request != null,
+  };
+}
+
+export function toPull(pr: GithubPR): Pull {
+  return {
+    forgeRef: String(pr.number),
+    number: pr.number,
+    title: pr.title,
+    body: pr.body ?? "",
+    state: pr.state,
+    html_url: pr.html_url,
+    user: actor(pr.user),
+    head: {
+      ref: pr.head.ref,
+      sha: pr.head.sha,
+      repo: pr.head.repo ? { full_name: pr.head.repo.full_name, clone_url: pr.head.repo.clone_url } : null,
+    },
+    base: { ref: pr.base.ref, sha: pr.base.sha },
+    merged: pr.merged === true || Boolean(pr.merged_at),
+    draft: pr.draft,
+    mergeable: pr.mergeable,
+    assignee: pr.assignee ? actor(pr.assignee) : (pr.assignee ?? null),
+    assignees: pr.assignees == null ? pr.assignees : pr.assignees.map(actor),
+    created_at: pr.created_at,
+    updated_at: pr.updated_at,
+  };
+}
+
+export function toComment(comment: GithubComment): Comment {
+  return {
+    id: comment.id,
+    body: comment.body ?? "",
+    user: actor(comment.user),
+    created_at: comment.created_at ?? "",
+    updated_at: comment.updated_at ?? "",
+  };
+}
+
+function fileStatus(status: string | undefined): PullFile["status"] {
+  if (status === "removed") return "deleted";
+  if (
+    status === "added" ||
+    status === "modified" ||
+    status === "changed" ||
+    status === "deleted" ||
+    status === "renamed"
+  ) {
+    return status;
+  }
+  return "modified";
+}
+
+export function toPullFile(file: GithubFile): PullFile {
+  return {
+    filename: file.filename,
+    status: fileStatus(file.status),
+    additions: file.additions ?? 0,
+    deletions: file.deletions ?? 0,
+    changes: file.changes ?? 0,
+    patch: file.patch,
+  };
+}
+
+export function toCheck(status: GithubStatus): Check {
+  return {
+    id: status.id,
+    context: status.context,
+    state: status.state,
+    status: status.state,
+    description: status.description,
+    target_url: status.target_url,
+    created_at: status.created_at,
+    updated_at: status.updated_at,
+    url: status.url,
+  };
+}
+
+export function toCheckPayload(status: GithubStatus | CheckPayload): CheckPayload {
+  return {
+    state: status.state as CheckState,
+    context: status.context,
+    description: status.description,
+    target_url: status.target_url,
+  };
+}
+
+export function toGiteaReviewState(state: string | undefined): string | undefined {
+  switch (state?.toUpperCase()) {
+    case "CHANGES_REQUESTED":
+      return "REQUEST_CHANGES";
+    case "COMMENTED":
+      return "COMMENT";
+    default:
+      return state;
+  }
+}
+
+export function toPullReview(review: GithubReview): PullReview {
+  const state = toGiteaReviewState(review.state);
+  return {
+    id: review.id,
+    body: review.body,
+    user: review.user ? actor(review.user) : undefined,
+    state,
+    dismissed: review.state?.toUpperCase() === "DISMISSED",
+    commit_id: review.commit_id,
+    submitted_at: review.submitted_at,
+  };
+}
+
+export function toInlineComment(comment: GithubReviewComment, resolved = false): InlineComment {
+  return {
+    ...toComment(comment),
+    path: comment.path,
+    commit_id: comment.commit_id,
+    new_position: comment.line ?? comment.original_line ?? comment.position ?? undefined,
+    pull_request_review_id: comment.pull_request_review_id,
+    html_url: comment.html_url,
+    resolved,
+  };
+}
+
+export function toActionJob(job: GithubJob, headBranch?: string): ActionJob {
+  return {
+    id: job.id,
+    name: job.name,
+    status: job.status,
+    conclusion: job.conclusion,
+    head_sha: job.head_sha,
+    head_branch: headBranch,
+    html_url: job.html_url,
+    run_id: job.run_id,
+  };
+}
+
+export function toGithubReviewEvent(event: string | undefined): string | undefined {
+  if (event === "APPROVED") return "APPROVE";
+  return event;
+}
+
+function loginEquals(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function toGithubReviewComments(comments: CreatePullReviewComment[] | undefined): unknown[] | undefined {
+  if (!comments) return undefined;
+  return comments.map((comment) => {
+    const line = comment.new_position ?? comment.old_position;
+    return {
+      path: comment.path,
+      body: comment.body,
+      ...(line != null
+        ? { line, ...(comment.new_position == null && comment.old_position != null ? { side: "LEFT" } : {}) }
+        : {}),
+    };
+  });
+}
+
+function decodeTail(buf: Uint8Array, maxBytes: number): string {
+  const slice = buf.byteLength > maxBytes ? buf.subarray(buf.byteLength - maxBytes) : buf;
+  return new TextDecoder().decode(slice);
+}
+
+function pullNumberFromUrl(url: string | undefined): number | undefined {
+  if (!url) return undefined;
+  const match = url.match(/\/pulls\/(\d+)(?:\?|$)/);
+  if (!match) return undefined;
+  const n = Number.parseInt(match[1], 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function needsSelfReviewGuard(event: string | undefined): boolean {
+  const mapped = toGithubReviewEvent(event);
+  return mapped === "APPROVE" || mapped === "REQUEST_CHANGES";
+}
+
+export class GithubAPI {
+  private readonly staticToken: string | undefined;
+  private readonly auth: GithubAuth | undefined;
+  private readonly base: string;
+  private viewerLogin: string | undefined;
+
+  constructor(opts: GithubAPIOptions) {
+    const token = opts.token?.trim();
+    if (!opts.auth && !token) throw new Error("Missing GitHub token");
+    this.staticToken = token;
+    this.auth = opts.auth;
+    this.base = (opts.apiUrl ?? GITHUB_API_URL).replace(/\/+$/, "");
+  }
+
+  private async accessToken(): Promise<string> {
+    if (this.auth) return this.auth.getInstallationToken();
+    return this.staticToken as string;
+  }
+
+  private async headers(): Promise<Record<string, string>> {
+    const token = await this.accessToken();
+    return {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "jumi",
+    };
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const url = `${this.base}${path}`;
+    const res = await fetch(url, {
+      method,
+      headers: await this.headers(),
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`GitHub API ${method} ${url} → ${res.status}: ${text}`);
+    }
+    if (res.status === 204) return undefined as T;
+    return res.json() as Promise<T>;
+  }
+
+  private async requestText(path: string, maxBytes = LOG_MAX_BYTES): Promise<string> {
+    const url = `${this.base}${path}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: await this.headers(),
+      redirect: "manual",
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("Location");
+      if (!location) throw new Error(`GitHub API GET ${url} → ${res.status}: missing Location`);
+      const signed = await fetch(new URL(location, url).toString(), { method: "GET" });
+      if (!signed.ok) {
+        const text = await signed.text().catch(() => "");
+        throw new Error(`GitHub API GET ${url} → ${signed.status}: ${text}`);
+      }
+      return decodeTail(new Uint8Array(await signed.arrayBuffer()), maxBytes);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`GitHub API GET ${url} → ${res.status}: ${text}`);
+    }
+    return decodeTail(new Uint8Array(await res.arrayBuffer()), maxBytes);
+  }
+
+  private get<T>(path: string) {
+    return this.request<T>("GET", path);
+  }
+  private post<T>(path: string, body: unknown) {
+    return this.request<T>("POST", path, body);
+  }
+  private patch<T>(path: string, body: unknown) {
+    return this.request<T>("PATCH", path, body);
+  }
+  private put<T>(path: string, body: unknown) {
+    return this.request<T>("PUT", path, body);
+  }
+
+  private repoPath(owner: string, repo: string): string {
+    return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  }
+
+  private async getPages<T>(path: string): Promise<T[]> {
+    const results: T[] = [];
+    let page = 1;
+    while (page <= MAX_PAGES) {
+      const sep = path.includes("?") ? "&" : "?";
+      const batch = await this.get<T[]>(`${path}${sep}per_page=${PAGE_SIZE}&page=${page}`);
+      results.push(...batch);
+      if (batch.length !== PAGE_SIZE) break;
+      page += 1;
+    }
+    return results;
+  }
+
+  private async getPagesOrEmptyOn404<T>(path: string): Promise<T[]> {
+    try {
+      return await this.getPages<T>(path);
+    } catch (err) {
+      if (isNotFoundError(err)) return [];
+      throw err;
+    }
+  }
+
+  private async graphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+    const payload = await this.post<{ data?: T; errors?: GraphqlError[] }>("/graphql", {
+      query,
+      ...(variables ? { variables } : {}),
+    });
+    if (payload.errors?.length) {
+      throw new Error(`GitHub GraphQL → ${payload.errors[0]?.message ?? "error"}`);
+    }
+    if (payload.data == null) throw new Error("GitHub GraphQL → empty data");
+    return payload.data;
+  }
+
+  private async getViewerLogin(): Promise<string | undefined> {
+    if (this.viewerLogin) return this.viewerLogin;
+    const data = await this.graphql<{ viewer?: { login?: string } }>("query { viewer { login } }");
+    const login = data.viewer?.login;
+    if (login) this.viewerLogin = login;
+    return login;
+  }
+
+  async getRepo(owner: string, repo: string): Promise<Repo> {
+    return toRepo(await this.get<GithubRepo>(`/repos/${this.repoPath(owner, repo)}`));
+  }
+
+  async getPR(owner: string, repo: string, index: number): Promise<Pull> {
+    return toPull(await this.get<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`));
+  }
+
+  async listOpenPulls(owner: string, repo: string): Promise<Pull[]> {
+    const pulls = await this.getPages<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls?state=open`);
+    return pulls.map(toPull);
+  }
+
+  async createPullRequest(
+    owner: string,
+    repo: string,
+    pull: { title: string; body: string; head: string; base: string }
+  ): Promise<Pull> {
+    return toPull(await this.post<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls`, pull));
+  }
+
+  async closePullRequest(owner: string, repo: string, index: number): Promise<Pull> {
+    return toPull(
+      await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { state: "closed" })
+    );
+  }
+
+  async getIssue(owner: string, repo: string, index: number): Promise<Task> {
+    return toTask(await this.get<GithubIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
+  }
+
+  async listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]> {
+    const issues = await this.getPagesOrEmptyOn404<GithubIssue>(
+      `/repos/${this.repoPath(owner, repo)}/issues/${index}/dependencies/blocked_by`
+    );
+    return issues.map((issue) => toLinkedIssue(issue, owner, repo));
+  }
+
+  async listIssueBlocks(owner: string, repo: string, index: number): Promise<LinkedIssue[]> {
+    const issues = await this.getPagesOrEmptyOn404<GithubIssue>(
+      `/repos/${this.repoPath(owner, repo)}/issues/${index}/dependencies/blocking`
+    );
+    return issues.map((issue) => toLinkedIssue(issue, owner, repo));
+  }
+
+  async listRepoIssues(
+    owner: string,
+    repo: string,
+    opts?: { state?: "open" | "closed" | "all"; type?: "issues" | "pulls"; assignedBy?: string }
+  ): Promise<LinkedIssue[]> {
+    const params = new URLSearchParams();
+    if (opts?.state) params.set("state", opts.state);
+    if (opts?.assignedBy) params.set("assignee", opts.assignedBy);
+    params.set("per_page", String(PAGE_SIZE));
+    const matched: GithubIssue[] = [];
+    let page = 1;
+    while (page <= MAX_PAGES && matched.length < PAGE_SIZE) {
+      params.set("page", String(page));
+      const issues = await this.get<GithubIssue[]>(`/repos/${this.repoPath(owner, repo)}/issues?${params.toString()}`);
+      for (const issue of issues) {
+        const isPull = issue.pull_request != null;
+        if (opts?.type === "issues" && isPull) continue;
+        if (opts?.type === "pulls" && !isPull) continue;
+        matched.push(issue);
+        if (matched.length >= PAGE_SIZE) break;
+      }
+      if (issues.length !== PAGE_SIZE) break;
+      page += 1;
+    }
+    return matched.map((issue) => toLinkedIssue(issue, owner, repo));
+  }
+
+  async createIssueDependency(
+    owner: string,
+    repo: string,
+    index: number,
+    dependency: { owner: string; repo: string; number: number }
+  ): Promise<void> {
+    const target = await this.get<GithubIssue>(
+      `/repos/${this.repoPath(dependency.owner, dependency.repo)}/issues/${dependency.number}`
+    );
+    if (typeof target.id !== "number") {
+      throw new Error("GitHub issue is missing global id");
+    }
+    await this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/dependencies/blocked_by`, {
+      issue_id: target.id,
+    });
+  }
+
+  async getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]> {
+    const files = await this.getPages<GithubFile>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/files`);
+    return files.map(toPullFile);
+  }
+
+  async createIssueComment(owner: string, repo: string, index: number, body: string): Promise<Comment> {
+    return toComment(
+      await this.post<GithubComment>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`, { body })
+    );
+  }
+
+  async findStickyIssueComment(
+    owner: string,
+    repo: string,
+    index: number,
+    botUsername: string,
+    marker: string
+  ): Promise<{ id: number } | undefined> {
+    const path = `/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`;
+    let page = 1;
+    while (page <= MAX_PAGES) {
+      const batch = await this.get<GithubComment[]>(`${path}?per_page=${PAGE_SIZE}&page=${page}`);
+      for (const comment of batch) {
+        if (comment.user?.login === botUsername && typeof comment.body === "string" && comment.body.includes(marker)) {
+          return { id: comment.id };
+        }
+      }
+      if (batch.length !== PAGE_SIZE) break;
+      page += 1;
+    }
+    return undefined;
+  }
+
+  async updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment> {
+    return toComment(
+      await this.patch<GithubComment>(`/repos/${this.repoPath(owner, repo)}/issues/comments/${commentId}`, { body })
+    );
+  }
+
+  async listIssueComments(owner: string, repo: string, index: number): Promise<Comment[]> {
+    const comments = await this.getPages<GithubComment>(
+      `/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`
+    );
+    return comments.map(toComment);
+  }
+
+  async listPullReviewComments(owner: string, repo: string, index: number): Promise<InlineComment[]> {
+    const comments = await this.getPages<GithubReviewComment>(
+      `/repos/${this.repoPath(owner, repo)}/pulls/${index}/comments`
+    );
+    if (comments.length === 0) return [];
+    const resolvedIds = new Set<number>();
+    for (const thread of await this.listReviewThreads(owner, repo, index)) {
+      if (thread.isResolved !== true) continue;
+      for (const node of thread.comments?.nodes ?? []) {
+        if (typeof node.databaseId === "number") resolvedIds.add(node.databaseId);
+      }
+    }
+    return comments.map((comment) => toInlineComment(comment, resolvedIds.has(comment.id)));
+  }
+
+  async listPullReviews(owner: string, repo: string, index: number): Promise<PullReview[]> {
+    const reviews = await this.getPages<GithubReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews`);
+    return reviews.map(toPullReview);
+  }
+
+  async createPullReview(
+    owner: string,
+    repo: string,
+    index: number,
+    review: CreatePullReviewOptions
+  ): Promise<PullReview> {
+    let event = toGithubReviewEvent(review.event);
+    let body = review.body;
+    if (needsSelfReviewGuard(event)) {
+      const [pr, me] = await Promise.all([this.getPR(owner, repo, index), this.getViewerLogin()]);
+      if (!me || loginEquals(pr.user?.login, me)) {
+        event = "COMMENT";
+      }
+    }
+    if (event === "COMMENT" || event === "REQUEST_CHANGES") {
+      body = body ?? "";
+    }
+    return toPullReview(
+      await this.post<GithubReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews`, {
+        commit_id: review.commit_id,
+        ...(body != null ? { body } : {}),
+        ...(event != null ? { event } : {}),
+        ...(review.comments?.length ? { comments: toGithubReviewComments(review.comments) } : {}),
+      })
+    );
+  }
+
+  async submitPullReview(
+    owner: string,
+    repo: string,
+    index: number,
+    reviewId: number,
+    body?: string
+  ): Promise<PullReview> {
+    return toPullReview(
+      await this.post<GithubReview>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews/${reviewId}/events`, {
+        ...(body != null ? { body } : {}),
+        event: "COMMENT",
+      })
+    );
+  }
+
+  async resolvePullComment(owner: string, repo: string, commentId: number): Promise<void> {
+    const threadId = await this.reviewThreadId(owner, repo, commentId);
+    await this.graphql("mutation ($id: ID!) { resolveReviewThread(input: {threadId: $id}) { clientMutationId } }", {
+      id: threadId,
+    });
+  }
+
+  async unresolvePullComment(owner: string, repo: string, commentId: number): Promise<void> {
+    const threadId = await this.reviewThreadId(owner, repo, commentId);
+    await this.graphql("mutation ($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { clientMutationId } }", {
+      id: threadId,
+    });
+  }
+
+  async dismissPullReview(
+    owner: string,
+    repo: string,
+    index: number,
+    reviewId: number,
+    opts?: { message?: string; priors?: boolean }
+  ): Promise<PullReview> {
+    return toPullReview(
+      await this.put<GithubReview>(
+        `/repos/${this.repoPath(owner, repo)}/pulls/${index}/reviews/${reviewId}/dismissals`,
+        {
+          message: opts?.message ?? "superseded",
+        }
+      )
+    );
+  }
+
+  async createCommitStatus(owner: string, repo: string, sha: string, status: CheckPayload): Promise<CheckPayload> {
+    return toCheckPayload(
+      await this.post<GithubStatus>(`/repos/${this.repoPath(owner, repo)}/statuses/${encodeURIComponent(sha)}`, {
+        ...status,
+        state: status.state === "warning" ? "success" : status.state,
+      })
+    );
+  }
+
+  async listCommitStatuses(owner: string, repo: string, sha: string): Promise<Check[]> {
+    const statuses = await this.getPages<GithubStatus>(
+      `/repos/${this.repoPath(owner, repo)}/commits/${encodeURIComponent(sha)}/statuses`
+    );
+    return statuses.map(toCheck);
+  }
+
+  async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]> {
+    const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
+    const body = await this.get<{ workflow_runs?: GithubWorkflowRun[] }>(
+      `/repos/${this.repoPath(owner, repo)}/actions/runs?per_page=${PAGE_SIZE}&page=1${statusQ}`
+    );
+    const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
+    const jobs: ActionJob[] = [];
+    for (const run of runs) {
+      const page = await this.get<{ jobs?: GithubJob[] }>(
+        `/repos/${this.repoPath(owner, repo)}/actions/runs/${run.id}/jobs?per_page=100`
+      );
+      const batch = Array.isArray(page?.jobs) ? page.jobs : [];
+      for (const job of batch) {
+        if (opts?.status && job.status !== opts.status && job.conclusion !== opts.status) continue;
+        jobs.push(toActionJob(job, run.head_branch));
+      }
+    }
+    return jobs;
+  }
+
+  async getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string> {
+    return this.requestText(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/logs`);
+  }
+
+  private async listReviewThreads(owner: string, repo: string, number: number): Promise<ReviewThreadNode[]> {
+    const threads: ReviewThreadNode[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const data = await this.graphql<{
+        repository?: { pullRequest?: { reviewThreads?: ReviewThreadConn } };
+      }>(
+        `query ($owner: String!, $name: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  id
+                  isResolved
+                  comments(first: 100) { nodes { databaseId } }
+                }
+              }
+            }
+          }
+        }`,
+        { owner, name: repo, number, after: cursor ?? null }
+      );
+      const conn = data.repository?.pullRequest?.reviewThreads;
+      threads.push(...(conn?.nodes ?? []));
+      if (!conn?.pageInfo?.hasNextPage || !conn.pageInfo.endCursor) break;
+      cursor = conn.pageInfo.endCursor;
+    }
+    return threads;
+  }
+
+  private async reviewThreadId(owner: string, repo: string, commentId: number): Promise<string> {
+    const comment = await this.get<GithubReviewComment>(
+      `/repos/${this.repoPath(owner, repo)}/pulls/comments/${commentId}`
+    );
+    const number = pullNumberFromUrl(comment.pull_request_url);
+    if (number == null) throw new Error(`GitHub pull comment ${commentId} is missing pull_request_url`);
+    for (const thread of await this.listReviewThreads(owner, repo, number)) {
+      if (thread.comments?.nodes?.some((node) => node.databaseId === commentId) && thread.id) {
+        return thread.id;
+      }
+    }
+    throw new Error(`GitHub review thread not found for comment ${commentId}`);
+  }
+}

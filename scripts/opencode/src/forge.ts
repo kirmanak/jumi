@@ -1,4 +1,6 @@
 import { GiteaAPI } from "./api.ts";
+import { GithubAPI } from "./github_api.ts";
+import { GithubAppAuth } from "./github_auth.ts";
 import type { Forge, Tracker } from "./ports.ts";
 
 export type { Forge, Tracker } from "./ports.ts";
@@ -18,13 +20,44 @@ export function createGiteaForge(serverUrl: string, token: string): Tracker & Fo
   return new GiteaAPI(serverUrl, token);
 }
 
-export function createForge(config: { forge?: ForgeKind; giteaUrl: string; giteaToken: string }): Tracker & Forge {
+export function createGithubForge(config: {
+  token?: string;
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
+}): Tracker & Forge {
+  if (config.githubAppId && config.githubAppPrivateKey && config.githubAppInstallationId) {
+    return new GithubAPI({
+      auth: new GithubAppAuth({
+        appId: config.githubAppId,
+        privateKey: config.githubAppPrivateKey,
+        installationId: config.githubAppInstallationId,
+      }),
+    });
+  }
+  if (config.token) return new GithubAPI({ token: config.token });
+  throw new Error("GitHub credentials are missing");
+}
+
+export function createForge(config: {
+  forge?: ForgeKind;
+  giteaUrl: string;
+  giteaToken: string;
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubAppInstallationId?: string;
+}): Tracker & Forge {
   const forge = config.forge ?? "gitea";
   switch (forge) {
     case "gitea":
       return createGiteaForge(config.giteaUrl, config.giteaToken);
     case "github":
-      throw new Error("GitHub forge is not implemented");
+      return createGithubForge({
+        token: config.giteaToken,
+        githubAppId: config.githubAppId,
+        githubAppPrivateKey: config.githubAppPrivateKey,
+        githubAppInstallationId: config.githubAppInstallationId,
+      });
     default: {
       const _exhaustive: never = forge;
       throw new Error(`Invalid FORGE: ${_exhaustive}`);
