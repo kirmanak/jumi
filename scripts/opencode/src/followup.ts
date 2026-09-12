@@ -1,19 +1,14 @@
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { isAssignedToBot } from "./assignee.ts";
 import { buildCiMarkdown, CI_LOG_FILE, type CiInspection, flakeComment, inspectCi, recordCiHandled } from "./ci.ts";
-import type { ClaimRecord } from "./claim.ts";
+import { conflictStatePath, deleteClaim, followUpStatePath, readClaim, stuckStatePath, writeClaim } from "./claim.ts";
 import {
-  acquireClaim,
-  claimFilePath,
-  conflictStatePath,
-  deleteClaim,
-  followUpStatePath,
-  isPidAlive,
-  readClaim,
-  stuckStatePath,
-  writeClaim,
-} from "./claim.ts";
+  beginClaimedWorktree,
+  isAbortError,
+  isClaimedEarlyResult,
+  recheckAssignedAndOpen,
+  throwIfAborted,
+} from "./claimed_worktree.ts";
 import {
   CONFLICT_TIMEOUT_MS,
   MAX_CONFLICT_ROUNDS,
@@ -22,7 +17,7 @@ import {
   shouldIncrementRound,
   writeConflictState,
 } from "./conflict.ts";
-import { resolveEngine, throwIfEngineFailed } from "./engine.ts";
+import { throwIfEngineFailed } from "./engine.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
@@ -42,7 +37,7 @@ import {
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import { parseCheckLine } from "./verdict.ts";
-import { gitConfigArgs, gitEnv, runGit, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
+import { gitConfigArgs, gitEnv, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { FOLLOWUP_PROMPT } from "./git.ts";
 
@@ -73,24 +68,6 @@ export interface FollowUpState {
 
 function logDefault(message: string) {
   console.log(`[followup] ${message}`);
-}
-
-function assertSafeSegment(value: string, label: string): string {
-  if (!value || value === "." || value === ".." || /[\\/\0]/.test(value)) {
-    throw new Error(`Invalid ${label}`);
-  }
-  return value;
-}
-
-function throwIfAborted(signal?: AbortSignal) {
-  if (!signal?.aborted) return;
-  const err = new Error("cancelled");
-  err.name = "AbortError";
-  throw err;
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -588,65 +565,38 @@ function reviewFindingMatchOptsForJob(job: IssueJob, headSha: string): ReviewFin
 
 export async function implementFollowUp(opts: ImplementOptions): Promise<FollowUpResult> {
   const log = opts.logger ?? logDefault;
-  const now = () => opts.now?.() ?? new Date();
-  const pidAlive = opts.pidAlive ?? isPidAlive;
-  const git = opts.gitRunner ?? runGit;
-  const engine = resolveEngine(opts, openCodeEngine);
-  const owner = assertSafeSegment(opts.job.owner, "owner");
-  const repo = assertSafeSegment(opts.job.repo, "repo");
-  const issueNumber = opts.job.issueNumber;
-  const worktree = join(opts.workdir, owner, repo, String(issueNumber));
-  const barePath = join(opts.workdir, "_cache", owner, `${repo}.git`);
-  const claimPath = claimFilePath(opts.home, owner, repo, issueNumber);
-  const statePath = followUpStatePath(opts.home, owner, repo, issueNumber);
-  const sanitizeEnv = opts.sanitizeOpenCodeEnv ?? true;
-  const useClaim = opts.useClaim !== false;
   const maxFollowupRounds = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
   const maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
   const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
   const conflictTimeoutMs = opts.conflictTimeoutMs ?? CONFLICT_TIMEOUT_MS;
-  const forgetClaim = async () => {
-    if (useClaim) await deleteClaim(claimPath);
-  };
-
-  throwIfAborted(opts.abortSignal);
-
-  const startedAt = now().toISOString();
-  if (useClaim) {
-    const existingClaim = await readClaim(claimPath);
-    if (existingClaim?.terminal) await forgetClaim();
-  }
-
-  const claim: ClaimRecord = {
-    pid: 0,
-    startedAt,
-    heartbeatAt: startedAt,
+  const claimed = await beginClaimedWorktree({
+    ...opts,
+    fallbackEngine: openCodeEngine,
+    forgetTerminal: true,
+  });
+  if (isClaimedEarlyResult(claimed)) return claimed;
+  const {
+    owner,
+    repo,
+    issueNumber,
     worktree,
-    branch: "",
-    issueUpdatedAt: opts.job.issueUpdatedAt,
-    headShaAtStart: "",
-    terminal: false,
-  };
-  if (useClaim) {
-    const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
-    if (!acquired) {
-      return { status: "skipped", reason: "claim is live" };
-    }
-  }
+    barePath,
+    claimPath,
+    claim,
+    useClaim,
+    sanitizeEnv,
+    engine,
+    git,
+    now,
+    forgetClaim,
+  } = claimed;
+  const statePath = followUpStatePath(opts.home, owner, repo, issueNumber);
 
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, body, { index });
 
-  try {
-    const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
-    if (!isAssignedToBot(currentIssue, opts.botUsername) || currentIssue.state !== "open") {
-      await forgetClaim();
-      return { status: "cancelled" };
-    }
-  } catch (err) {
-    await forgetClaim();
-    return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
-  }
+  const assigned = await recheckAssignedAndOpen(claimed, opts);
+  if (assigned) return assigned;
 
   const pr = await resolveWorkerPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername, opts.job.prNumber);
   if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {

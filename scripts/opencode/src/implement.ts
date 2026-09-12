@@ -1,9 +1,6 @@
 import { access, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { isAssignedToBot } from "./assignee.ts";
-import type { ClaimRecord } from "./claim.ts";
 import {
-  acquireClaim,
   ciStatePath,
   claimFilePath,
   conflictStatePath,
@@ -14,6 +11,13 @@ import {
   stuckStatePath,
   writeClaim,
 } from "./claim.ts";
+import {
+  beginClaimedWorktree,
+  isAbortError,
+  isClaimedEarlyResult,
+  recheckAssignedAndOpen,
+  throwIfAborted,
+} from "./claimed_worktree.ts";
 import type { ConflictResult } from "./conflict.ts";
 import {
   BLOCKED_BY_FILE,
@@ -27,7 +31,7 @@ import {
   type QueueCandidate,
   validateYield,
 } from "./dependencies.ts";
-import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
+import { type Engine, throwIfEngineFailed } from "./engine.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, openCodeEngine } from "./git.ts";
@@ -49,14 +53,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import {
-  type GitRunner,
-  gitConfigArgs,
-  gitEnv,
-  runGit,
-  validateCloneUrl,
-  workerOpenCodeChildEnv,
-} from "./workspace.ts";
+import { type GitRunner, gitConfigArgs, gitEnv, validateCloneUrl, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 
@@ -110,13 +107,6 @@ function logDefault(message: string) {
   console.log(`[implement] ${message}`);
 }
 
-function assertSafeSegment(value: string, label: string): string {
-  if (!value || value === "." || value === ".." || /[\\/\0]/.test(value)) {
-    throw new Error(`Invalid ${label}`);
-  }
-  return value;
-}
-
 export function issueBranchName(issueNumber: number, title: string): string {
   const slug =
     title
@@ -129,17 +119,6 @@ export function issueBranchName(issueNumber: number, title: string): string {
 
 export function issueJobKey(job: { owner: string; repo: string; issueNumber: number }): string {
   return `${job.owner}/${job.repo}#${job.issueNumber}`;
-}
-
-function throwIfAborted(signal?: AbortSignal) {
-  if (!signal?.aborted) return;
-  const err = new Error("cancelled");
-  err.name = "AbortError";
-  throw err;
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -180,43 +159,28 @@ export async function implementIssue(
   opts: ImplementOptions
 ): Promise<ImplementResult | FollowUpResult | ConflictResult> {
   const log = opts.logger ?? logDefault;
-  const now = () => opts.now?.() ?? new Date();
-  const pidAlive = opts.pidAlive ?? isPidAlive;
-  const git = opts.gitRunner ?? runGit;
-  const engine = resolveEngine(opts, openCodeEngine);
-  const owner = assertSafeSegment(opts.job.owner, "owner");
-  const repo = assertSafeSegment(opts.job.repo, "repo");
-  const issueNumber = opts.job.issueNumber;
-  const worktree = join(opts.workdir, owner, repo, String(issueNumber));
-  const barePath = join(opts.workdir, "_cache", owner, `${repo}.git`);
-  const branch = issueBranchName(issueNumber, opts.job.title);
-  const claimPath = claimFilePath(opts.home, owner, repo, issueNumber);
-  const sanitizeEnv = opts.sanitizeOpenCodeEnv ?? true;
-  const useClaim = opts.useClaim !== false;
-
-  throwIfAborted(opts.abortSignal);
-
-  const startedAt = now().toISOString();
-  const claim: ClaimRecord = {
-    pid: 0,
-    startedAt,
-    heartbeatAt: startedAt,
-    worktree,
+  const branch = issueBranchName(opts.job.issueNumber, opts.job.title);
+  const claimed = await beginClaimedWorktree({
+    ...opts,
+    fallbackEngine: openCodeEngine,
     branch,
-    issueUpdatedAt: opts.job.issueUpdatedAt,
-    headShaAtStart: "",
-    terminal: false,
-  };
-  if (useClaim) {
-    const acquired = await acquireClaim(claimPath, claim, { pidAlive, nowMs: now().getTime() });
-    if (!acquired) {
-      return { status: "skipped", reason: "claim is live" };
-    }
-  }
-
-  const forgetClaim = async () => {
-    if (useClaim) await deleteClaim(claimPath);
-  };
+  });
+  if (isClaimedEarlyResult(claimed)) return claimed;
+  const {
+    owner,
+    repo,
+    issueNumber,
+    worktree,
+    barePath,
+    claimPath,
+    claim,
+    useClaim,
+    sanitizeEnv,
+    engine,
+    git,
+    now,
+    forgetClaim,
+  } = claimed;
 
   const pulls = await opts.api.listOpenPulls(owner, repo);
   const jumiCloser = pulls.find((pr) => isJumiCloserForIssue(pr, owner, repo, issueNumber, opts.botUsername));
@@ -233,16 +197,8 @@ export async function implementIssue(
     return { status: "skipped", reason: "assigned PR is the job for this repo" };
   }
 
-  try {
-    const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
-    if (!isAssignedToBot(currentIssue, opts.botUsername) || currentIssue.state !== "open") {
-      await forgetClaim();
-      return { status: "cancelled" };
-    }
-  } catch (err) {
-    await forgetClaim();
-    return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
-  }
+  const assigned = await recheckAssignedAndOpen(claimed, opts);
+  if (assigned) return assigned;
 
   try {
     const blockers = await checkIssueBlockers(opts.api, owner, repo, issueNumber);
