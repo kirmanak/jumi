@@ -8,7 +8,10 @@ Reference deploy is Kubernetes standing pods. GitOps lives outside this reposito
 
 ## Loop
 
-Pickup is assign-to-bot. There is no periodic issue scan.
+Pickup depends on `FORGE` (unset stays the `gitea` homelab default). There is no periodic issue scan.
+
+- Gitea default: assign the issue to the bot.
+- GitHub (`FORGE=github`): add label `jumi` to a non-PR issue; removing that label cancels.
 
 ```text
 assign issue to bot
@@ -120,7 +123,7 @@ The trailer is kept as the last non-empty line of the sticky comment so the work
 
 ## Worker jobs
 
-Work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`). Pull-request issues (`issue.pull_request` present) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead, except a closer whose related issue is already open and assigned to the bot — that assign is skipped so the issue job owns the work.
+On Gitea (the default when `FORGE` is unset), work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`). Pull-request issues (`issue.pull_request` present) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead, except a closer whose related issue is already open and assigned to the bot — that assign is skipped so the issue job owns the work.
 
 First-run implement reads Gitea `GET …/issues/{n}/dependencies` before clone. Any unresolved blocker (open, or closed with an unmerged closer) comments `blocked on …` once and skips with no PR. Closing or reopening a blocker `GET`s `/blocks` and enqueues still-open issues assigned to the bot (fresh issue GET). That skip is not terminal. Do not parse issue prose for depends-on; unassign remains the kill switch.
 
