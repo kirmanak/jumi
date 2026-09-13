@@ -75,6 +75,7 @@ export interface RunReviewJobExtras {
   workspacePreparer?: WorkspacePreparer;
   gitRunner?: GitRunner;
   abortSignal?: AbortSignal;
+  heartbeatMs?: number;
   jobId?: string;
 }
 
@@ -384,11 +385,23 @@ export async function processEngineTick(
     return "idle";
   }
 
+  const abort = new AbortController();
+  bindAbort(extras.abortSignal, () => abort.abort());
+
   let heartbeatStopped = false;
+  const loseLease = () => {
+    if (heartbeatStopped) return;
+    abort.abort();
+  };
   const heartbeat = setInterval(() => {
     if (heartbeatStopped) return;
-    void store.heartbeat(row.id, leasedBy, config.leaseMs);
-  }, HEARTBEAT_MS);
+    void store.heartbeat(row.id, leasedBy, config.leaseMs).then(
+      (ok) => {
+        if (!ok) loseLease();
+      },
+      () => undefined
+    );
+  }, extras.heartbeatMs ?? HEARTBEAT_MS);
   const stopHeartbeat = () => {
     heartbeatStopped = true;
     clearInterval(heartbeat);
@@ -406,21 +419,29 @@ export async function processEngineTick(
     };
     const result = await runReviewJob(config, job, api, logger, {
       ...extras,
+      abortSignal: abort.signal,
       jobId: String(row.id),
       persistResult: async (persisted) => {
         await store.saveResult(row.id, leasedBy, persisted);
       },
     });
     stopHeartbeat();
+    const current = await store.get(row.id);
+    if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
+      logger(`engine job ${row.jobKey} cancelled`);
+      return "processed";
+    }
     await store.markPublished(row.id, leasedBy, { state: publishedState(result), reason: result.reason });
     await handoverFollowUp(store, api, config, row, result, logger);
     return "processed";
   } catch (err) {
-    const aborted = isAbortError(err) || Boolean(extras.abortSignal?.aborted);
+    const shutdown = Boolean(extras.abortSignal?.aborted);
     logger(
-      aborted
+      shutdown
         ? `engine job ${row.jobKey} interrupted`
-        : `engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`
+        : abort.signal.aborted || isAbortError(err)
+          ? `engine job ${row.jobKey} cancelled`
+          : `engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`
     );
     stopHeartbeat();
     let published = false;
@@ -439,14 +460,14 @@ export async function processEngineTick(
     }
     if (!published) {
       try {
-        if (aborted) {
+        if (shutdown) {
           const released = await store.releaseLease(row.id, leasedBy);
           if (released) {
             logger(`released ${row.jobKey} on shutdown`);
           } else {
             await store.expireLease(row.id, leasedBy);
           }
-        } else {
+        } else if (!abort.signal.aborted) {
           await store.expireLease(row.id, leasedBy);
         }
       } catch (expireErr) {

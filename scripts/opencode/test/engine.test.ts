@@ -632,6 +632,77 @@ describe("processEngineTick", () => {
     });
   });
 
+  test("lost lease aborts OpenCode and does not publish or steal the row", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi();
+      let started!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        heartbeatMs: 15,
+        openCodeRunner: async (opts) => {
+          started();
+          return hangUntilAbort(opts.abortSignal);
+        },
+      });
+      await gate;
+      store.rows[0]!.leasedBy = "engine-other";
+      expect(await tick).toBe("processed");
+      expect(store.rows[0]?.state).toBe("leased");
+      expect(store.rows[0]?.leasedBy).toBe("engine-other");
+      expect(store.rows[0]?.resultMarkdown).toBeNull();
+      expect(api.reviews).toHaveLength(0);
+      expect(api.comments).toHaveLength(0);
+    });
+  });
+
+  test("lost lease after router requeue aborts OpenCode so another engine can run it", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi();
+      let started!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        heartbeatMs: 15,
+        openCodeRunner: async (opts) => {
+          started();
+          return hangUntilAbort(opts.abortSignal);
+        },
+      });
+      await gate;
+      store.rows[0]!.state = "queued";
+      store.rows[0]!.leasedBy = null;
+      store.rows[0]!.leasedUntil = null;
+      expect(await tick).toBe("processed");
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(store.rows[0]?.leasedBy).toBeNull();
+      expect(api.reviews).toHaveLength(0);
+
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (opts) => {
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      const published = await store.get(store.rows[0]!.id);
+      expect(published?.state).toBe("succeeded");
+      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+    });
+  });
+
   test("in-flight heartbeat after throw cannot restore an expired lease", async () => {
     await withWorkspace(async (workspace) => {
       const blocker = join(workspace, "not-a-dir");
