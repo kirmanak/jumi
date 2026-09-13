@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureOpenCodeWellKnownAuth, opencodeAuthPath } from "../src/opencode_auth.ts";
+import { ensureOpenCodeWellKnownAuth, opencodeAuthPath, parseOpenCodeWellKnownUrl } from "../src/opencode_auth.ts";
 
 const tempDirs: string[] = [];
 
@@ -84,5 +84,81 @@ describe("OpenCode well-known auth seeding", () => {
 
     const auth = JSON.parse(await readFile(path, "utf8"));
     expect(auth["https://kirmanak.stream"]).toEqual({ type: "wellknown", key: "CUSTOM_TOKEN", token: "custom" });
+  });
+
+  test("does not seed when url is omitted", async () => {
+    const home = await tempHome();
+    const path = await ensureOpenCodeWellKnownAuth({
+      home,
+      key: "OPENCODE_WELLKNOWN_TOKEN",
+      token: "unused",
+    });
+
+    expect(path).toBeUndefined();
+    await expect(readFile(opencodeAuthPath(home), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("does not seed the disabled sentinel", async () => {
+    const home = await tempHome();
+    const path = await ensureOpenCodeWellKnownAuth({
+      home,
+      url: "disabled",
+      key: "OPENCODE_WELLKNOWN_TOKEN",
+      token: "unused",
+    });
+
+    expect(path).toBeUndefined();
+    await expect(readFile(opencodeAuthPath(home), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("removes a leftover disabled well-known entry and preserves other providers", async () => {
+    const home = await tempHome();
+    const path = opencodeAuthPath(home);
+    await mkdir(join(path, ".."), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        openai: { type: "api", key: "keep-me" },
+        disabled: { type: "wellknown", key: "OPENCODE_WELLKNOWN_TOKEN", token: "unused" },
+      })
+    );
+
+    expect(
+      await ensureOpenCodeWellKnownAuth({
+        home,
+        key: "OPENCODE_WELLKNOWN_TOKEN",
+        token: "unused",
+      })
+    ).toBeUndefined();
+
+    const auth = JSON.parse(await readFile(path, "utf8"));
+    expect(auth.openai).toEqual({ type: "api", key: "keep-me" });
+    expect(auth.disabled).toBeUndefined();
+  });
+});
+
+describe("parseOpenCodeWellKnownUrl", () => {
+  test("unset or empty defaults to kirmanak.stream", () => {
+    expect(parseOpenCodeWellKnownUrl(undefined)).toBe("https://kirmanak.stream");
+    expect(parseOpenCodeWellKnownUrl("")).toBe("https://kirmanak.stream");
+    expect(parseOpenCodeWellKnownUrl("  ")).toBe("https://kirmanak.stream");
+  });
+
+  test("disabled turns well-known off", () => {
+    expect(parseOpenCodeWellKnownUrl("disabled")).toBeUndefined();
+    expect(parseOpenCodeWellKnownUrl(" disabled ")).toBeUndefined();
+  });
+
+  test("accepts an http(s) origin and strips trailing slashes", () => {
+    expect(parseOpenCodeWellKnownUrl("https://opencode.example")).toBe("https://opencode.example");
+    expect(parseOpenCodeWellKnownUrl("https://opencode.example/")).toBe("https://opencode.example");
+    expect(parseOpenCodeWellKnownUrl("http://127.0.0.1:8080")).toBe("http://127.0.0.1:8080");
+  });
+
+  test("garbage URLs fail closed and do not fall through to the default", () => {
+    expect(() => parseOpenCodeWellKnownUrl("not-a-url")).toThrow("Invalid OPENCODE_WELLKNOWN_URL: not-a-url");
+    expect(() => parseOpenCodeWellKnownUrl("ftp://example.com")).toThrow("Invalid OPENCODE_WELLKNOWN_URL");
+    expect(() => parseOpenCodeWellKnownUrl("Disabled")).toThrow("Invalid OPENCODE_WELLKNOWN_URL");
+    expect(() => parseOpenCodeWellKnownUrl("https://")).toThrow("Invalid OPENCODE_WELLKNOWN_URL");
   });
 });

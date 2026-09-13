@@ -1,5 +1,6 @@
 import { readFileSync, unlinkSync } from "node:fs";
 import { type ForgeKind, parseForge } from "./forge.ts";
+import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
 
 export type JumiRole = "router" | "engine";
 
@@ -207,7 +208,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
     variant: optionalEnv(resolved, "OPENCODE_VARIANT"),
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
-    opencodeWellKnownUrl: optionalEnv(resolved, "OPENCODE_WELLKNOWN_URL", "https://kirmanak.stream"),
+    opencodeWellKnownUrl: parseOpenCodeWellKnownUrl(resolved.OPENCODE_WELLKNOWN_URL),
     opencodeWellKnownKey:
       optionalEnv(resolved, "OPENCODE_WELLKNOWN_KEY", "OPENCODE_WELLKNOWN_TOKEN") ?? "OPENCODE_WELLKNOWN_TOKEN",
     opencodeWellKnownToken: optionalEnv(resolved, "OPENCODE_WELLKNOWN_TOKEN", "unused") ?? "unused",

@@ -31,6 +31,16 @@ describe("loadConfig", () => {
     expect(config.model).toBe("openai/gpt-5.5");
     expect(config.variant).toBeUndefined();
     expect(config.opencodeWellKnownUrl).toBe("https://kirmanak.stream");
+    expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "" }).opencodeWellKnownUrl).toBe(
+      "https://kirmanak.stream"
+    );
+    expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "disabled" }).opencodeWellKnownUrl).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "https://opencode.example/" }).opencodeWellKnownUrl).toBe(
+      "https://opencode.example"
+    );
+    expect(() => loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "not-a-url" })).toThrow(
+      "Invalid OPENCODE_WELLKNOWN_URL"
+    );
     expect(config.opencodeWellKnownKey).toBe("OPENCODE_WELLKNOWN_TOKEN");
     expect(config.opencodeWellKnownToken).toBe("unused");
     expect(config.queueConcurrency).toBe(1);

@@ -1,6 +1,9 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+export const DEFAULT_OPENCODE_WELLKNOWN_URL = "https://kirmanak.stream";
+export const OPENCODE_WELLKNOWN_DISABLED = "disabled";
+
 export interface OpenCodeWellKnownAuthOptions {
   home: string;
   xdgDataHome?: string;
@@ -8,6 +11,22 @@ export interface OpenCodeWellKnownAuthOptions {
   key: string;
   token: string;
   logger?: (message: string) => void;
+}
+
+export function parseOpenCodeWellKnownUrl(value: string | undefined): string | undefined {
+  const raw = value?.trim() ?? "";
+  if (!raw) return DEFAULT_OPENCODE_WELLKNOWN_URL;
+  if (raw === OPENCODE_WELLKNOWN_DISABLED) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`Invalid OPENCODE_WELLKNOWN_URL: ${raw}`);
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+    throw new Error(`Invalid OPENCODE_WELLKNOWN_URL: ${raw}`);
+  }
+  return raw.replace(/\/+$/, "");
 }
 
 type AuthFile = Record<string, unknown>;
@@ -38,22 +57,43 @@ async function writeAuthFile(path: string, auth: AuthFile): Promise<void> {
   await chmod(path, 0o600);
 }
 
-export async function ensureOpenCodeWellKnownAuth(options: OpenCodeWellKnownAuthOptions): Promise<string | undefined> {
-  if (!options.url) return undefined;
+function isWellKnownEntry(value: unknown): boolean {
+  return (
+    !!value && typeof value === "object" && !Array.isArray(value) && (value as { type?: unknown }).type === "wellknown"
+  );
+}
 
+export async function ensureOpenCodeWellKnownAuth(options: OpenCodeWellKnownAuthOptions): Promise<string | undefined> {
+  const url = options.url === OPENCODE_WELLKNOWN_DISABLED ? undefined : options.url;
   const path = opencodeAuthPath(options.home, options.xdgDataHome);
   const auth = await readAuthFile(path);
-  if (auth[options.url] === undefined) {
-    auth[options.url] = {
+  let changed = false;
+
+  if (isWellKnownEntry(auth[OPENCODE_WELLKNOWN_DISABLED])) {
+    delete auth[OPENCODE_WELLKNOWN_DISABLED];
+    changed = true;
+    options.logger?.(`removed OpenCode well-known auth for ${OPENCODE_WELLKNOWN_DISABLED} at ${path}`);
+  }
+
+  if (!url) {
+    if (changed) await writeAuthFile(path, auth);
+    else options.logger?.("OpenCode well-known auth disabled");
+    return undefined;
+  }
+
+  if (auth[url] === undefined) {
+    auth[url] = {
       type: "wellknown",
       key: options.key,
       token: options.token,
     };
-    await writeAuthFile(path, auth);
-    options.logger?.(`seeded OpenCode well-known auth for ${options.url} at ${path}`);
+    changed = true;
+    options.logger?.(`seeded OpenCode well-known auth for ${url} at ${path}`);
   } else {
-    await chmod(path, 0o600).catch(() => undefined);
-    options.logger?.(`OpenCode well-known auth for ${options.url} already present at ${path}`);
+    options.logger?.(`OpenCode well-known auth for ${url} already present at ${path}`);
   }
+
+  if (changed) await writeAuthFile(path, auth);
+  else await chmod(path, 0o600).catch(() => undefined);
   return path;
 }

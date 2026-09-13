@@ -152,6 +152,7 @@ function buildEnv(
   };
   if (opts.variant) env.OPENCODE_VARIANT = opts.variant;
 
+  if (process.env.OPENCODE_API_KEY) env.OPENCODE_API_KEY = process.env.OPENCODE_API_KEY;
   if (configPath) env.OPENCODE_CONFIG = configPath;
   overlayReviewWebfetch(env, opts, configPath);
   if (opts.extraEnv) {

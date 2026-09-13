@@ -82,7 +82,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
 | `OPENCODE_VARIANT` | unset | OpenCode reasoning effort passed to `opencode run --variant`. Unset or empty omits the flag (model default). Do not bake an effort into the image |
 | `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`; only `gitops-apply-review` is allowed (`skills.paths`); other skills denied; external_directory is last-match star deny then allow `/app/review-skills`; webfetch JSON stays scalar allow (OpenCode types it as Action); last-match star allow then deny `kirmanak.stream` and GitHub search is applied via `OPENCODE_PERMISSION`; task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
-| `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. Override to **your** well-known host. The service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy |
+| `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. Override to **your** well-known host. Unset or empty still defaults to `https://kirmanak.stream`. Set `disabled` to turn well-known **off** (no `auth.json` seed, no fetch). Other non-URL values fail closed. `OPENCODE_MODEL` and `OPENCODE_API_KEY` still apply with well-known off. Otherwise the service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy |
 | `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
 | `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
 | `HOME` | `/data` in the image | OpenCode auth storage root |
@@ -227,7 +227,7 @@ Mount a volume at `/data` and seed OpenCode auth at:
 
 Use an existing `opencode /connect` login or run `opencode /connect` with `HOME=/data` during setup. The service relies on the persisted OAuth refresh/access state, not provider API keys in env vars.
 
-On startup, Jumi preserves the existing auth file and adds a well-known entry when it is missing (key = `OPENCODE_WELLKNOWN_URL`):
+On startup, unless `OPENCODE_WELLKNOWN_URL=disabled`, Jumi preserves the existing auth file and adds a well-known entry when it is missing (key = `OPENCODE_WELLKNOWN_URL`):
 
 ```json
 {
@@ -239,7 +239,7 @@ On startup, Jumi preserves the existing auth file and adds a well-known entry wh
 }
 ```
 
-That makes OpenCode load shared defaults from `<origin>/.well-known/opencode` before this repository's local review policy, without requiring deployment-specific init-container wiring.
+That makes OpenCode load shared defaults from `<origin>/.well-known/opencode` before this repository's local review policy, without requiring deployment-specific init-container wiring. `disabled` skips that seed (and removes a leftover `disabled` well-known entry) so OpenCode does not fetch any `.well-known/opencode` URL.
 
 The service runs OpenCode with a sanitized environment. Gitea tokens and webhook secrets are not passed to the OpenCode child process.
 The container runtime process runs as non-root UID/GID `10001:10001`.

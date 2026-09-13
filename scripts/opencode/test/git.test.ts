@@ -18,6 +18,7 @@ import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metr
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
 const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
+const originalApiKey = process.env.OPENCODE_API_KEY;
 
 beforeEach(() => {
   delete process.env.PHOENIX_OTLP_ENDPOINT;
@@ -29,6 +30,8 @@ afterEach(() => {
   else process.env.GITEA_BOT_TOKEN = originalSecret;
   if (originalPhoenix === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
   else process.env.PHOENIX_OTLP_ENDPOINT = originalPhoenix;
+  if (originalApiKey === undefined) delete process.env.OPENCODE_API_KEY;
+  else process.env.OPENCODE_API_KEY = originalApiKey;
   resetTokenMetricsForTests();
 });
 
@@ -198,6 +201,26 @@ printf 'JAVA_HOME=%s TMPOPT=%s GRADLE_HOME=%s DAEMON=%s SECRET=%s PEM=%s\\n' "$J
         expect(result.stdout).toContain("SECRET=");
         expect(result.stdout).toContain("PEM=");
         expect(result.stdout).not.toContain("BEGIN PRIVATE KEY");
+      }
+    );
+  });
+
+  test("forwards OPENCODE_API_KEY into the sanitized child", async () => {
+    process.env.OPENCODE_API_KEY = "sk-test";
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'MODEL=%s KEY=%s\\n' "$OPENCODE_MODEL" "$OPENCODE_API_KEY"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("MODEL=openai/gpt-5.5");
+        expect(result.stdout).toContain("KEY=sk-test");
       }
     );
   });
