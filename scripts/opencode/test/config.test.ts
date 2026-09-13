@@ -29,6 +29,7 @@ describe("loadConfig", () => {
     expect(config.allowedRepos).toEqual([]);
     expect(config.botUsername).toBe("jumi");
     expect(config.model).toBe("openai/gpt-5.5");
+    expect(config.variant).toBeUndefined();
     expect(config.opencodeWellKnownUrl).toBe("https://kirmanak.stream");
     expect(config.opencodeWellKnownKey).toBe("OPENCODE_WELLKNOWN_TOKEN");
     expect(config.opencodeWellKnownToken).toBe("unused");
@@ -54,6 +55,12 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...required, MAX_INCOMPLETE_RETRIES: "1" }).maxIncompleteRetries).toBe(1);
     expect(() => loadConfig({ ...required, MAX_INCOMPLETE_RETRIES: "0" })).toThrow("Invalid positive integer");
     expect(() => loadConfig({ ...required, MAX_INCOMPLETE_RETRIES: "abc" })).toThrow("Invalid positive integer");
+  });
+
+  test("OPENCODE_VARIANT is omitted unless set", () => {
+    expect(loadConfig(required).variant).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_VARIANT: "" }).variant).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_VARIANT: "xhigh" }).variant).toBe("xhigh");
   });
 
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {

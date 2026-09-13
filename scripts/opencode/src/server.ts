@@ -97,6 +97,7 @@ export async function runReviewJob(
       prNumber: job.prNumber,
       expectedHeadSha: job.headSha,
       model: config.model,
+      variant: config.variant,
       workspace,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,

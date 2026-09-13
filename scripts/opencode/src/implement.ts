@@ -86,6 +86,7 @@ export interface ImplementOptions extends PickupPolicy {
   giteaToken: string;
   followupIgnoreLogins?: readonly string[];
   model: string;
+  variant?: string;
   home: string;
   workdir: string;
   timeoutMs?: number;
@@ -279,6 +280,7 @@ export async function implementIssue(
         throwIfEngineFailed(
           await engine({
             model: opts.model,
+            variant: opts.variant,
             workdir: worktree,
             home: opts.home,
             sanitizeEnv,

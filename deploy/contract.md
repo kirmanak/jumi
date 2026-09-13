@@ -26,6 +26,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 - `BOT_USERNAME`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `OPENCODE_MODEL`
+- `OPENCODE_VARIANT`
 - `OPENCODE_CONFIG`
 - `OPENCODE_WELLKNOWN_URL`
 - `OPENCODE_WELLKNOWN_KEY`
@@ -80,6 +81,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 - `BOT_USERNAME`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `OPENCODE_MODEL`
+- `OPENCODE_VARIANT`
 - `OPENCODE_CONFIG`
 - `OPENCODE_WELLKNOWN_URL`
 - `OPENCODE_WELLKNOWN_KEY`

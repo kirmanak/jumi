@@ -19,6 +19,7 @@ export interface WorkerConfig {
   botUsername: string;
   followupIgnoreLogins: string[];
   model: string;
+  variant?: string;
   opencodeConfig?: string;
   opencodeWellKnownUrl?: string;
   opencodeWellKnownKey: string;
@@ -116,6 +117,7 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
+    variant: optionalEnv(resolved, "OPENCODE_VARIANT"),
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
     opencodeWellKnownUrl: optionalEnv(resolved, "OPENCODE_WELLKNOWN_URL", "https://kirmanak.stream"),
     opencodeWellKnownKey:

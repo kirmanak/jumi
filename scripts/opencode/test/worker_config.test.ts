@@ -21,6 +21,13 @@ describe("loadWorkerConfig", () => {
     expect(config.databaseUrl).toBeUndefined();
     expect(config).not.toHaveProperty("role");
     expect(config.phoenixOtlpEndpoint).toBeUndefined();
+    expect(config.variant).toBeUndefined();
+  });
+
+  test("OPENCODE_VARIANT is omitted unless set", () => {
+    expect(loadWorkerConfig(required).variant).toBeUndefined();
+    expect(loadWorkerConfig({ ...required, OPENCODE_VARIANT: "" }).variant).toBeUndefined();
+    expect(loadWorkerConfig({ ...required, OPENCODE_VARIANT: "xhigh" }).variant).toBe("xhigh");
   });
 
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {

@@ -70,6 +70,7 @@ export interface MergeDefaultIntoWorktreeOpts {
   job: IssueJob;
   pr: Pull;
   model: string;
+  variant?: string;
   home: string;
   sanitizeOpenCodeEnv?: boolean;
   extraEnv: Record<string, string>;
@@ -424,6 +425,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     throwIfEngineFailed(
       await opts.openCodeRunner({
         model: opts.model,
+        variant: opts.variant,
         workdir: worktree,
         home: opts.home,
         sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
@@ -588,6 +590,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         job: taskJob,
         pr,
         model: opts.model,
+        variant: opts.variant,
         home: opts.home,
         sanitizeOpenCodeEnv: sanitizeEnv,
         extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
@@ -636,6 +639,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           throwIfEngineFailed(
             await engine({
               model: opts.model,
+              variant: opts.variant,
               workdir: worktree,
               home: opts.home,
               sanitizeEnv,

@@ -86,6 +86,7 @@ export interface ReviewOptions {
   prNumber: number;
   expectedHeadSha?: string;
   model: string;
+  variant?: string;
   workspace: string;
   giteaUrl: string;
   giteaToken: string;
@@ -1010,6 +1011,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       log(`Running OpenCode for ${repoFullName}#${pr.number}`);
       const engineResult = await engine({
         model: opts.model,
+        variant: opts.variant,
         workdir: opts.workspace,
         home: opts.home,
         sanitizeEnv: opts.sanitizeOpenCodeEnv,

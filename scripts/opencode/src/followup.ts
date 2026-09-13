@@ -985,6 +985,7 @@ export async function implementFollowUp(
         job: taskJob,
         pr,
         model: opts.model,
+        variant: opts.variant,
         home: opts.home,
         sanitizeOpenCodeEnv: sanitizeEnv,
         extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
@@ -1097,6 +1098,7 @@ export async function implementFollowUp(
         throwIfEngineFailed(
           await engine({
             model: opts.model,
+            variant: opts.variant,
             workdir: worktree,
             home: opts.home,
             sanitizeEnv,

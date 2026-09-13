@@ -72,9 +72,80 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
         expect(result.stdout).toContain(`XDG_CONFIG=${workdir}/.jumi-tmp/xdg-config`);
         expect(result.stdout).toContain("SECRET=");
         expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
+        expect(result.stdout).not.toContain("--variant");
         expect(result.stdout).not.toContain("--continue");
         expect(result.stdout).not.toContain("--print-logs");
         expect(result.stdout).not.toContain("\u001b[");
+      }
+    );
+  });
+
+  test("passes --variant when variant is set", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          variant: "xhigh",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5 --variant xhigh`);
+        expect(result.stdout).toContain("VARIANT=xhigh");
+      }
+    );
+  });
+
+  test("passes unsupported variant through to OpenCode", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'ARGS=%s\\n' "$*"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          variant: "not-a-real-effort",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("--variant not-a-real-effort");
+      }
+    );
+  });
+
+  test("omits --variant when variant is unset or empty", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
+`,
+      async (_binDir, workdir) => {
+        const unset = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(unset.status).toBe("ok");
+        expect(unset.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
+        expect(unset.stdout).not.toContain("--variant");
+        expect(unset.stdout).toContain("VARIANT=");
+
+        const empty = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          variant: "",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(empty.status).toBe("ok");
+        expect(empty.stdout).not.toContain("--variant");
+        expect(empty.stdout).toContain("VARIANT=");
       }
     );
   });

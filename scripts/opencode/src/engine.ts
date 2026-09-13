@@ -10,6 +10,7 @@ export interface TraceContext {
 
 export interface EngineRunOptions {
   model: string;
+  variant?: string;
   workdir: string;
   home?: string;
   sanitizeEnv?: boolean;

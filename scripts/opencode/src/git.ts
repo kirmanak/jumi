@@ -150,6 +150,7 @@ function buildEnv(
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DB: openCodeDbPath,
   };
+  if (opts.variant) env.OPENCODE_VARIANT = opts.variant;
 
   if (configPath) env.OPENCODE_CONFIG = configPath;
   overlayReviewWebfetch(env, opts, configPath);
@@ -281,6 +282,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   logDiagnostic(log, "opencode_start", {
     review: opts.reviewLabel,
     model: opts.model,
+    variant: opts.variant ?? null,
     prompt_bytes: promptBytes,
     prompt_bytes_h: formatBytes(promptBytes),
     opencode_db: dbPath,
@@ -305,6 +307,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
 
   try {
     const args = ["opencode", "run", "--dir", opts.workdir, "-m", opts.model];
+    if (opts.variant) args.push("--variant", opts.variant);
     if (opts.continueSession) args.push("--continue");
     const proc = (() => {
       try {
