@@ -4,6 +4,7 @@ import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnost
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
+import { isInfraFailure } from "./infra.ts";
 import type {
   CheckPayload,
   Comment,
@@ -1124,6 +1125,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     }
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
+    if (isInfraFailure(err)) throw err;
     if (!persisted && !persistFailed) {
       const message = `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`;
       await opts.persistResult?.({ kind: "error", error: message });

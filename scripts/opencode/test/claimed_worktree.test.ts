@@ -21,7 +21,7 @@ import {
   throwIfAborted,
   worktreePorcelain,
 } from "../src/claimed_worktree.ts";
-import type { Engine } from "../src/engine.ts";
+import { type Engine, EngineFailedError } from "../src/engine.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssue, makeIssueJob, makeUser, stripGitConfigArgs } from "./fixtures.ts";
@@ -667,6 +667,41 @@ describe("sentinel strip, ship, abort, push-fail", () => {
         return { status: "pr" as const, htmlUrl: "nope", prNumber: 1 };
       });
       expect(result).toEqual({ status: "cancelled" });
+      expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "remove")).toBe(true);
+    });
+  });
+
+  test("runClaimedLoop skips onFailure for infra but still detaches", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        gitCalls.push(stripGitConfigArgs(args));
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      let onFailure = false;
+      await expect(
+        runClaimedLoop(
+          loop,
+          undefined,
+          async () => {
+            throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+          },
+          async () => {
+            onFailure = true;
+          }
+        )
+      ).rejects.toMatchObject({ infra: true });
+      expect(onFailure).toBe(false);
       expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "remove")).toBe(true);
     });
   });

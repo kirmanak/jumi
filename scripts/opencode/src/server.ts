@@ -7,6 +7,7 @@ import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
+import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
@@ -77,6 +78,7 @@ export interface RunReviewJobExtras {
   abortSignal?: AbortSignal;
   heartbeatMs?: number;
   jobId?: string;
+  breaker?: InfraCircuitBreaker;
 }
 
 export async function runReviewJob(
@@ -378,6 +380,11 @@ export async function processEngineTick(
   logger: (message: string) => void = log
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
+  const breaker = extras.breaker ?? engineInfraBreaker;
+  if (!breaker.canLease()) {
+    logger("breaker open");
+    return "idle";
+  }
   const row = await store.lease(leasedBy, config.leaseMs, undefined, [REVIEW_KIND]);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
@@ -433,6 +440,7 @@ export async function processEngineTick(
     }
     await store.markPublished(row.id, leasedBy, { state: publishedState(result), reason: result.reason });
     await handoverFollowUp(store, api, config, row, result, logger);
+    breaker.recordModelReached();
     return "processed";
   } catch (err) {
     const shutdown = Boolean(extras.abortSignal?.aborted);
@@ -444,6 +452,34 @@ export async function processEngineTick(
           : `engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`
     );
     stopHeartbeat();
+    if (!shutdown && !abort.signal.aborted && isInfraFailure(err)) {
+      breaker.recordInfra();
+      try {
+        const decision = decideInfraRetry(row.error, Date.now());
+        if (decision.action === "exhaust") {
+          await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
+          const current = await store.get(row.id);
+          if (current) await publishAndCompleteJob(store, api, config, current, logger);
+          logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
+        } else {
+          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
+          logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
+        }
+      } catch (infraErr) {
+        logger(
+          `engine infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
+        );
+        try {
+          await store.expireLease(row.id, leasedBy);
+        } catch (expireErr) {
+          logger(
+            `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+          );
+        }
+      }
+      return "processed";
+    }
+    if (!shutdown && !abort.signal.aborted) breaker.recordModelReached();
     let published = false;
     try {
       const current = await store.get(row.id);

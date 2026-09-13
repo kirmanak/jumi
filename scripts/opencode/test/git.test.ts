@@ -162,6 +162,7 @@ exit 7
         expect(result.status).toBe("exit");
         expect(result.exitCode).toBe(7);
         expect(result.message).toContain("opencode exited with code 7:\nbad things");
+        expect(result.infra).toBe(true);
       }
     );
   });
@@ -195,6 +196,7 @@ exit 7
         const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
         expect(result.status).toBe("exit");
         expect(result.message).toContain("opencode exited with code 7");
+        expect(result.infra).toBe(false);
         const text = renderTokenMetrics();
         expect(text).toContain(
           'ai_tokens_total{agent_instance="jumi",source="opencode",profile="default",model="xai/grok-4.6",token_type="input"} 42'
@@ -535,6 +537,21 @@ printf 'CONFIG=%s\n' "$OPENCODE_CONFIG"
     } finally {
       if (previous === undefined) delete process.env.OPENCODE_CONFIG;
       else process.env.OPENCODE_CONFIG = previous;
+    }
+  });
+
+  test("PATH miss throws infra EngineFailedError before the child runs", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "fake-opencode-work-"));
+    process.env.PATH = "/nonexistent";
+    try {
+      await expect(runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true })).rejects.toMatchObject(
+        {
+          name: "EngineFailedError",
+          infra: true,
+        }
+      );
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
     }
   });
 });

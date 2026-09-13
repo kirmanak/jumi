@@ -4,6 +4,7 @@ import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
 import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim, writeClaim } from "./claim.ts";
 import { type Engine, resolveEngine } from "./engine.ts";
+import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
 import {
   type GitAuth,
@@ -538,6 +539,11 @@ export async function runClaimedLoop<T>(
       await loop.stopHeartbeat();
       await loop.detachWorktree();
       return { status: "cancelled" };
+    }
+    if (isInfraFailure(err)) {
+      await loop.stopHeartbeat();
+      await loop.detachWorktree();
+      throw err;
     }
     if (onFailure) await onFailure(err);
     throw err;

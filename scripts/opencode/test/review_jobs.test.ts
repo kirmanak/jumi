@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { encodeInfraMarker, INFRA_RETRY_PREFIX } from "../src/infra.ts";
 import {
   HEARTBEAT_MS,
   isUniqueViolation,
@@ -179,6 +180,34 @@ describe("MemoryReviewJobStore", () => {
     expect(result.requeued[0]?.attempt).toBe(1);
     expect(result.requeued[0]?.state).toBe("queued");
     expect(result.publish).toHaveLength(0);
+  });
+
+  test("infra requeue does not increment attempt and cools via leasedUntil", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000, new Date(1_000));
+    expect(await store.requeueInfra(leased!.id, "engine-1", 2_000, encodeInfraMarker(1, 1_000), new Date(1_500))).toBe(
+      true
+    );
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.leasedUntil).toBe(3_500);
+    expect(store.rows[0]?.error?.startsWith(INFRA_RETRY_PREFIX)).toBe(true);
+    expect(await store.lease("engine-1", 60_000, new Date(3_000))).toBeUndefined();
+    const again = await store.lease("engine-1", 60_000, new Date(3_500));
+    expect(again?.id).toBe(leased?.id);
+    expect(again?.attempt).toBe(0);
+  });
+
+  test("model reclaim still increments attempt after an infra marker", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 1, new Date(1_000));
+    await store.requeueInfra(leased!.id, "engine-1", 1, encodeInfraMarker(2, 1_000), new Date(1_000));
+    await store.lease("engine-1", 1, new Date(2_000));
+    const result = await store.reclaimExpired(2, new Date(5_000));
+    expect(result.requeued[0]?.attempt).toBe(1);
+    expect(result.requeued[0]?.error).toBeNull();
   });
 
   test("reclaim after max attempts publishes failure without requeue", async () => {
@@ -645,6 +674,78 @@ describe("PgReviewJobStore.lease unique violation", () => {
   });
 });
 
+describe("PgReviewJobStore infra requeue", () => {
+  test("does not increment attempt and sets leased_until for backoff", async () => {
+    const queries: { query: string; params?: unknown[] }[] = [];
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        queries.push({ query, params });
+        if (query.includes("state = 'queued'") && query.includes("error = $4")) {
+          expect(params?.[3]).toBe(encodeInfraMarker(1, 1_500));
+          return [{ id: 1 }];
+        }
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.requeueInfra(1, "engine-1", 2_000, encodeInfraMarker(1, 1_500), new Date(1_500))).toBe(true);
+    const update = queries.find((row) => row.query.includes("error = $4"));
+    expect(update?.query).not.toContain("attempt = attempt + 1");
+    expect(update?.query).toContain("state = 'queued'");
+    expect(update?.params?.[2]).toBe(new Date(3_500).toISOString());
+  });
+
+  test("lease skips cooling jobs until leased_until", async () => {
+    let leasedUntil = new Date(3_500).toISOString();
+    const row = {
+      id: 1,
+      job_key: "kirmanak/demo#7:headsha",
+      kind: "review",
+      owner: "kirmanak",
+      repo: "demo",
+      pr_number: 7,
+      head_sha: "headsha",
+      issue_number: null,
+      payload: null,
+      delivery: "d1",
+      state: "queued",
+      attempt: 0,
+      leased_by: null,
+      leased_until: leasedUntil,
+      result_markdown: null,
+      result_reason: null,
+      error: encodeInfraMarker(1, 1_000),
+      pending_status_at: null,
+      published_at: null,
+      pr_updated_at: null,
+      created_at: new Date(0).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+    };
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        if (query.includes("state = 'queued'") && query.includes("RETURNING *")) {
+          const now = Date.parse(String(params?.[2]));
+          if (Date.parse(leasedUntil) > now) return [];
+          leasedUntil = String(params?.[1]);
+          return [{ ...row, state: "leased", leased_by: params?.[0], leased_until: leasedUntil }];
+        }
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.lease("engine-1", 60_000, new Date(3_000))).toBeUndefined();
+    const leased = await store.lease("engine-1", 60_000, new Date(3_500));
+    expect(leased?.attempt).toBe(0);
+    expect(leased?.id).toBe(1);
+  });
+});
+
 describe("PgReviewJobStore kind ANY() bind", () => {
   test("lease/reclaim/cancel bind text[] literals instead of JS arrays", async () => {
     const captured: { query: string; params?: unknown[] }[] = [];
@@ -660,15 +761,16 @@ describe("PgReviewJobStore kind ANY() bind", () => {
     const store = new PgReviewJobStore(sql);
 
     await store.lease("engine-1", 60_000, new Date(0));
-    const leaseReview = captured.find((row) => row.query.includes("state = 'queued' AND kind = ANY($3::text[])"));
-    expect(leaseReview?.params?.[2]).toBe("{review}");
-    expect(Array.isArray(leaseReview?.params?.[2])).toBe(false);
+    const leaseReview = captured.find((row) => row.query.includes("state = 'queued' AND kind = ANY($4::text[])"));
+    expect(leaseReview?.params?.[3]).toBe("{review}");
+    expect(Array.isArray(leaseReview?.params?.[3])).toBe(false);
+    expect(leaseReview?.query).toContain("leased_until IS NULL OR leased_until <= $3::timestamptz");
 
     captured.length = 0;
     await store.lease("worker-1", 60_000, new Date(0), WORKER_JOB_KINDS);
-    const leaseWorker = captured.find((row) => row.query.includes("kind = ANY($3::text[])"));
-    expect(leaseWorker?.params?.[2]).toBe("{implement,follow-up,conflict}");
+    const leaseWorker = captured.find((row) => row.query.includes("kind = ANY($4::text[])"));
     expect(leaseWorker?.params?.[3]).toBe("{implement,follow-up,conflict}");
+    expect(leaseWorker?.params?.[4]).toBe("{implement,follow-up,conflict}");
     expect(leaseWorker?.query).toContain("held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number");
 
     captured.length = 0;

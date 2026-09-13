@@ -11,7 +11,8 @@ import {
   sampleMemory,
   trackMemoryPeak,
 } from "./diagnostics.ts";
-import type { Engine, EngineResult, EngineRunOptions } from "./engine.ts";
+import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
+import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
@@ -305,12 +306,19 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   try {
     const args = ["opencode", "run", "--dir", opts.workdir, "-m", opts.model];
     if (opts.continueSession) args.push("--continue");
-    const proc = Bun.spawn(args, {
-      stdin: Bun.file(tmpPath),
-      stdout: "pipe",
-      stderr: "pipe",
-      env: buildEnv(opts, tempRoot, dbPath),
-    });
+    const proc = (() => {
+      try {
+        return Bun.spawn(args, {
+          stdin: Bun.file(tmpPath),
+          stdout: "pipe",
+          stderr: "pipe",
+          env: buildEnv(opts, tempRoot, dbPath),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new EngineFailedError(message, true);
+      }
+    })();
 
     const childPid = proc.pid;
     await opts.onPid?.(childPid);
@@ -378,6 +386,15 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     const stdout = stripAnsi(stdoutResult.text).trim();
     const stderr = stripAnsi(stderrResult.text).trim();
     const toolishLines = countToolishLines(stderr);
+    const durationMs = Date.now() - tracker.startedAtMs;
+    const tokensExist = recordOpenCodeDb(dbPath);
+    const infra = classifyOpenCodeInfra({
+      durationMs,
+      stderr,
+      dbBefore,
+      dbAfter,
+      tokensExist,
+    });
 
     logDiagnostic(log, "opencode_end", {
       review: opts.reviewLabel,
@@ -407,8 +424,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       opencode_db_h: formatBytes(dbAfter),
       opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
+      infra,
     });
-    recordOpenCodeDb(dbPath);
     await exportOpenCodeTrace({ dbPath, trace: opts.trace });
 
     if (opts.abortSignal?.aborted) {
@@ -417,10 +434,14 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       throw err;
     }
 
-    if (runError) throw runError;
+    if (runError) {
+      const message = runError instanceof Error ? runError.message : String(runError);
+      if (infra || looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
+      throw runError;
+    }
 
     if (timedOut) {
-      return { status: "timeout", exitCode, stdout, message: engineExitMessage(exitCode, stderr) };
+      return { status: "timeout", exitCode, stdout, message: engineExitMessage(exitCode, stderr), infra, durationMs };
     }
 
     if (exitCode === 0) {
@@ -430,10 +451,16 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       if (stderr) {
         log(`[opencode stderr] ${stderr}`);
       }
-      return { status: "ok", exitCode: 0, stdout };
+      return { status: "ok", exitCode: 0, stdout, durationMs };
     }
 
-    return { status: "exit", exitCode, stdout, message: engineExitMessage(exitCode, stderr) };
+    return { status: "exit", exitCode, stdout, message: engineExitMessage(exitCode, stderr), infra, durationMs };
+  } catch (err) {
+    if (err instanceof EngineFailedError) throw err;
+    if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
+    throw err;
   } finally {
     tracker?.stop();
     await rm(tmpDir, { recursive: true, force: true });

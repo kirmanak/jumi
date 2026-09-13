@@ -1,3 +1,4 @@
+import { isInfraRetryMarker } from "./infra.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
@@ -80,6 +81,7 @@ export interface ReviewJobStore {
   ): Promise<ReviewJobRecord | undefined>;
   heartbeat(id: number, leasedBy: string, leaseMs: number, now?: Date): Promise<boolean>;
   expireLease(id: number, leasedBy: string, now?: Date): Promise<boolean>;
+  requeueInfra(id: number, leasedBy: string, backoffMs: number, marker: string, now?: Date): Promise<boolean>;
   releaseLease(id: number, leasedBy: string): Promise<boolean>;
   saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void>;
   markPublished(
@@ -160,7 +162,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
 `;
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
-  return Boolean(row.resultMarkdown || row.resultReason || row.error);
+  if (row.resultMarkdown || row.resultReason) return true;
+  return Boolean(row.error && !isInfraRetryMarker(row.error));
 }
 
 function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefined): boolean {
@@ -458,13 +461,14 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return this.locked(() => {
       const allowed = kindsOrReview(kinds);
       const serializeWorkers = leasesWorkerKinds(allowed);
+      const ts = now.getTime();
       const row = this.rows.find((item) => {
         if (item.state !== "queued" || !allowed.includes(rowKind(item))) return false;
+        if (item.leasedUntil != null && item.leasedUntil > ts) return false;
         if (serializeWorkers && isWorkerKind(rowKind(item)) && workerIssueIsLeased(this.rows, item)) return false;
         return true;
       });
       if (!row) return undefined;
-      const ts = now.getTime();
       row.state = "leased";
       row.leasedBy = leasedBy;
       row.leasedUntil = ts + leaseMs;
@@ -491,6 +495,21 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const ts = now.getTime();
       row.leasedUntil = ts - 1;
       row.leasedBy = null;
+      row.updatedAt = ts;
+      return true;
+    });
+  }
+
+  requeueInfra(id: number, leasedBy: string, backoffMs: number, marker: string, now = new Date()): Promise<boolean> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      if (row?.state !== "leased" || row.leasedBy !== leasedBy) return false;
+      if (hasPersistedResult(row)) return false;
+      const ts = now.getTime();
+      row.state = "queued";
+      row.leasedBy = null;
+      row.leasedUntil = ts + backoffMs;
+      row.error = marker;
       row.updatedAt = ts;
       return true;
     });
@@ -572,6 +591,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         }
         row.attempt += 1;
         row.updatedAt = ts;
+        if (isInfraRetryMarker(row.error)) row.error = null;
         if (row.attempt >= maxAttempts) {
           row.error = MAX_ATTEMPTS_REASON;
           row.resultReason = MAX_ATTEMPTS_REASON;
@@ -908,16 +928,17 @@ export class PgReviewJobStore implements ReviewJobStore {
     const allowed = kindsOrReview(kinds);
     const until = new Date(now.getTime() + leaseMs).toISOString();
     const serializeWorkers = leasesWorkerKinds(allowed);
+    const runnable = `(leased_until IS NULL OR leased_until <= $3::timestamptz)`;
     const query = serializeWorkers
       ? `UPDATE review_jobs
          SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
          WHERE id = (
            SELECT id FROM review_jobs
-           WHERE state = 'queued' AND kind = ANY($3::text[])
+           WHERE state = 'queued' AND kind = ANY($4::text[]) AND ${runnable}
              AND NOT EXISTS (
                SELECT 1 FROM review_jobs held
                WHERE held.state = 'leased'
-                 AND held.kind = ANY($4::text[])
+                 AND held.kind = ANY($5::text[])
                  AND held.owner = review_jobs.owner
                  AND held.repo = review_jobs.repo
                  AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
@@ -931,15 +952,16 @@ export class PgReviewJobStore implements ReviewJobStore {
          SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
          WHERE id = (
            SELECT id FROM review_jobs
-           WHERE state = 'queued' AND kind = ANY($3::text[])
+           WHERE state = 'queued' AND kind = ANY($4::text[]) AND ${runnable}
            ORDER BY created_at ASC, id ASC
            FOR UPDATE SKIP LOCKED
            LIMIT 1
          )
          RETURNING *`;
+    const nowIso = now.toISOString();
     const params = serializeWorkers
-      ? [leasedBy, until, pgTextArrayLiteral(allowed), pgTextArrayLiteral([...WORKER_JOB_KINDS])]
-      : [leasedBy, until, pgTextArrayLiteral(allowed)];
+      ? [leasedBy, until, nowIso, pgTextArrayLiteral(allowed), pgTextArrayLiteral([...WORKER_JOB_KINDS])]
+      : [leasedBy, until, nowIso, pgTextArrayLiteral(allowed)];
     for (let attempt = 0; ; attempt++) {
       try {
         const rows = asRows<ReviewJobRow>(await this.sql.unsafe(query, params));
@@ -977,13 +999,39 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
+  async requeueInfra(
+    id: number,
+    leasedBy: string,
+    backoffMs: number,
+    marker: string,
+    now = new Date()
+  ): Promise<boolean> {
+    const rows = asRows<{ id: unknown }>(
+      await this.sql.unsafe(
+        `UPDATE review_jobs
+         SET state = 'queued',
+             leased_by = NULL,
+             leased_until = $3::timestamptz,
+             error = $4,
+             updated_at = NOW()
+         WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+           AND result_markdown IS NULL AND result_reason IS NULL
+           AND (error IS NULL OR error LIKE 'infra-retry:%')
+         RETURNING id`,
+        [id, leasedBy, new Date(now.getTime() + backoffMs).toISOString(), marker]
+      )
+    );
+    return rows.length > 0;
+  }
+
   async releaseLease(id: number, leasedBy: string): Promise<boolean> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
          SET state = 'queued', leased_by = NULL, leased_until = NULL, updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
-           AND result_markdown IS NULL AND result_reason IS NULL AND error IS NULL
+           AND result_markdown IS NULL AND result_reason IS NULL
+           AND (error IS NULL OR error LIKE 'infra-retry:%')
          RETURNING id`,
         [id, leasedBy]
       )
@@ -1114,6 +1162,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                  state = 'queued',
                  leased_by = NULL,
                  leased_until = NULL,
+                 error = CASE WHEN error LIKE 'infra-retry:%' THEN NULL ELSE error END,
                  updated_at = NOW()
              WHERE id = $1
              RETURNING *`,

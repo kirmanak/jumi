@@ -2,10 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, isPidAlive, readClaim, writeClaim } from "../src/claim.ts";
+import { claimFilePath, isPidAlive, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
+import { EngineFailedError } from "../src/engine.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { implementIssue } from "../src/implement.ts";
+import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { readStuckState } from "../src/stuck.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
+import type { GitRunner } from "../src/workspace.ts";
 import {
   emptyCiMethods,
   makeComment,
@@ -14,6 +19,7 @@ import {
   makePR,
   makeRepo,
   makeWorkerConfig,
+  stripGitConfigArgs,
 } from "./fixtures.ts";
 
 function waitUntilAborted(signal?: AbortSignal): Promise<void> {
@@ -796,5 +802,173 @@ describe("processWorkerTick", () => {
       }
     );
     expect(store.rows.some((row) => row.kind === "conflict")).toBe(false);
+  });
+
+  test("infra fail requeues implement without incrementing model attempts", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const logs: string[] = [];
+    const breaker = new InfraCircuitBreaker();
+    await processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi(),
+      "worker-1",
+      {
+        breaker,
+        implement: async () => {
+          throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+        },
+      },
+      (message) => logs.push(message)
+    );
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.kind).toBe("implement");
+    expect(store.rows[0]?.leasedUntil).toBeGreaterThan(Date.now());
+    expect(logs.some((line) => line.includes("infra-retry"))).toBe(true);
+    expect(logs.some((line) => /requeued .*attempt=/.test(line))).toBe(false);
+  });
+
+  test("real implementIssue infra fail does not fingerprint or stuck-publish", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-infra-home-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-infra-work-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") throw new Error("missing");
+        return "";
+      };
+      const extras = {
+        breaker: new InfraCircuitBreaker(100, 20),
+        implement: async (opts: Parameters<typeof implementIssue>[0]) =>
+          implementIssue({
+            ...opts,
+            heartbeatIntervalMs: 0,
+            gitRunner,
+            openCodeRunner: async () => {
+              throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+            },
+          }),
+      };
+      const logs: string[] = [];
+      for (let i = 0; i < 4; i++) {
+        await processWorkerTick(store, makeWorkerConfig({ home, workdir }), api, "worker-1", extras, (message) =>
+          logs.push(message)
+        );
+        store.rows[0]!.leasedUntil = Date.now() - 1;
+      }
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(store.rows[0]?.resultReason).toBeNull();
+      expect(api.comments.some((body) => body.includes("Jumi failed:") || body.includes("stuck:"))).toBe(false);
+      expect((await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12))).fingerprints).toEqual([]);
+      expect(logs.filter((line) => line.includes("infra-retry"))).toHaveLength(4);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("follow-up and conflict infra fails share the same requeue path", async () => {
+    for (const mode of ["follow-up", "conflict"] as const) {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob({ mode, prNumber: 127, headSha: "headsha" }));
+      const extras =
+        mode === "follow-up"
+          ? {
+              followUp: async () => {
+                throw new EngineFailedError("spawn opencode ENOENT", true);
+              },
+            }
+          : {
+              conflict: async () => {
+                throw new EngineFailedError("spawn opencode ENOENT", true);
+              },
+            };
+      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+        breaker: new InfraCircuitBreaker(),
+        ...extras,
+      });
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.kind).toBe(mode);
+    }
+  });
+
+  test("N consecutive infra fails stop leasing; cooldown resumes", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const breaker = new InfraCircuitBreaker(3, 20);
+    const extras = {
+      breaker,
+      implement: async () => {
+        throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+      },
+    };
+    const logs: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) =>
+        logs.push(message)
+      );
+      store.rows[0]!.leasedUntil = Date.now() - 1;
+    }
+    logs.length = 0;
+    expect(
+      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message))
+    ).toBe("idle");
+    expect(logs.some((line) => line === "breaker open")).toBe(true);
+    await Bun.sleep(25);
+    logs.length = 0;
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message));
+    expect(logs.some((line) => line.includes("infra-retry"))).toBe(true);
+  });
+
+  test("long model run still uses MAX_JOB_ATTEMPTS", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const extras = {
+      breaker: new InfraCircuitBreaker(),
+      implement: async () => {
+        throw new EngineFailedError("opencode exited with code 1:\nbad things", false);
+      },
+    };
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    expect((await reclaimExpiredWorkerJobs(store, 2, () => undefined)).requeued).toBe(1);
+    expect(store.rows[0]?.attempt).toBe(1);
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    expect(await reclaimExpiredWorkerJobs(store, 2, () => undefined)).toEqual({ requeued: 0, published: 1 });
+    expect(store.rows[0]?.state).toBe("failed");
+    expect(store.rows[0]?.error).toContain("max attempts");
+  });
+
+  test("infra budget publishes infra/spawn not max attempts", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    store.rows[0]!.error = encodeInfraMarker(7, Date.now() - 1_000);
+    const logs: string[] = [];
+    await processWorkerTick(
+      store,
+      makeWorkerConfig(),
+      makeApi(),
+      "worker-1",
+      {
+        breaker: new InfraCircuitBreaker(),
+        implement: async () => {
+          throw new EngineFailedError("missing API key", true);
+        },
+      },
+      (message) => logs.push(message)
+    );
+    expect(store.rows[0]?.state).toBe("failed");
+    expect(store.rows[0]?.resultReason).toBe(INFRA_SPAWN_REASON);
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(logs.some((line) => line.includes("infra-published") && line.includes("infra/spawn"))).toBe(true);
+    expect(logs.some((line) => line.includes("reclaim-published"))).toBe(false);
   });
 });

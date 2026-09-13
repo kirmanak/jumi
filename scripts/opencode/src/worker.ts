@@ -14,6 +14,7 @@ import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
+import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure, workerInfraBreaker } from "./infra.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
@@ -33,6 +34,7 @@ export interface RunWorkerJobExtras {
   conflict?: typeof implementConflict;
   heartbeatMs?: number;
   abortSignal?: AbortSignal;
+  breaker?: InfraCircuitBreaker;
 }
 
 function log(message: string) {
@@ -218,7 +220,7 @@ export async function reclaimExpiredWorkerJobs(
         state: "failed",
         reason: row.error ?? row.resultReason ?? undefined,
       });
-      logger(`reclaim-published ${row.jobKey} failed`);
+      logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
     } catch (err) {
       logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
       try {
@@ -266,6 +268,11 @@ export async function processWorkerTick(
   pids?: Map<string, number>
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
+  const breaker = extras.breaker ?? workerInfraBreaker;
+  if (!breaker.canLease()) {
+    logger("breaker open");
+    return "idle";
+  }
   const row = await store.lease(leasedBy, config.leaseMs, undefined, WORKER_JOB_KINDS);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
@@ -376,6 +383,7 @@ export async function processWorkerTick(
     }
     await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
+    breaker.recordModelReached();
     const prNumber = pushedPrNumber(result);
     if (prNumber !== undefined) {
       try {
@@ -403,6 +411,33 @@ export async function processWorkerTick(
       return "processed";
     }
     logger(`worker job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (isInfraFailure(err)) {
+      breaker.recordInfra();
+      try {
+        const decision = decideInfraRetry(row.error, Date.now());
+        if (decision.action === "exhaust") {
+          await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
+          await store.markPublished(row.id, leasedBy, { state: "failed", reason: decision.reason });
+          logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
+        } else {
+          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
+          logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
+        }
+      } catch (infraErr) {
+        logger(
+          `worker infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
+        );
+        try {
+          await store.expireLease(row.id, leasedBy);
+        } catch (expireErr) {
+          logger(
+            `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+          );
+        }
+      }
+      return "processed";
+    }
+    breaker.recordModelReached();
     try {
       await store.expireLease(row.id, leasedBy);
     } catch (expireErr) {

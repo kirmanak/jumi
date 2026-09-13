@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EngineFailedError } from "../src/engine.ts";
+import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
 import { INCOMPLETE_REVIEW_STUCK, MAX_INCOMPLETE_RETRIES, type ReviewApi } from "../src/review.ts";
 import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
@@ -755,6 +757,206 @@ describe("processEngineTick", () => {
       } finally {
         globalThis.setInterval = realSetInterval;
       }
+    });
+  });
+
+  test("infra fail requeues without incrementing model attempts", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const logs: string[] = [];
+      const breaker = new InfraCircuitBreaker();
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeApi(),
+        "engine-1",
+        {
+          gitRunner: frozenGit(),
+          workspacePreparer: async () => undefined,
+          breaker,
+          openCodeRunner: async () => {
+            throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.leasedUntil).toBeGreaterThan(Date.now());
+      expect(logs.some((line) => line.includes("infra-retry") && line.includes("n=1"))).toBe(true);
+      expect(logs.some((line) => line.includes("requeued") && line.includes("attempt="))).toBe(false);
+    });
+  });
+
+  test("N consecutive infra fails stop leasing until cooldown", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const breaker = new InfraCircuitBreaker(3, 20);
+      const extras = {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        breaker,
+        openCodeRunner: async () => {
+          throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+        },
+      };
+      const logs: string[] = [];
+      const logger = (message: string) => logs.push(message);
+      for (let i = 0; i < 3; i++) {
+        await processEngineTick(
+          store,
+          makeConfig({ workdir: workspace, home: workspace }),
+          makeApi(),
+          "engine-1",
+          extras,
+          logger
+        );
+        store.rows[0]!.leasedUntil = Date.now() - 1;
+      }
+      logs.length = 0;
+      expect(
+        await processEngineTick(
+          store,
+          makeConfig({ workdir: workspace, home: workspace }),
+          makeApi(),
+          "engine-1",
+          extras,
+          logger
+        )
+      ).toBe("idle");
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(logs.some((line) => line === "breaker open")).toBe(true);
+      await Bun.sleep(25);
+      logs.length = 0;
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeApi(),
+        "engine-1",
+        extras,
+        logger
+      );
+      expect(logs.some((line) => line.includes("infra-retry"))).toBe(true);
+    });
+  });
+
+  test("model success after infra closes the breaker", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const breaker = new InfraCircuitBreaker(3, 60_000);
+      const fail = {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        breaker,
+        openCodeRunner: async () => {
+          throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+        },
+      };
+      for (let i = 0; i < 2; i++) {
+        await processEngineTick(
+          store,
+          makeConfig({ workdir: workspace, home: workspace }),
+          makeApi(),
+          "engine-1",
+          fail
+        );
+        store.rows[0]!.leasedUntil = Date.now() - 1;
+      }
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), makeApi(), "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        breaker,
+        openCodeRunner: async (opts) => {
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(store.rows[0]?.state).toBe("succeeded");
+      expect(breaker.canLease()).toBe(true);
+      expect(await store.enqueue(makeJob({ prNumber: 8, delivery: "d2" }))).toEqual({
+        key: "kirmanak/demo#8:headsha",
+        queued: true,
+      });
+      const logs: string[] = [];
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeApi(),
+        "engine-1",
+        fail,
+        (message) => logs.push(message)
+      );
+      expect(logs.some((line) => line === "breaker open")).toBe(false);
+      expect(logs.some((line) => line.includes("infra-retry"))).toBe(true);
+    });
+  });
+
+  test("long model run still uses MAX_JOB_ATTEMPTS", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const logs: string[] = [];
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeApi(),
+        "engine-1",
+        {
+          gitRunner: frozenGit(),
+          workspacePreparer: async () => undefined,
+          breaker: new InfraCircuitBreaker(),
+          openCodeRunner: async () => {
+            throw new EngineFailedError("opencode exited with code 1:\nbad things", false);
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(store.rows[0]?.state).toBe("failed");
+      expect(store.rows[0]?.error).toContain("opencode exited");
+      expect(logs.some((line) => line.includes("infra-retry"))).toBe(false);
+
+      const crash = new MemoryReviewJobStore();
+      await crash.enqueue(makeJob());
+      await crash.lease("engine-1", 1, new Date(1_000));
+      expect((await crash.reclaimExpired(2, new Date(5_000))).requeued[0]?.attempt).toBe(1);
+      await crash.lease("engine-1", 1, new Date(6_000));
+      const published = await crash.reclaimExpired(2, new Date(10_000));
+      expect(published.requeued).toHaveLength(0);
+      expect(published.publish[0]?.attempt).toBe(2);
+      expect(published.publish[0]?.error).toContain("max attempts");
+    });
+  });
+
+  test("infra budget publishes infra/spawn not max attempts", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      store.rows[0]!.error = encodeInfraMarker(7, Date.now() - 1_000);
+      const logs: string[] = [];
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeApi(),
+        "engine-1",
+        {
+          gitRunner: frozenGit(),
+          workspacePreparer: async () => undefined,
+          breaker: new InfraCircuitBreaker(),
+          openCodeRunner: async () => {
+            throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(store.rows[0]?.state).toBe("failed");
+      expect(store.rows[0]?.error).toBe(INFRA_SPAWN_REASON);
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(logs.some((line) => line.includes("infra-published") && line.includes("infra/spawn"))).toBe(true);
+      expect(logs.some((line) => line.includes("reclaim-published"))).toBe(false);
     });
   });
 });

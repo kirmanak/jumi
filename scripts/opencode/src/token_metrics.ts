@@ -69,8 +69,8 @@ export function resetTokenMetricsForTests(): void {
   resetTraceExportForTests();
 }
 
-export function recordOpenCodeDb(path: string): void {
-  if (!existsSync(path)) return;
+export function recordOpenCodeDb(path: string): boolean {
+  if (!existsSync(path)) return false;
   try {
     // Read-write: OpenCode uses WAL. After proc.kill()/143 the -wal may be
     // uncheckpointed; SQLITE_OPEN_READONLY cannot recreate -shm and drops tokens.
@@ -78,7 +78,7 @@ export function recordOpenCodeDb(path: string): void {
     const db = new Database(path);
     try {
       const tables = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
-      if (!tables.some((row) => row.name === "session")) return;
+      if (!tables.some((row) => row.name === "session")) return false;
       const rows = db
         .query(
           `SELECT
@@ -101,21 +101,25 @@ export function recordOpenCodeDb(path: string): void {
         tokens_reasoning: number;
         session_count: number;
       }>;
+      let tokensExist = false;
       for (const row of rows) {
         const model = normalizeOpenCodeModel(row.model);
         add(sessions, model, Number(row.session_count) || 0);
         for (const tokenType of TOKEN_TYPES) {
           const value = Number(row[COLUMN_BY_TYPE[tokenType] as keyof typeof row]) || 0;
+          if (value > 0) tokensExist = true;
           add(counters, tokenKey(model, tokenType), value);
           gauges.set(tokenKey(model, tokenType), counters.get(tokenKey(model, tokenType)) ?? 0);
         }
       }
       lastSuccessSeconds = Math.floor(Date.now() / 1000);
+      return tokensExist;
     } finally {
       db.close();
     }
   } catch {
     errors += 1;
+    return false;
   }
 }
 

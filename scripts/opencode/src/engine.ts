@@ -33,9 +33,21 @@ export interface EngineResult {
   exitCode?: number | null;
   stdout?: string;
   message?: string;
+  infra?: boolean;
+  durationMs?: number;
 }
 
 export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;
+
+export class EngineFailedError extends Error {
+  readonly infra: boolean;
+
+  constructor(message: string, infra = false) {
+    super(message);
+    this.name = "EngineFailedError";
+    this.infra = infra;
+  }
+}
 
 export function resolveEngine(opts: { engine?: Engine; openCodeRunner?: Engine }, fallback: Engine): Engine {
   return opts.engine ?? opts.openCodeRunner ?? fallback;
@@ -43,5 +55,5 @@ export function resolveEngine(opts: { engine?: Engine; openCodeRunner?: Engine }
 
 export function throwIfEngineFailed(result: EngineResult): void {
   if (result.status === "ok") return;
-  throw new Error(result.message ?? `engine ${result.status}`);
+  throw new EngineFailedError(result.message ?? `engine ${result.status}`, result.infra === true);
 }
