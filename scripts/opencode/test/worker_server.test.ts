@@ -430,7 +430,7 @@ describe("createWorkerFetchHandler", () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
     const response = await handler(await signedRequest({ action: "assigned" }));
     expect(response.status).toBe(400);
-    expect((await responseJson(response)).error).toContain("missing repository");
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
   });
 
   test("first-run assign still 202s on the in-memory queue without a store", async () => {

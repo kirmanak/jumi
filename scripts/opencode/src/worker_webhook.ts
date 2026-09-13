@@ -177,7 +177,8 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      return json(400, { error: err instanceof Error ? err.message : String(err) });
+      logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+      return json(400, { error: "invalid webhook payload" });
     }
   }
   // Gitea 1.27: assignment uses X-Gitea-Event=issues and X-Gitea-Event-Type=issue_assign.
@@ -211,7 +212,8 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      return json(500, { error: err instanceof Error ? err.message : String(err) });
+      logger(`workflow job webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      return json(500, { error: "internal error" });
     }
   }
 
@@ -240,7 +242,8 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      return json(500, { error: err instanceof Error ? err.message : String(err) });
+      logger(`push webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      return json(500, { error: "internal error" });
     }
   }
 
@@ -324,6 +327,7 @@ export async function handleWorkerWebhookEvent(
       logger(`queue unavailable: ${err.message}`);
       return json(503, { error: "queue unavailable" });
     }
-    return json(400, { error: err instanceof Error ? err.message : String(err) });
+    logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+    return json(400, { error: "invalid webhook payload" });
   }
 }
