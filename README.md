@@ -183,7 +183,7 @@ When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs an OpenInfer
 
 ## Image
 
-This repository’s image workflows publish `jumi-reviewer` and `jumi-worker` with tags `<commit-sha>`, `latest`, and `vX.Y.Z`. Point GitOps at the registry **you** push to. Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA).
+This repository’s image workflows publish `jumi-reviewer` and `jumi-worker` with tags `latest` and `vX.Y.Z`. Point GitOps at the registry **you** push to. Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA).
 
 Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml` and `.gitea/workflows/jumi-worker-image.yml`:
 
