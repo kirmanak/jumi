@@ -290,12 +290,14 @@ bun run server
 ## Structure
 
 ```text
+.github/
+  workflows/
+    opencode-checks.yml      # PR lint/typecheck/test and image build checks
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
   opencode-implement.json    # Implement config (edit/write allow; skills.paths /app/review-skills; blanket skill allow)
   tool-versions.env          # Pinned OpenCode/Bun/Helm/Temurin versions
   workflows/
-    opencode-checks.yml      # PR lint/typecheck/test and image build checks
     jumi-reviewer-image.yml  # Reviewer image build/push workflow
     jumi-worker-image.yml    # Worker image build/push workflow
     jumi-release.yml         # Annotated vX.Y.Z git tag + Gitea Release
