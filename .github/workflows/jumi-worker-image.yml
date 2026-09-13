@@ -1,0 +1,172 @@
+name: Build Jumi Worker Image
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # false: do not cancel an in-flight image publish.
+  cancel-in-progress: false
+
+jobs:
+  image:
+    # GitHub-hosted runner with Docker Buildx.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/kirmanak/jumi-worker
+      REGISTRY: ghcr.io
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Load tool versions
+        run: grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: scripts/opencode
+
+      - name: Run lint, typecheck, and tests
+        run: bun run ci
+        working-directory: scripts/opencode
+
+      - name: Compute version
+        run: echo "VERSION=$(bun src/release.ts next-version)" >> $GITHUB_ENV
+        working-directory: scripts/opencode
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and export to Docker
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: worker
+          platforms: linux/amd64
+          load: true
+          tags: jumi-worker:test
+          build-args: |
+            BUN_VERSION=${{ env.BUN_VERSION }}
+            OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            HELM_VERSION=${{ env.HELM_VERSION }}
+            TEMURIN_TAG=${{ env.TEMURIN_TAG }}
+            VERSION=${{ env.VERSION }}
+            REVISION=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/kirmanak/jumi
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Verify worker image
+        run: |
+          set -euo pipefail
+          TEST_TAG="jumi-worker:test"
+
+          actual_user="$(docker inspect --format '{{.Config.User}}' "${TEST_TAG}")"
+          if [ "${actual_user}" != "10001:10001" ]; then
+            echo "Expected image user 10001:10001, got ${actual_user:-<empty>}" >&2
+            exit 1
+          fi
+          echo "Verified image user: ${actual_user}"
+
+          java_home="$(docker run --rm "${TEST_TAG}" printenv JAVA_HOME)"
+          if [ "${java_home}" != "/opt/java/openjdk" ]; then
+            echo "Expected JAVA_HOME=/opt/java/openjdk, got ${java_home:-<empty>}" >&2
+            exit 1
+          fi
+          echo "Verified JAVA_HOME: ${java_home}"
+
+          java_version="$(docker run --rm "${TEST_TAG}" java -version 2>&1)"
+          printf '%s\n' "${java_version}"
+          if ! printf '%s\n' "${java_version}" | grep -E 'version "21(\.|$)' >/dev/null; then
+            echo "worker image java is not JDK 21" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "${java_version}" | grep -F Temurin >/dev/null; then
+            echo "worker image java is not Temurin" >&2
+            exit 1
+          fi
+          echo "Verified worker JDK is Temurin 21"
+
+          config="$(docker run --rm "${TEST_TAG}" printenv OPENCODE_CONFIG)"
+          if [ "${config}" != "/app/.gitea/opencode-implement.json" ]; then
+            echo "Expected OPENCODE_CONFIG=/app/.gitea/opencode-implement.json, got ${config:-<empty>}" >&2
+            exit 1
+          fi
+          instance="$(docker run --rm "${TEST_TAG}" printenv AGENT_INSTANCE)"
+          if [ "${instance}" != "jumi-worker" ]; then
+            echo "Expected AGENT_INSTANCE=jumi-worker, got ${instance:-<empty>}" >&2
+            exit 1
+          fi
+          echo "Verified worker env: ${config} ${instance}"
+
+          docker run --rm "${TEST_TAG}" test -f /app/review-skills/gitea-pull-review/SKILL.md
+          echo "Verified gitea-pull-review skill"
+
+          config_json="$(docker run --rm -e OPENCODE_DISABLE_PROJECT_CONFIG=1 -e OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${TEST_TAG}" sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
+          if ! printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null; then
+            printf '%s\n' "${config_json}" >&2
+            echo "worker opencode debug config did not load skills.paths /app/review-skills" >&2
+            exit 1
+          fi
+          echo "Verified opencode debug config"
+
+          source_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "${TEST_TAG}")"
+          if [ "${source_label}" != "https://github.com/kirmanak/jumi" ]; then
+            echo "Expected org.opencontainers.image.source=https://github.com/kirmanak/jumi, got ${source_label:-<empty>}" >&2
+            exit 1
+          fi
+          version_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "${TEST_TAG}")"
+          if [ "${version_label}" != "${VERSION}" ]; then
+            echo "Expected org.opencontainers.image.version=${VERSION}, got ${version_label:-<empty>}" >&2
+            exit 1
+          fi
+          revision_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${TEST_TAG}")"
+          if [ "${revision_label}" != "${GITHUB_SHA}" ]; then
+            echo "Expected org.opencontainers.image.revision=${GITHUB_SHA}, got ${revision_label:-<empty>}" >&2
+            exit 1
+          fi
+          echo "Verified OCI labels"
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+          build-args: |
+            BUN_VERSION=${{ env.BUN_VERSION }}
+            OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            HELM_VERSION=${{ env.HELM_VERSION }}
+            TEMURIN_TAG=${{ env.TEMURIN_TAG }}
+            VERSION=${{ env.VERSION }}
+            REVISION=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/kirmanak/jumi
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
