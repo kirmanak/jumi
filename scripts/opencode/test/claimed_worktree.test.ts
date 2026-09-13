@@ -1,18 +1,30 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, readClaim, writeClaim } from "../src/claim.ts";
 import {
+  attachIssueWorktree,
+  attachPrWorktree,
   beginClaimedWorktree,
+  commitIfDirty,
+  ensureBareCache,
+  inspectMovedPrHead,
+  inspectRemoteContainsDefault,
   isAbortError,
   isClaimedEarlyResult,
+  openClaimedLoop,
+  pushClaimedBranch,
   recheckAssignedAndOpen,
+  runClaimedLoop,
+  stripSentinels,
   throwIfAborted,
+  worktreePorcelain,
 } from "../src/claimed_worktree.ts";
 import type { Engine } from "../src/engine.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
-import { makeIssue, makeIssueJob, makeUser } from "./fixtures.ts";
+import type { GitRunner } from "../src/workspace.ts";
+import { makeIssue, makeIssueJob, makeUser, stripGitConfigArgs } from "./fixtures.ts";
 
 const fallbackEngine: Engine = async () => ({ status: "ok" });
 
@@ -403,5 +415,313 @@ describe("throwIfAborted", () => {
     } catch (err) {
       expect(isAbortError(err)).toBe(true);
     }
+  });
+});
+
+const loopAuth = {
+  giteaUrl: "https://gitea.kirmanak.stream",
+  giteaToken: "bot-token",
+  botUsername: "jumi",
+};
+
+describe("openClaimedLoop heartbeat", () => {
+  test("does not resurrect a terminal claim", async () => {
+    await withDirs(async (home, workdir) => {
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        now: () => new Date("2026-05-23T00:00:00Z"),
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 20 });
+      try {
+        await loop.stampTerminalClaim({ getIssue: async () => makeIssue({ updated_at: "2026-05-23T01:00:00Z" }) });
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        const claim = await readClaim(claimed.claimPath);
+        expect(claim?.terminal).toBe(true);
+        expect(claim?.pid).toBe(0);
+        expect(claim?.issueUpdatedAt).toBe("2026-05-23T01:00:00Z");
+      } finally {
+        await loop.stopHeartbeat();
+      }
+    });
+  });
+
+  test("engine pid stamp is skipped after terminal", async () => {
+    await withDirs(async (home, workdir) => {
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        now: () => new Date("2026-05-23T00:00:00Z"),
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      await loop.stampEnginePid(99);
+      expect((await readClaim(claimed.claimPath))?.pid).toBe(99);
+      await loop.stampTerminalClaim({ getIssue: async () => makeIssue() });
+      await loop.engineOnPid()(100);
+      const claim = await readClaim(claimed.claimPath);
+      expect(claim?.terminal).toBe(true);
+      expect(claim?.pid).toBe(0);
+    });
+  });
+
+  test("stampHeadSha writes headShaAtStart", async () => {
+    await withDirs(async (home, workdir) => {
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        now: () => new Date("2026-05-23T00:00:00Z"),
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      await loop.stampHeadSha("abc123");
+      expect((await readClaim(claimed.claimPath))?.headShaAtStart).toBe("abc123");
+    });
+  });
+});
+
+describe("bare cache and attach", () => {
+  test("clones missing cache then fetches heads", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        gitCalls.push(stripGitConfigArgs(args));
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      await ensureBareCache(loop, {
+        cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+        giteaUrl: "https://gitea.kirmanak.stream",
+        log: () => undefined,
+      });
+      expect(gitCalls.some((args) => args[0] === "clone" && args.includes("--bare"))).toBe(true);
+      expect(gitCalls.some((args) => args.includes("+refs/heads/*:refs/remotes/origin/*"))).toBe(true);
+      expect(gitCalls.some((args) => args.includes("+refs/heads/*:refs/heads/*"))).toBe(false);
+    });
+  });
+
+  test("issue attach prefers origin issue branch over default", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1);
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") return "abc123";
+          throw new Error("missing");
+        }
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      const headSha = await attachIssueWorktree(loop, {
+        branch: "jumi/issue-12-fix-the-thing",
+        defaultBranch: "main",
+        log: () => undefined,
+      });
+      expect(headSha).toBe("abc123");
+      expect(
+        gitCalls.some(
+          (args) =>
+            args[0] === "worktree" &&
+            args[1] === "add" &&
+            args.includes("-B") &&
+            args.includes("origin/jumi/issue-12-fix-the-thing")
+        )
+      ).toBe(true);
+      expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "add" && args.includes("origin/main"))).toBe(
+        false
+      );
+    });
+  });
+
+  test("PR attach resets hard to origin branch when the worktree exists", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "show-ref") return "";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      await mkdir(join(claimed.worktree, ".git"), { recursive: true });
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      const attached = await attachPrWorktree(loop, {
+        branch: "jumi/issue-12-fix-the-thing",
+        defaultBranch: "main",
+        log: () => undefined,
+      });
+      if (isClaimedEarlyResult(attached)) throw new Error("expected attach");
+      expect(attached.headSha).toBe("headsha");
+      expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "add")).toBe(false);
+      expect(
+        gitCalls.some(
+          (args) =>
+            args[0] === "reset" && args.includes("--hard") && args.includes("origin/jumi/issue-12-fix-the-thing")
+        )
+      ).toBe(true);
+    });
+  });
+});
+
+describe("sentinel strip, ship, abort, push-fail", () => {
+  test("stripSentinels removes .jumi-tmp leftovers", async () => {
+    await withDirs(async (_home, workdir) => {
+      await mkdir(join(workdir, ".jumi-tmp"), { recursive: true });
+      await writeFile(join(workdir, ".jumi-tmp", "session.db"), "db");
+      await writeFile(join(workdir, "JUMI_TASK.md"), "task");
+      await stripSentinels(workdir, ["JUMI_TASK.md"]);
+      await expect(writeFile(join(workdir, ".jumi-tmp", "x"), "x")).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  });
+
+  test("commitIfDirty and pushClaimedBranch never pass --force", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        gitCalls.push(stripGitConfigArgs(args));
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      expect(await worktreePorcelain(loop)).toBe("");
+      await commitIfDirty(loop, " M src/demo.ts", "Implement #12: Fix the thing");
+      await pushClaimedBranch(loop, "jumi/issue-12-fix-the-thing");
+      expect(gitCalls.some((args) => args[0] === "add" && args.includes("-A"))).toBe(true);
+      expect(gitCalls.some((args) => args[0] === "commit")).toBe(true);
+      expect(gitCalls.find((args) => args[0] === "push")).toEqual([
+        "push",
+        "-u",
+        "origin",
+        "jumi/issue-12-fix-the-thing",
+      ]);
+      expect(gitCalls.some((args) => args.includes("--force"))).toBe(false);
+    });
+  });
+
+  test("runClaimedLoop returns cancelled and detaches on abort", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        gitCalls.push(stripGitConfigArgs(args));
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      const abort = new AbortController();
+      abort.abort();
+      const result = await runClaimedLoop(loop, abort.signal, async () => {
+        throwIfAborted(abort.signal);
+        return { status: "pr" as const, htmlUrl: "nope", prNumber: 1 };
+      });
+      expect(result).toEqual({ status: "cancelled" });
+      expect(gitCalls.some((args) => args[0] === "worktree" && args[1] === "remove")).toBe(true);
+    });
+  });
+
+  test("inspectMovedPrHead returns the new remote sha", async () => {
+    await withDirs(async (home, workdir) => {
+      let fetched = false;
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "fetch") fetched = true;
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/jumi/issue-12-fix-the-thing")) {
+          return fetched ? "newsha" : "oldsha";
+        }
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      expect(await inspectMovedPrHead(loop, "jumi/issue-12-fix-the-thing", "oldsha")).toBe("newsha");
+    });
+  });
+
+  test("inspectRemoteContainsDefault resets hard and does not force-push", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      expect(await inspectRemoteContainsDefault(loop, "jumi/issue-12-fix-the-thing", "main")).toBe(true);
+      expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
+      expect(
+        gitCalls.some(
+          (args) =>
+            args[0] === "reset" && args.includes("--hard") && args.includes("origin/jumi/issue-12-fix-the-thing")
+        )
+      ).toBe(true);
+    });
   });
 });

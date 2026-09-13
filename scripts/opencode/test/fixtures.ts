@@ -367,3 +367,9 @@ export async function signBody(rawBody: Uint8Array, secret: string): Promise<str
 export async function responseJson(response: Response): Promise<Record<string, unknown>> {
   return await response.json();
 }
+
+export function stripGitConfigArgs(args: string[]): string[] {
+  const result = [...args];
+  while (result[0] === "-c") result.splice(0, 2);
+  return result;
+}

@@ -1,13 +1,23 @@
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { buildCiMarkdown, CI_LOG_FILE, type CiInspection, flakeComment, inspectCi, recordCiHandled } from "./ci.ts";
-import { conflictStatePath, deleteClaim, followUpStatePath, readClaim, stuckStatePath, writeClaim } from "./claim.ts";
+import { conflictStatePath, deleteClaim, followUpStatePath, stuckStatePath } from "./claim.ts";
 import {
+  attachPrWorktree,
   beginClaimedWorktree,
-  isAbortError,
+  commitIfDirty,
+  commitsAheadOf,
+  ensureBareCache,
+  inspectMovedPrHead,
   isClaimedEarlyResult,
+  openClaimedLoop,
+  pushClaimedBranch,
   recheckAssignedAndOpen,
+  runClaimedLoop,
+  skipClaimedWork,
+  stripSentinels,
   throwIfAborted,
+  worktreePorcelain,
 } from "./claimed_worktree.ts";
 import {
   CONFLICT_TIMEOUT_MS,
@@ -22,7 +32,7 @@ import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_we
 import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import { buildTaskMarkdown, HEARTBEAT_INTERVAL_MS, type ImplementOptions } from "./implement.ts";
+import { buildTaskMarkdown, type ImplementOptions } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
@@ -36,15 +46,7 @@ import {
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import { parseCheckLine } from "./verdict.ts";
-import {
-  type GitAuth,
-  gitConfigArgs,
-  gitEnv,
-  gitRemoteUrl,
-  resolveGitAuth,
-  validateCloneUrl,
-  workerOpenCodeChildEnv,
-} from "./workspace.ts";
+import { workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { FOLLOWUP_PROMPT } from "./git.ts";
 
@@ -75,15 +77,6 @@ export interface FollowUpState {
 
 function logDefault(message: string) {
   console.log(`[followup] ${message}`);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function loginEquals(login: string | undefined, botUsername: string): boolean {
@@ -743,21 +736,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     forgetTerminal: true,
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
-  const {
-    owner,
-    repo,
-    issueNumber,
-    worktree,
-    barePath,
-    claimPath,
-    claim,
-    useClaim,
-    sanitizeEnv,
-    engine,
-    git,
-    now,
-    forgetClaim,
-  } = claimed;
+  const { owner, repo, issueNumber, worktree, sanitizeEnv, engine, now, forgetClaim, claim } = claimed;
   const statePath = followUpStatePath(opts.home, owner, repo, issueNumber);
 
   const sticky = (body: string, index: number) =>
@@ -890,56 +869,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
     return { status: "skipped", reason: stuckComment(stuckReason) };
   }
 
-  const configArgs = gitConfigArgs();
-  let auth: GitAuth = { giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken };
-  let env = gitEnv(auth);
-  const refreshGitAuth = async () => {
-    auth = await resolveGitAuth(opts);
-    env = gitEnv(auth);
-  };
-  const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
-    git([...configArgs, ...args], runOpts);
-  const detachWorktree = async () => {
-    try {
-      await runConfiguredGit(["worktree", "remove", "--force", worktree], { cwd: barePath, env });
-    } catch {
-      // Already gone or never added.
-    }
-    await rm(worktree, { recursive: true, force: true }).catch(() => undefined);
-  };
-
-  const heartbeatMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
-  let heartbeatStopped = false;
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  let claimWrites: Promise<void> = Promise.resolve();
-  const serializeClaim = <T>(fn: () => Promise<T>): Promise<T> => {
-    const run = claimWrites.then(fn, fn);
-    claimWrites = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
-  };
-  const stopHeartbeat = async () => {
-    heartbeatStopped = true;
-    if (heartbeat) {
-      clearInterval(heartbeat);
-      heartbeat = undefined;
-    }
-    await serializeClaim(async () => undefined);
-  };
-  heartbeat =
-    heartbeatMs > 0 && useClaim
-      ? setInterval(() => {
-          void serializeClaim(async () => {
-            if (heartbeatStopped) return;
-            const current = await readClaim(claimPath);
-            if (heartbeatStopped || !current || current.terminal || current.startedAt !== claim.startedAt) return;
-            current.heartbeatAt = now().toISOString();
-            await writeClaim(claimPath, current);
-          }).catch(() => undefined);
-        }, heartbeatMs)
-      : undefined;
+  const loop = openClaimedLoop(claimed, opts);
 
   let handledCommentIds = [...state.handledCommentIds];
   let handledReviewIds = [...state.handledReviewIds];
@@ -984,391 +914,269 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   let attemptedBaseSha = "";
   let prefixMergeThrew = false;
 
-  try {
-    throwIfAborted(opts.abortSignal);
-    await refreshGitAuth();
-    const cloneUrl = validateCloneUrl(opts.job.cloneUrl, opts.giteaUrl);
-    await mkdir(dirname(barePath), { recursive: true });
-    if (await pathExists(barePath)) {
-      log(`Fetching ${owner}/${repo} cache`);
-      await runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], { cwd: barePath, env });
-    } else {
-      log(`Cloning ${owner}/${repo} into bare cache`);
-      await runConfiguredGit(["clone", "--bare", gitRemoteUrl(cloneUrl, auth), barePath], {
-        cwd: dirname(barePath),
-        env,
+  return runClaimedLoop(
+    loop,
+    opts.abortSignal,
+    async () => {
+      await ensureBareCache(loop, {
+        cloneUrl: opts.job.cloneUrl,
+        giteaUrl: opts.giteaUrl,
+        abortSignal: opts.abortSignal,
+        log,
       });
-      if (auth.embedTokenInUrl) {
-        await runConfiguredGit(["remote", "set-url", "origin", cloneUrl], { cwd: barePath, env });
+      const attached = await attachPrWorktree(loop, {
+        branch,
+        defaultBranch: opts.job.defaultBranch,
+        abortSignal: opts.abortSignal,
+        log,
+      });
+      if (isClaimedEarlyResult(attached)) return attached;
+      const { headSha, baseSha } = attached;
+      attemptedHeadSha = headSha;
+      attemptedBaseSha = baseSha;
+      await loop.stampHeadSha(headSha);
+
+      if (
+        previousConflict.lastHeadSha &&
+        previousConflict.lastBaseSha &&
+        previousConflict.lastHeadSha === headSha &&
+        previousConflict.lastBaseSha === baseSha
+      ) {
+        return skipClaimedWork(loop, "same head and base already attempted");
       }
-      await runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], { cwd: barePath, env });
-    }
-    throwIfAborted(opts.abortSignal);
 
-    const originRef = `refs/remotes/origin/${branch}`;
-    const originExists = await runConfiguredGit(["show-ref", "--verify", "--quiet", originRef], {
-      cwd: barePath,
-      env,
-    })
-      .then(() => true)
-      .catch(() => false);
-    if (!originExists) {
-      await stopHeartbeat();
-      await forgetClaim();
-      await detachWorktree();
-      return { status: "skipped", reason: `missing branch ${branch}` };
-    }
-    if (!(await pathExists(join(worktree, ".git")))) {
-      await mkdir(dirname(worktree), { recursive: true });
-      log(`Adding worktree ${worktree} from origin/${branch}`);
-      await runConfiguredGit(["worktree", "add", "-B", branch, worktree, `origin/${branch}`], {
-        cwd: barePath,
-        env,
-      });
-    } else {
-      await runConfiguredGit(["checkout", branch], { cwd: worktree, env });
-      await runConfiguredGit(["reset", "--hard", `origin/${branch}`], { cwd: worktree, env });
-    }
-    await mkdir(worktree, { recursive: true });
-    throwIfAborted(opts.abortSignal);
-
-    const headSha = (await runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env })).trim();
-    const baseSha = (
-      await runConfiguredGit(["rev-parse", `origin/${opts.job.defaultBranch}`], { cwd: worktree, env })
-    ).trim();
-    attemptedHeadSha = headSha;
-    attemptedBaseSha = baseSha;
-    await serializeClaim(async () => {
-      if (heartbeatStopped || !useClaim) return;
-      claim.headShaAtStart = headSha;
-      claim.heartbeatAt = now().toISOString();
-      await writeClaim(claimPath, claim);
-    });
-
-    if (
-      previousConflict.lastHeadSha &&
-      previousConflict.lastBaseSha &&
-      previousConflict.lastHeadSha === headSha &&
-      previousConflict.lastBaseSha === baseSha
-    ) {
-      await stopHeartbeat();
-      await forgetClaim();
-      await detachWorktree();
-      return { status: "skipped", reason: "same head and base already attempted" };
-    }
-
-    const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
-    const taskJob: IssueJob = {
-      ...opts.job,
-      title: currentIssue.title,
-      body: currentIssue.body ?? "",
-      htmlUrl: currentIssue.html_url,
-    };
-    const mergeResult = await mergeDefaultIntoWorktree({
-      git: runConfiguredGit,
-      env,
-      worktree,
-      defaultBranch: opts.job.defaultBranch,
-      headRef: branch,
-      job: taskJob,
-      pr,
-      model: opts.model,
-      home: opts.home,
-      sanitizeOpenCodeEnv: sanitizeEnv,
-      extraEnv: workerOpenCodeChildEnv(auth, worktree),
-      maxOutputBytes: opts.maxOutputBytes,
-      timeoutMs: conflictTimeoutMs,
-      openCodeRunner: engine,
-      helmRunner: opts.helmRunner,
-      logger: log,
-      abortSignal: opts.abortSignal,
-      jobId: opts.jobId ?? opts.job.delivery,
-      ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
-      onPid: async (pid) => {
-        await opts.onPid?.(pid);
-        await serializeClaim(async () => {
-          if (heartbeatStopped || !useClaim) return;
-          const current = await readClaim(claimPath);
-          if (heartbeatStopped || !current || current.terminal) return;
-          current.pid = pid;
-          current.heartbeatAt = now().toISOString();
-          await writeClaim(claimPath, current);
-        });
-      },
-    }).catch((err: unknown) => {
-      prefixMergeThrew = true;
-      throw err;
-    });
-    const persistConflictAttempt = async (result: typeof mergeResult) => {
-      if (!shouldIncrementRound(result)) return;
-      await writeConflictState(conflictPath, {
-        prNumber: pr.number,
-        round: previousConflict.round + 1,
-        lastHeadSha: result.headSha,
-        lastBaseSha: result.baseSha,
-        updatedAt: now().toISOString(),
-      });
-    };
-    if (mergeResult.status === "stuck") {
-      await persistConflictAttempt(mergeResult);
-      await sticky("stuck: cannot resolve conflicts", pr.number);
-      await stopHeartbeat();
-      await serializeClaim(async () => {
-        await forgetClaim();
-      });
-      await detachWorktree();
-      return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
-    }
-
-    throwIfAborted(opts.abortSignal);
-    await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
-    if (hasFeedback) {
-      const items = await collectFollowUpItems(
-        opts.api,
-        owner,
-        repo,
-        pr.number,
-        opts.botUsername,
-        pr.head.sha,
-        opts.followupIgnoreLogins,
-        findingOpts
-      );
-      const briefReview = pickLatestJumiFinding(items, pr.head.sha) ?? pendingLastReview;
-      const feedback = buildFeedbackMarkdown({
+      const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
+      const taskJob: IssueJob = {
+        ...opts.job,
+        title: currentIssue.title,
+        body: currentIssue.body ?? "",
+        htmlUrl: currentIssue.html_url,
+      };
+      const mergeResult = await mergeDefaultIntoWorktree({
+        git: loop.runConfiguredGit,
+        env: loop.env,
+        worktree,
+        defaultBranch: opts.job.defaultBranch,
+        headRef: branch,
+        job: taskJob,
         pr,
-        trigger: opts.job.trigger,
-        triggerBody: triggerBodyFromItems(opts.job.trigger, items),
-        comments: items.comments,
-        inlines: briefInlines(items),
-        reviews: items.reviews,
-        lastReview: briefReview,
-        currentInlines: unresolvedJumiInlines(items),
-        earlierReviews: earlierJumiReviews(items, briefReview),
+        model: opts.model,
+        home: opts.home,
+        sanitizeOpenCodeEnv: sanitizeEnv,
+        extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+        maxOutputBytes: opts.maxOutputBytes,
+        timeoutMs: conflictTimeoutMs,
+        openCodeRunner: engine,
+        helmRunner: opts.helmRunner,
+        logger: log,
+        abortSignal: opts.abortSignal,
+        jobId: opts.jobId ?? opts.job.delivery,
+        ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
+        onPid: loop.engineOnPid(opts.onPid),
+      }).catch((err: unknown) => {
+        prefixMergeThrew = true;
+        throw err;
       });
-      handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
-      handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
-      const findingById = new Map<number, HandledReviewFinding>();
-      for (const comment of [...items.comments, ...items.jumiStickies]) {
-        const finding = reviewFindingFromComment(comment);
-        if (finding) findingById.set(finding.id, finding);
+      const persistConflictAttempt = async (result: typeof mergeResult) => {
+        if (!shouldIncrementRound(result)) return;
+        await writeConflictState(conflictPath, {
+          prNumber: pr.number,
+          round: previousConflict.round + 1,
+          lastHeadSha: result.headSha,
+          lastBaseSha: result.baseSha,
+          updatedAt: now().toISOString(),
+        });
+      };
+      if (mergeResult.status === "stuck") {
+        await persistConflictAttempt(mergeResult);
+        await sticky("stuck: cannot resolve conflicts", pr.number);
+        return skipClaimedWork(loop, "stuck: cannot resolve conflicts");
       }
-      for (const review of [...items.jumiFindingReviews, ...items.jumiReviews]) {
-        const finding = reviewFindingFromReview(review);
-        if (finding) findingById.set(finding.id, finding);
-      }
-      if (briefReview) {
-        const finding = reviewFindingFromComment(briefReview);
-        if (finding) findingById.set(finding.id, finding);
-      }
-      handledCommentIds = handledCommentIds.filter((id) => {
-        const finding = findingById.get(id);
-        if (!finding) return true;
-        handledReviewFindings.push(finding);
-        return false;
-      });
-      await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
-    } else if (pendingLastReview || unresolvedJumiInlines(pendingItems).length > 0) {
-      await writeFile(
-        join(worktree, "JUMI_FEEDBACK.md"),
-        buildFeedbackMarkdown({
+
+      throwIfAborted(opts.abortSignal);
+      await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
+      if (hasFeedback) {
+        const items = await collectFollowUpItems(
+          opts.api,
+          owner,
+          repo,
+          pr.number,
+          opts.botUsername,
+          pr.head.sha,
+          opts.followupIgnoreLogins,
+          findingOpts
+        );
+        const briefReview = pickLatestJumiFinding(items, pr.head.sha) ?? pendingLastReview;
+        const feedback = buildFeedbackMarkdown({
           pr,
           trigger: opts.job.trigger,
-          triggerBody: pendingTriggerBody,
-          comments: [],
-          inlines: [],
-          reviews: [],
-          lastReview: pendingLastReview,
-          currentInlines: unresolvedJumiInlines(pendingItems),
-          earlierReviews: earlierJumiReviews(pendingItems, pendingLastReview),
-        }).markdown
-      );
-    } else {
-      await writeFile(
-        join(worktree, "JUMI_FEEDBACK.md"),
-        "# Review feedback\n\nNo review comments this round. Address JUMI_CI.md.\n"
-      );
-    }
-    if (ci.failed.length) {
-      await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
-    }
-    await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
+          triggerBody: triggerBodyFromItems(opts.job.trigger, items),
+          comments: items.comments,
+          inlines: briefInlines(items),
+          reviews: items.reviews,
+          lastReview: briefReview,
+          currentInlines: unresolvedJumiInlines(items),
+          earlierReviews: earlierJumiReviews(items, briefReview),
+        });
+        handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
+        handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
+        const findingById = new Map<number, HandledReviewFinding>();
+        for (const comment of [...items.comments, ...items.jumiStickies]) {
+          const finding = reviewFindingFromComment(comment);
+          if (finding) findingById.set(finding.id, finding);
+        }
+        for (const review of [...items.jumiFindingReviews, ...items.jumiReviews]) {
+          const finding = reviewFindingFromReview(review);
+          if (finding) findingById.set(finding.id, finding);
+        }
+        if (briefReview) {
+          const finding = reviewFindingFromComment(briefReview);
+          if (finding) findingById.set(finding.id, finding);
+        }
+        handledCommentIds = handledCommentIds.filter((id) => {
+          const finding = findingById.get(id);
+          if (!finding) return true;
+          handledReviewFindings.push(finding);
+          return false;
+        });
+        await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
+      } else if (pendingLastReview || unresolvedJumiInlines(pendingItems).length > 0) {
+        await writeFile(
+          join(worktree, "JUMI_FEEDBACK.md"),
+          buildFeedbackMarkdown({
+            pr,
+            trigger: opts.job.trigger,
+            triggerBody: pendingTriggerBody,
+            comments: [],
+            inlines: [],
+            reviews: [],
+            lastReview: pendingLastReview,
+            currentInlines: unresolvedJumiInlines(pendingItems),
+            earlierReviews: earlierJumiReviews(pendingItems, pendingLastReview),
+          }).markdown
+        );
+      } else {
+        await writeFile(
+          join(worktree, "JUMI_FEEDBACK.md"),
+          "# Review feedback\n\nNo review comments this round. Address JUMI_CI.md.\n"
+        );
+      }
+      if (ci.failed.length) {
+        await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
+      }
+      await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
-    const runEngine = async (label: string) => {
-      throwIfAborted(opts.abortSignal);
-      log(label);
-      followUpEngineRan = true;
-      throwIfEngineFailed(
-        await engine({
-          model: opts.model,
-          workdir: worktree,
-          home: opts.home,
-          sanitizeEnv,
-          extraEnv: workerOpenCodeChildEnv(auth, worktree),
-          timeoutMs,
-          maxOutputBytes: opts.maxOutputBytes,
-          reviewLabel: `${owner}/${repo}#${issueNumber}`,
-          trace: {
-            kind: "follow-up",
-            owner,
-            repo,
-            sha: pr.head.sha,
-            jobId: opts.jobId ?? opts.job.delivery,
-          },
-          logger: log,
-          abortSignal: opts.abortSignal,
-          onPid: async (pid) => {
-            await opts.onPid?.(pid);
-            await serializeClaim(async () => {
-              if (heartbeatStopped || !useClaim) return;
-              const current = await readClaim(claimPath);
-              if (heartbeatStopped || !current || current.terminal) return;
-              current.pid = pid;
-              current.heartbeatAt = now().toISOString();
-              await writeClaim(claimPath, current);
-            });
-          },
-        })
-      );
-    };
+      const runEngine = async (label: string) => {
+        throwIfAborted(opts.abortSignal);
+        log(label);
+        followUpEngineRan = true;
+        throwIfEngineFailed(
+          await engine({
+            model: opts.model,
+            workdir: worktree,
+            home: opts.home,
+            sanitizeEnv,
+            extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+            timeoutMs,
+            maxOutputBytes: opts.maxOutputBytes,
+            reviewLabel: `${owner}/${repo}#${issueNumber}`,
+            trace: {
+              kind: "follow-up",
+              owner,
+              repo,
+              sha: pr.head.sha,
+              jobId: opts.jobId ?? opts.job.delivery,
+            },
+            logger: log,
+            abortSignal: opts.abortSignal,
+            onPid: loop.engineOnPid(opts.onPid),
+          })
+        );
+      };
 
-    await runEngine(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
+      await runEngine(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
 
-    const gate = await gateShipAfterOpenCode({
-      api: opts.api,
-      owner,
-      repo,
-      issueNumber,
-      botUsername: opts.botUsername,
-      snapshot: snapshotFromJob(taskJob),
-      closerPrNumber: pr.number,
-      continueOpenCode: async (issue) => {
-        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
-        await runEngine(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
-      },
-    });
-    if (gate.action === "skip") {
-      await stopHeartbeat();
-      await serializeClaim(async () => {
-        await forgetClaim();
+      const gate = await gateShipAfterOpenCode({
+        api: opts.api,
+        owner,
+        repo,
+        issueNumber,
+        botUsername: opts.botUsername,
+        snapshot: snapshotFromJob(taskJob),
+        closerPrNumber: pr.number,
+        continueOpenCode: async (issue) => {
+          await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+          await runEngine(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
+        },
       });
-      if (!gate.keepLocalWork) await detachWorktree();
-      return { status: "skipped", reason: gate.reason };
-    }
+      if (gate.action === "skip") {
+        return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
+      }
 
-    throwIfAborted(opts.abortSignal);
-    await rm(join(worktree, "JUMI_TASK.md"), { force: true });
-    await rm(join(worktree, "JUMI_FEEDBACK.md"), { force: true });
-    await rm(join(worktree, CI_LOG_FILE), { force: true });
-    await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
-    const porcelain = (await runConfiguredGit(["status", "--porcelain"], { cwd: worktree, env })).trim();
-    if (!porcelain) {
-      const aheadText = (
-        await runConfiguredGit(["rev-list", "--count", `origin/${branch}..HEAD`], {
-          cwd: worktree,
-          env,
-        })
-      ).trim();
-      const ahead = Number(aheadText);
-      if (!Number.isFinite(ahead) || ahead <= 0) {
-        const sha = (await runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env })).trim();
-        await stopHeartbeat();
+      throwIfAborted(opts.abortSignal);
+      await stripSentinels(worktree, ["JUMI_TASK.md", "JUMI_FEEDBACK.md", CI_LOG_FILE]);
+      const porcelain = await worktreePorcelain(loop);
+      if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
+        const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+        await loop.stopHeartbeat();
         await sticky("no follow-up changes", pr.number);
         await recordAttempt(sha || pr.head.sha);
-        await serializeClaim(async () => {
-          await forgetClaim();
-        });
-        await detachWorktree();
+        await loop.forgetSerialized();
+        await loop.detachWorktree();
         return { status: "no-changes" };
       }
-    }
 
-    if (porcelain) {
-      const commitEnv = {
-        ...env,
-        GIT_AUTHOR_NAME: env.GIT_AUTHOR_NAME,
-        GIT_AUTHOR_EMAIL: env.GIT_AUTHOR_EMAIL,
-        GIT_COMMITTER_NAME: env.GIT_COMMITTER_NAME,
-        GIT_COMMITTER_EMAIL: env.GIT_COMMITTER_EMAIL,
-      };
-      await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
-      await runConfiguredGit(["commit", "-m", `Address review on #${pr.number}: ${gate.snapshot.title}`], {
-        cwd: worktree,
-        env: commitEnv,
-      });
-    }
-    try {
-      await refreshGitAuth();
-      await runConfiguredGit(["push", "-u", "origin", branch], { cwd: worktree, env });
-    } catch (err) {
-      await runConfiguredGit(["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], {
-        cwd: worktree,
-        env,
-      }).catch(() => undefined);
-      const remoteSha = (
-        await runConfiguredGit(["rev-parse", `origin/${branch}`], { cwd: worktree, env }).catch(() => "")
-      ).trim();
-      if (remoteSha && remoteSha !== attemptedHeadSha) {
-        await stopHeartbeat();
-        await serializeClaim(async () => {
-          await forgetClaim();
-        });
-        await detachWorktree();
-        return {
-          status: "skipped",
-          reason: prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha),
-        };
+      await commitIfDirty(loop, porcelain, `Address review on #${pr.number}: ${gate.snapshot.title}`);
+      try {
+        await pushClaimedBranch(loop, branch);
+      } catch (err) {
+        const remoteSha = await inspectMovedPrHead(loop, branch, attemptedHeadSha);
+        if (remoteSha) {
+          return skipClaimedWork(loop, prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha));
+        }
+        throw err;
       }
-      throw err;
-    }
-    throwIfAborted(opts.abortSignal);
-    await persistConflictAttempt(mergeResult);
+      throwIfAborted(opts.abortSignal);
+      await persistConflictAttempt(mergeResult);
 
-    const sha = (await runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env })).trim();
-    await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);
-    await recordAttempt(sha || pr.head.sha);
-    await stopHeartbeat();
-    await serializeClaim(async () => {
-      await forgetClaim();
-    });
-    await detachWorktree();
-    return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
-  } catch (err) {
-    if (isAbortError(err) || opts.abortSignal?.aborted) {
-      await stopHeartbeat();
-      await detachWorktree();
-      return { status: "cancelled" };
-    }
-    await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(() => undefined);
-    const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
-    if (errorHash) {
-      await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
-    }
-    if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
-      await writeConflictState(conflictPath, {
+      const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+      await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);
+      await recordAttempt(sha || pr.head.sha);
+      await loop.stopHeartbeat();
+      await loop.forgetSerialized();
+      await loop.detachWorktree();
+      return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
+    },
+    async (err) => {
+      await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(
+        () => undefined
+      );
+      const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+      if (errorHash) {
+        await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
+      }
+      if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
+        await writeConflictState(conflictPath, {
+          prNumber: pr.number,
+          round: previousConflict.round + 1,
+          lastHeadSha: attemptedHeadSha,
+          lastBaseSha: attemptedBaseSha,
+          updatedAt: now().toISOString(),
+        }).catch(() => undefined);
+      }
+      await writeFollowUpState(statePath, {
         prNumber: pr.number,
-        round: previousConflict.round + 1,
-        lastHeadSha: attemptedHeadSha,
-        lastBaseSha: attemptedBaseSha,
+        round: hasFeedback ? state.round + 1 : state.round,
+        lastHeadSha: pr.head.sha,
+        handledCommentIds: state.handledCommentIds,
+        handledReviewIds: state.handledReviewIds,
+        handledReviewFindings: state.handledReviewFindings,
         updatedAt: now().toISOString(),
       }).catch(() => undefined);
+      await persistCi().catch(() => undefined);
+      await loop.stopHeartbeat();
+      await loop.forgetSerialized().catch(() => undefined);
+      await loop.detachWorktree();
     }
-    await writeFollowUpState(statePath, {
-      prNumber: pr.number,
-      round: hasFeedback ? state.round + 1 : state.round,
-      lastHeadSha: pr.head.sha,
-      handledCommentIds: state.handledCommentIds,
-      handledReviewIds: state.handledReviewIds,
-      handledReviewFindings: state.handledReviewFindings,
-      updatedAt: now().toISOString(),
-    }).catch(() => undefined);
-    await persistCi().catch(() => undefined);
-    await stopHeartbeat();
-    await serializeClaim(async () => {
-      await forgetClaim();
-    }).catch(() => undefined);
-    await detachWorktree();
-    throw err;
-  } finally {
-    await stopHeartbeat();
-  }
+  );
 }

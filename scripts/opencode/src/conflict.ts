@@ -1,39 +1,33 @@
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
-import { conflictStatePath, deleteClaim, readClaim, stuckStatePath, writeClaim } from "./claim.ts";
+import { conflictStatePath, deleteClaim, stuckStatePath } from "./claim.ts";
 import {
+  attachPrWorktree,
   beginClaimedWorktree,
-  isAbortError,
+  commitIfDirty,
+  ensureBareCache,
+  inspectRemoteContainsDefault,
   isClaimedEarlyResult,
+  openClaimedLoop,
+  pushClaimedBranch,
   recheckAssignedAndOpen,
+  runClaimedLoop,
+  skipClaimedWork,
+  stripSentinels,
   throwIfAborted,
+  worktreePorcelain,
 } from "./claimed_worktree.ts";
 import { throwIfEngineFailed } from "./engine.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import {
-  buildTaskMarkdown,
-  HEARTBEAT_INTERVAL_MS,
-  type HelmRunner,
-  type ImplementOptions,
-  type OpenCodeRunner,
-} from "./implement.ts";
+import { buildTaskMarkdown, type HelmRunner, type ImplementOptions, type OpenCodeRunner } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
 import { appendStuckFingerprint, evaluateStuck, fingerprintError, readStuckState, stuckComment } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import {
-  type GitAuth,
-  type GitRunner,
-  gitConfigArgs,
-  gitEnv,
-  gitRemoteUrl,
-  resolveGitAuth,
-  validateCloneUrl,
-  workerOpenCodeChildEnv,
-} from "./workspace.ts";
+import { type GitRunner, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { CONFLICT_PROMPT } from "./git.ts";
 
@@ -482,21 +476,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     forgetTerminal: true,
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
-  const {
-    owner,
-    repo,
-    issueNumber,
-    worktree,
-    barePath,
-    claimPath,
-    claim,
-    useClaim,
-    sanitizeEnv,
-    engine,
-    git,
-    now,
-    forgetClaim,
-  } = claimed;
+  const { owner, repo, issueNumber, worktree, sanitizeEnv, engine, now, forgetClaim, claim } = claimed;
   const statePath = conflictStatePath(opts.home, owner, repo, issueNumber);
 
   const sticky = (body: string, index: number) =>
@@ -532,56 +512,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     return { status: "stuck" };
   }
 
-  const configArgs = gitConfigArgs();
-  let auth: GitAuth = { giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken };
-  let env = gitEnv(auth);
-  const refreshGitAuth = async () => {
-    auth = await resolveGitAuth(opts);
-    env = gitEnv(auth);
-  };
-  const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
-    git([...configArgs, ...args], runOpts);
-  const detachWorktree = async () => {
-    try {
-      await runConfiguredGit(["worktree", "remove", "--force", worktree], { cwd: barePath, env });
-    } catch {
-      // Already gone or never added.
-    }
-    await rm(worktree, { recursive: true, force: true }).catch(() => undefined);
-  };
-
-  const heartbeatMs = opts.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
-  let heartbeatStopped = false;
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  let claimWrites: Promise<void> = Promise.resolve();
-  const serializeClaim = <T>(fn: () => Promise<T>): Promise<T> => {
-    const run = claimWrites.then(fn, fn);
-    claimWrites = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
-  };
-  const stopHeartbeat = async () => {
-    heartbeatStopped = true;
-    if (heartbeat) {
-      clearInterval(heartbeat);
-      heartbeat = undefined;
-    }
-    await serializeClaim(async () => undefined);
-  };
-  heartbeat =
-    heartbeatMs > 0 && useClaim
-      ? setInterval(() => {
-          void serializeClaim(async () => {
-            if (heartbeatStopped) return;
-            const current = await readClaim(claimPath);
-            if (heartbeatStopped || !current || current.terminal || current.startedAt !== claim.startedAt) return;
-            current.heartbeatAt = now().toISOString();
-            await writeClaim(claimPath, current);
-          }).catch(() => undefined);
-        }, heartbeatMs)
-      : undefined;
+  const loop = openClaimedLoop(claimed, opts);
 
   const recordAttempt = async (headSha: string, baseSha: string, increment: boolean) => {
     await writeConflictState(statePath, {
@@ -597,287 +528,175 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   let attemptedBaseSha = "";
   let mergeDefaultThrew = false;
 
-  try {
-    throwIfAborted(opts.abortSignal);
-    await refreshGitAuth();
-    const cloneUrl = validateCloneUrl(opts.job.cloneUrl, opts.giteaUrl);
-    await mkdir(dirname(barePath), { recursive: true });
-    if (await pathExists(barePath)) {
-      log(`Fetching ${owner}/${repo} cache`);
-      await runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], { cwd: barePath, env });
-    } else {
-      log(`Cloning ${owner}/${repo} into bare cache`);
-      await runConfiguredGit(["clone", "--bare", gitRemoteUrl(cloneUrl, auth), barePath], {
-        cwd: dirname(barePath),
-        env,
+  return runClaimedLoop(
+    loop,
+    opts.abortSignal,
+    async () => {
+      await ensureBareCache(loop, {
+        cloneUrl: opts.job.cloneUrl,
+        giteaUrl: opts.giteaUrl,
+        abortSignal: opts.abortSignal,
+        log,
       });
-      if (auth.embedTokenInUrl) {
-        await runConfiguredGit(["remote", "set-url", "origin", cloneUrl], { cwd: barePath, env });
+      const attached = await attachPrWorktree(loop, {
+        branch,
+        defaultBranch: opts.job.defaultBranch,
+        abortSignal: opts.abortSignal,
+        log,
+      });
+      if (isClaimedEarlyResult(attached)) return attached;
+      const { headSha, baseSha } = attached;
+      attemptedHeadSha = headSha;
+      attemptedBaseSha = baseSha;
+      await loop.stampHeadSha(headSha);
+
+      if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
+        return skipClaimedWork(loop, "same head and base already attempted");
       }
-      await runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], { cwd: barePath, env });
-    }
-    throwIfAborted(opts.abortSignal);
 
-    const originRef = `refs/remotes/origin/${branch}`;
-    const originExists = await runConfiguredGit(["show-ref", "--verify", "--quiet", originRef], {
-      cwd: barePath,
-      env,
-    })
-      .then(() => true)
-      .catch(() => false);
-    if (!originExists) {
-      await stopHeartbeat();
-      await forgetClaim();
-      await detachWorktree();
-      return { status: "skipped", reason: `missing branch ${branch}` };
-    }
-    if (!(await pathExists(join(worktree, ".git")))) {
-      await mkdir(dirname(worktree), { recursive: true });
-      log(`Adding worktree ${worktree} from origin/${branch}`);
-      await runConfiguredGit(["worktree", "add", "-B", branch, worktree, `origin/${branch}`], {
-        cwd: barePath,
-        env,
+      const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
+      const taskJob: IssueJob = {
+        ...opts.job,
+        title: currentIssue.title,
+        body: currentIssue.body ?? "",
+        htmlUrl: currentIssue.html_url,
+      };
+      let ciMarkdown: string | undefined;
+      try {
+        const ci = await inspectCi({
+          api: opts.api,
+          owner,
+          repo,
+          sha: pr.head.sha,
+          home: opts.home,
+          issueNumber,
+        });
+        if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
+      } catch (err) {
+        log(
+          `CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      const mergeResult = await mergeDefaultIntoWorktree({
+        git: loop.runConfiguredGit,
+        env: loop.env,
+        worktree,
+        defaultBranch: opts.job.defaultBranch,
+        headRef: branch,
+        skipCleanMerge: true,
+        job: taskJob,
+        pr,
+        model: opts.model,
+        home: opts.home,
+        sanitizeOpenCodeEnv: sanitizeEnv,
+        extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+        maxOutputBytes: opts.maxOutputBytes,
+        timeoutMs,
+        openCodeRunner: engine,
+        helmRunner: opts.helmRunner,
+        logger: log,
+        abortSignal: opts.abortSignal,
+        ciMarkdown,
+        jobId: opts.jobId ?? opts.job.delivery,
+        onPid: loop.engineOnPid(opts.onPid),
+      }).catch((err: unknown) => {
+        mergeDefaultThrew = true;
+        throw err;
       });
-    } else {
-      await runConfiguredGit(["checkout", branch], { cwd: worktree, env });
-      await runConfiguredGit(["reset", "--hard", `origin/${branch}`], { cwd: worktree, env });
-    }
-    await mkdir(worktree, { recursive: true });
-    throwIfAborted(opts.abortSignal);
 
-    const headSha = (await runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env })).trim();
-    const baseSha = (
-      await runConfiguredGit(["rev-parse", `origin/${opts.job.defaultBranch}`], { cwd: worktree, env })
-    ).trim();
-    attemptedHeadSha = headSha;
-    attemptedBaseSha = baseSha;
-    await serializeClaim(async () => {
-      if (heartbeatStopped || !useClaim) return;
-      claim.headShaAtStart = headSha;
-      claim.heartbeatAt = now().toISOString();
-      await writeClaim(claimPath, claim);
-    });
+      if (mergeResult.status === "up-to-date") {
+        await loop.stopHeartbeat();
+        await loop.forgetSerialized();
+        await loop.detachWorktree();
+        return { status: "up-to-date" };
+      }
 
-    if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
-      await stopHeartbeat();
-      await forgetClaim();
-      await detachWorktree();
-      return { status: "skipped", reason: "same head and base already attempted" };
-    }
+      if (mergeResult.status === "stuck") {
+        await sticky("stuck: cannot resolve conflicts", pr.number);
+        await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
+        await loop.stopHeartbeat();
+        await loop.forgetSerialized();
+        await loop.detachWorktree();
+        return { status: "stuck" };
+      }
 
-    const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
-    const taskJob: IssueJob = {
-      ...opts.job,
-      title: currentIssue.title,
-      body: currentIssue.body ?? "",
-      htmlUrl: currentIssue.html_url,
-    };
-    let ciMarkdown: string | undefined;
-    try {
-      const ci = await inspectCi({
+      const gate = await gateShipAfterOpenCode({
         api: opts.api,
         owner,
         repo,
-        sha: pr.head.sha,
-        home: opts.home,
         issueNumber,
+        botUsername: opts.botUsername,
+        snapshot: snapshotFromJob(taskJob),
+        closerPrNumber: pr.number,
+        continueOpenCode: async (issue) => {
+          throwIfAborted(opts.abortSignal);
+          await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+          log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
+          throwIfEngineFailed(
+            await engine({
+              model: opts.model,
+              workdir: worktree,
+              home: opts.home,
+              sanitizeEnv,
+              extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+              timeoutMs,
+              maxOutputBytes: opts.maxOutputBytes,
+              reviewLabel: `${owner}/${repo}#${issueNumber}`,
+              trace: {
+                kind: "follow-up",
+                owner,
+                repo,
+                sha: mergeResult.headSha,
+                jobId: opts.jobId ?? opts.job.delivery,
+              },
+              logger: log,
+              abortSignal: opts.abortSignal,
+              onPid: loop.engineOnPid(opts.onPid),
+            })
+          );
+          await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md"]);
+        },
       });
-      if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
-    } catch (err) {
-      log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+      if (gate.action === "skip") {
+        return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
+      }
+      if (gate.continued) {
+        await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md"]);
+        await commitIfDirty(loop, await worktreePorcelain(loop), `Implement #${issueNumber}: ${gate.snapshot.title}`);
+      }
 
-    const mergeResult = await mergeDefaultIntoWorktree({
-      git: runConfiguredGit,
-      env,
-      worktree,
-      defaultBranch: opts.job.defaultBranch,
-      headRef: branch,
-      skipCleanMerge: true,
-      job: taskJob,
-      pr,
-      model: opts.model,
-      home: opts.home,
-      sanitizeOpenCodeEnv: sanitizeEnv,
-      extraEnv: workerOpenCodeChildEnv(auth, worktree),
-      maxOutputBytes: opts.maxOutputBytes,
-      timeoutMs,
-      openCodeRunner: engine,
-      helmRunner: opts.helmRunner,
-      logger: log,
-      abortSignal: opts.abortSignal,
-      ciMarkdown,
-      jobId: opts.jobId ?? opts.job.delivery,
-      onPid: async (pid) => {
-        await opts.onPid?.(pid);
-        await serializeClaim(async () => {
-          if (heartbeatStopped || !useClaim) return;
-          const current = await readClaim(claimPath);
-          if (heartbeatStopped || !current || current.terminal) return;
-          current.pid = pid;
-          current.heartbeatAt = now().toISOString();
-          await writeClaim(claimPath, current);
-        });
-      },
-    }).catch((err: unknown) => {
-      mergeDefaultThrew = true;
-      throw err;
-    });
+      try {
+        await pushClaimedBranch(loop, branch);
+      } catch (err) {
+        if (await inspectRemoteContainsDefault(loop, branch, opts.job.defaultBranch)) {
+          return skipClaimedWork(loop, "remote already contains default");
+        }
+        throw err;
+      }
+      throwIfAborted(opts.abortSignal);
 
-    if (mergeResult.status === "up-to-date") {
-      await stopHeartbeat();
-      await serializeClaim(async () => {
-        await forgetClaim();
-      });
-      await detachWorktree();
-      return { status: "up-to-date" };
-    }
-
-    if (mergeResult.status === "stuck") {
-      await sticky("stuck: cannot resolve conflicts", pr.number);
+      await sticky(`Pushed merge of ${opts.job.defaultBranch}.`, pr.number);
       await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
-      await stopHeartbeat();
-      await serializeClaim(async () => {
-        await forgetClaim();
-      });
-      await detachWorktree();
-      return { status: "stuck" };
-    }
-
-    const gate = await gateShipAfterOpenCode({
-      api: opts.api,
-      owner,
-      repo,
-      issueNumber,
-      botUsername: opts.botUsername,
-      snapshot: snapshotFromJob(taskJob),
-      closerPrNumber: pr.number,
-      continueOpenCode: async (issue) => {
-        throwIfAborted(opts.abortSignal);
-        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
-        log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
-        throwIfEngineFailed(
-          await engine({
-            model: opts.model,
-            workdir: worktree,
-            home: opts.home,
-            sanitizeEnv,
-            extraEnv: workerOpenCodeChildEnv(auth, worktree),
-            timeoutMs,
-            maxOutputBytes: opts.maxOutputBytes,
-            reviewLabel: `${owner}/${repo}#${issueNumber}`,
-            trace: {
-              kind: "follow-up",
-              owner,
-              repo,
-              sha: mergeResult.headSha,
-              jobId: opts.jobId ?? opts.job.delivery,
-            },
-            logger: log,
-            abortSignal: opts.abortSignal,
-            onPid: async (pid) => {
-              await opts.onPid?.(pid);
-              await serializeClaim(async () => {
-                if (heartbeatStopped || !useClaim) return;
-                const current = await readClaim(claimPath);
-                if (heartbeatStopped || !current || current.terminal) return;
-                current.pid = pid;
-                current.heartbeatAt = now().toISOString();
-                await writeClaim(claimPath, current);
-              });
-            },
-          })
-        );
-        await rm(join(worktree, "JUMI_PR.md"), { recursive: true, force: true }).catch(() => undefined);
-        await rm(join(worktree, "JUMI_TASK.md"), { force: true });
-        await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
-      },
-    });
-    if (gate.action === "skip") {
-      await stopHeartbeat();
-      await serializeClaim(async () => {
-        await forgetClaim();
-      });
-      if (!gate.keepLocalWork) await detachWorktree();
-      return { status: "skipped", reason: gate.reason };
-    }
-    if (gate.continued) {
-      await rm(join(worktree, "JUMI_PR.md"), { recursive: true, force: true }).catch(() => undefined);
-      await rm(join(worktree, "JUMI_TASK.md"), { force: true });
-      await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
-      const porcelain = (await runConfiguredGit(["status", "--porcelain"], { cwd: worktree, env })).trim();
-      if (porcelain) {
-        const commitEnv = {
-          ...env,
-          GIT_AUTHOR_NAME: env.GIT_AUTHOR_NAME ?? FORGE_COMMITTER_NAME,
-          GIT_AUTHOR_EMAIL: env.GIT_AUTHOR_EMAIL ?? FORGE_COMMITTER_EMAIL,
-          GIT_COMMITTER_NAME: env.GIT_COMMITTER_NAME ?? FORGE_COMMITTER_NAME,
-          GIT_COMMITTER_EMAIL: env.GIT_COMMITTER_EMAIL ?? FORGE_COMMITTER_EMAIL,
-        };
-        await runConfiguredGit(["add", "-A"], { cwd: worktree, env: commitEnv });
-        await runConfiguredGit(["commit", "-m", `Implement #${issueNumber}: ${gate.snapshot.title}`], {
-          cwd: worktree,
-          env: commitEnv,
-        });
+      await loop.stopHeartbeat();
+      await loop.forgetSerialized();
+      await loop.detachWorktree();
+      return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
+    },
+    async (err) => {
+      await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(
+        () => undefined
+      );
+      const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+      if (errorHash) {
+        await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
       }
-    }
-
-    try {
-      await refreshGitAuth();
-      await runConfiguredGit(["push", "-u", "origin", branch], { cwd: worktree, env });
-    } catch (err) {
-      await runConfiguredGit(["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], {
-        cwd: worktree,
-        env,
-      }).catch(() => undefined);
-      const remoteContainsDefault = await runConfiguredGit(
-        ["merge-base", "--is-ancestor", `origin/${opts.job.defaultBranch}`, `origin/${branch}`],
-        { cwd: worktree, env }
-      )
-        .then(() => true)
-        .catch(() => false);
-      if (remoteContainsDefault) {
-        await runConfiguredGit(["reset", "--hard", `origin/${branch}`], { cwd: worktree, env });
-        await stopHeartbeat();
-        await serializeClaim(async () => {
-          await forgetClaim();
-        });
-        await detachWorktree();
-        return { status: "skipped", reason: "remote already contains default" };
+      if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
+        await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);
       }
-      throw err;
+      await loop.stopHeartbeat();
+      await loop.forgetSerialized().catch(() => undefined);
+      await loop.detachWorktree();
     }
-    throwIfAborted(opts.abortSignal);
-
-    await sticky(`Pushed merge of ${opts.job.defaultBranch}.`, pr.number);
-    await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
-    await stopHeartbeat();
-    await serializeClaim(async () => {
-      await forgetClaim();
-    });
-    await detachWorktree();
-    return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
-  } catch (err) {
-    if (isAbortError(err) || opts.abortSignal?.aborted) {
-      await stopHeartbeat();
-      await detachWorktree();
-      return { status: "cancelled" };
-    }
-    await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(() => undefined);
-    const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
-    if (errorHash) {
-      await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
-    }
-    if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
-      await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);
-    }
-    await stopHeartbeat();
-    await serializeClaim(async () => {
-      await forgetClaim();
-    }).catch(() => undefined);
-    await detachWorktree();
-    throw err;
-  } finally {
-    await stopHeartbeat();
-  }
+  );
 }
