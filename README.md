@@ -189,11 +189,7 @@ When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs an OpenInfer
 
 This repository’s image workflows publish `jumi-reviewer` and `jumi-worker` with tags `latest` and `vX.Y.Z`. Point GitOps at the registry **you** push to. Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA).
 
-Required repository secrets for `.gitea/workflows/jumi-reviewer-image.yml`:
-
-| Name | Description |
-|------|-------------|
-| `CONTAINER_REGISTRY_PASS` | Token or password with package write access |
+The reviewer (`.github/workflows/jumi-reviewer-image.yml`) publishes to GHCR with `GITHUB_TOKEN` (`packages: write`); it needs no extra secrets.
 
 The worker (`.github/workflows/jumi-worker-image.yml`) publishes to GHCR with `GITHUB_TOKEN` (`packages: write`); it needs no extra secrets.
 
@@ -294,6 +290,7 @@ bun run server
 ```text
 .github/
   workflows/
+    jumi-reviewer-image.yml  # Reviewer image build/push to GHCR
     jumi-worker-image.yml    # Worker image build/push to GHCR
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
@@ -301,7 +298,6 @@ bun run server
   tool-versions.env          # Pinned OpenCode/Bun/Helm/Temurin versions
   workflows/
     opencode-checks.yml      # PR lint/typecheck/test and image build checks
-    jumi-reviewer-image.yml  # Reviewer image build/push workflow
     jumi-release.yml         # Annotated vX.Y.Z git tag + Gitea Release
 deploy/
   contract.md                # GitOps runtime contract (semver source of truth)

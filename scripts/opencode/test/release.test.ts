@@ -463,7 +463,7 @@ describe("image labels and no double-build", () => {
   });
 
   test("tag push does not start a second full image build", async () => {
-    const reviewer = await readFile(join(repoRoot, ".gitea/workflows/jumi-reviewer-image.yml"), "utf8");
+    const reviewer = await readFile(join(repoRoot, ".github/workflows/jumi-reviewer-image.yml"), "utf8");
     const worker = await readFile(join(repoRoot, ".github/workflows/jumi-worker-image.yml"), "utf8");
     expect(workflowRebuildsOnTag(reviewer)).toBe(false);
     expect(workflowRebuildsOnTag(worker)).toBe(false);
@@ -478,6 +478,11 @@ describe("image labels and no double-build", () => {
     expect(worker).toContain("branches: [main]");
     expect(worker).not.toContain("type=sha");
     expect(worker).not.toContain(":${{ github.sha");
+    expect(reviewer).toContain("target: runtime");
+    expect(reviewer).toContain("ghcr.io/kirmanak/jumi-reviewer");
+    expect(reviewer).toContain("branches: [main]");
+    expect(reviewer).not.toContain("type=sha");
+    expect(reviewer).not.toContain(":${{ github.sha");
     const release = await readFile(join(repoRoot, ".gitea/workflows/jumi-release.yml"), "utf8");
     expect(release).toContain("bun src/release.ts publish");
     expect(release).toContain("github.token");
