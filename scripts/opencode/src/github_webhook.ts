@@ -120,6 +120,26 @@ export function isGithubBotSender(sender: { login?: string; type?: string } | un
   return /\[bot\]$/i.test(sender.login ?? "");
 }
 
+export function isFactoryBotSender(
+  sender: { login?: string } | undefined,
+  botUsername: string
+): boolean {
+  if (!sender?.login) return false;
+  return sender.login.toLowerCase() === botUsername.toLowerCase();
+}
+
+function isIgnoredFollowupSender(
+  sender: { login?: string } | undefined,
+  followupIgnoreLogins: readonly string[] | undefined
+): boolean {
+  if (!sender?.login) return false;
+  const needle = sender.login.toLowerCase();
+  for (const login of followupIgnoreLogins ?? []) {
+    if (login.toLowerCase() === needle) return true;
+  }
+  return false;
+}
+
 export async function verifyGithubSignature(
   rawBody: Uint8Array,
   secret: string,
@@ -146,7 +166,7 @@ export function shouldEnqueueGithubIssue(
   }
 
   if (payload.action === "labeled") {
-    if (isGithubBotSender(payload.sender)) return { type: "skip", reason: "sender is bot" };
+    if (isFactoryBotSender(payload.sender, policy.botUsername)) return { type: "skip", reason: "sender is bot" };
     if (!isJumiLabel(payload.label)) return { type: "skip", reason: "labeled other label" };
     if (payload.issue.state && payload.issue.state !== "open") {
       return { type: "skip", reason: "issue not open" };
@@ -390,8 +410,12 @@ export async function handleGithubWebhookEvent(
       }
       const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
       const sender = isObject(parsed) && isObject(parsed.sender) ? parsed.sender : undefined;
-      if (isGithubBotSender(sender as { login?: string; type?: string } | undefined)) {
+      const githubSender = sender as { login?: string; type?: string } | undefined;
+      if (isFactoryBotSender(githubSender, policy.botUsername)) {
         return skipped("sender is bot", logger);
+      }
+      if (isIgnoredFollowupSender(githubSender, policy.followupIgnoreLogins)) {
+        return skipped("sender ignored", logger);
       }
       const eventName = event ?? "issue_comment";
       let commentBody = rawBody;
