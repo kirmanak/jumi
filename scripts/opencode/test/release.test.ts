@@ -462,17 +462,22 @@ describe("image labels and no double-build", () => {
     expect(worker).toContain('--build-arg "REVISION=$' + '{REVISION}"');
   });
 
-  test("tag push does not start a second full Buildah", async () => {
+  test("tag push does not start a second full image build", async () => {
     const reviewer = await readFile(join(repoRoot, ".gitea/workflows/jumi-reviewer-image.yml"), "utf8");
-    const worker = await readFile(join(repoRoot, ".gitea/workflows/jumi-worker-image.yml"), "utf8");
+    const worker = await readFile(join(repoRoot, ".github/workflows/jumi-worker-image.yml"), "utf8");
     expect(workflowRebuildsOnTag(reviewer)).toBe(false);
     expect(workflowRebuildsOnTag(worker)).toBe(false);
     expect(shouldSkipImageBuild("tag")).toBe(true);
     expect(shouldSkipImageBuild("branch")).toBe(false);
     expect(reviewer).toContain("$" + "{IMAGE}:$" + "{VERSION}");
-    expect(worker).toContain("$" + "{IMAGE}:$" + "{VERSION}");
+    expect(worker).toContain("${{ env.IMAGE }}:${{ env.VERSION }}");
     expect(reviewer).toContain("bun src/release.ts next-version");
     expect(worker).toContain("bun src/release.ts next-version");
+    expect(worker).toContain("target: worker");
+    expect(worker).toContain("ghcr.io/kirmanak/jumi-worker");
+    expect(worker).toContain("branches: [main]");
+    expect(worker).not.toContain("type=sha");
+    expect(worker).not.toContain(":${{ github.sha");
     const release = await readFile(join(repoRoot, ".gitea/workflows/jumi-release.yml"), "utf8");
     expect(release).toContain("bun src/release.ts publish");
     expect(release).toContain("github.token");
