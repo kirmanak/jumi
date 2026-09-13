@@ -122,6 +122,16 @@ describe("job envelope kinds", () => {
     expect(store.rows).toHaveLength(1);
   });
 
+  test("skipped follow-up can re-enqueue the same SHA after the lease ends", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeIssueJob({ mode: "follow-up", prNumber: 7, headSha: "headsha" });
+    expect(await store.enqueueIssue(job)).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(await store.enqueueIssue(job)).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: false });
+    await store.markPublished(leased!.id, "worker-1", { state: "skipped", reason: "CI still pending" });
+    expect(await store.enqueueIssue(job)).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+  });
+
   test("human comment follow-up lands on the same envelope", async () => {
     const store = new MemoryReviewJobStore();
     const result = await store.enqueueIssue(

@@ -185,6 +185,54 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     );
     expect(decision).toEqual({ type: "skip", reason: "not an in-scope jumi pull request" });
   });
+
+  test("skips queued, in_progress, and waiting jobs without listing pulls", async () => {
+    let listed = 0;
+    const api = makeApi({
+      listOpenPulls: async () => {
+        listed++;
+        return [jumiPr()];
+      },
+    });
+    for (const status of ["queued", "in_progress", "waiting"] as const) {
+      const decision = await shouldEnqueueWorkflowJobFollowUp(
+        makeWorkflowJobPayload({
+          action: status,
+          workflow_job: {
+            id: 99,
+            name: "build",
+            status,
+            head_sha: "headsha",
+            head_branch: "jumi/issue-12-fix-the-thing",
+          },
+        }),
+        policy,
+        api
+      );
+      expect(decision).toEqual({ type: "skip", reason: `workflow_job ${status}` });
+    }
+    expect(listed).toBe(0);
+  });
+
+  test("enqueues on completed success and skipped conclusions", async () => {
+    for (const conclusion of ["success", "skipped"] as const) {
+      const decision = await shouldEnqueueWorkflowJobFollowUp(
+        makeWorkflowJobPayload({
+          workflow_job: {
+            id: 99,
+            name: "build",
+            status: "completed",
+            conclusion,
+            head_sha: "headsha",
+            head_branch: "jumi/issue-12-fix-the-thing",
+          },
+        }),
+        policy,
+        makeApi()
+      );
+      expect(decision.type).toBe("enqueue");
+    }
+  });
 });
 
 describe("createWorkerFetchHandler workflow_job", () => {
@@ -216,6 +264,34 @@ describe("createWorkerFetchHandler workflow_job", () => {
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
     expect(logs.some((line) => line.includes("skipped unsupported event status"))).toBe(true);
+  });
+
+  test("skips in_progress workflow_job without enqueue", async () => {
+    const queue = makeQueue();
+    const logs: string[] = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: makeApi(),
+      logger: (message) => logs.push(message),
+    });
+    const response = await handler(
+      await signedRequest(
+        makeWorkflowJobPayload({
+          action: "in_progress",
+          workflow_job: {
+            id: 99,
+            name: "build",
+            status: "in_progress",
+            head_sha: "headsha",
+            head_branch: "jumi/issue-12-fix-the-thing",
+          },
+        })
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "workflow_job in_progress" });
+    expect(queue.jobs).toHaveLength(0);
+    expect(logs.some((line) => line.includes("skipped workflow_job in_progress"))).toBe(true);
   });
 
   test("does not call listOpenPulls on malformed body", async () => {

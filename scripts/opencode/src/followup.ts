@@ -61,6 +61,11 @@ export { FOLLOWUP_PROMPT } from "./git.ts";
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_FOLLOWUP_ROUNDS = 3;
 export const FEEDBACK_MAX_BYTES = 32 * 1024;
+export const CI_PENDING_RETRY_MS = 2000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export type FollowUpResult =
   | { status: "pushed"; prNumber: number; htmlUrl: string }
@@ -732,7 +737,9 @@ function reviewFindingMatchOptsForJob(job: IssueJob, headSha: string): ReviewFin
   };
 }
 
-export async function implementFollowUp(opts: ImplementOptions): Promise<FollowUpResult> {
+export async function implementFollowUp(
+  opts: ImplementOptions & { sleep?: (ms: number) => Promise<void> }
+): Promise<FollowUpResult> {
   const log = opts.logger ?? logDefault;
   const maxFollowupRounds = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
   const maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
@@ -788,18 +795,27 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
   if (!hasFeedback && isPointerStubWake(opts.job.trigger, pendingTriggerBody) && hasInjectedReview) {
     hasFeedback = true;
   }
+  const inspectOpts = {
+    api: opts.api,
+    owner,
+    repo,
+    sha: pr.head.sha,
+    home: opts.home,
+    issueNumber,
+  };
   let ci: CiInspection = { sha: pr.head.sha, pending: false, failed: [], unhandled: [] };
   try {
-    ci = await inspectCi({
-      api: opts.api,
-      owner,
-      repo,
-      sha: pr.head.sha,
-      home: opts.home,
-      issueNumber,
-    });
+    ci = await inspectCi(inspectOpts);
   } catch (err) {
     log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (ci.pending && opts.job.trigger?.event === "workflow_job") {
+    try {
+      await (opts.sleep ?? sleep)(CI_PENDING_RETRY_MS);
+      ci = await inspectCi(inspectOpts);
+    } catch (err) {
+      log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   const ciWake = !ci.pending && ci.unhandled.length > 0;
   if (

@@ -50,6 +50,15 @@ function jobHeadMatches(
   return false;
 }
 
+function isWorkflowJobCompleted(payload: GiteaWorkflowJobPayload): boolean {
+  return payload.action === "completed" || payload.workflow_job?.status === "completed";
+}
+
+function workflowJobNotCompletedReason(payload: GiteaWorkflowJobPayload): string {
+  const status = payload.workflow_job?.status || payload.action;
+  return status ? `workflow_job ${status}` : "workflow_job not completed";
+}
+
 export async function shouldEnqueueWorkflowJobFollowUp(
   payload: GiteaWorkflowJobPayload,
   policy: CiWebhookPolicy,
@@ -61,6 +70,10 @@ export async function shouldEnqueueWorkflowJobFollowUp(
     ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
   } catch (err) {
     return { type: "skip", reason: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (!isWorkflowJobCompleted(payload)) {
+    return { type: "skip", reason: workflowJobNotCompletedReason(payload) };
   }
 
   const job = payload.workflow_job;

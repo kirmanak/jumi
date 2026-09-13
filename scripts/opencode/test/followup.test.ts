@@ -14,6 +14,7 @@ import {
 import { readConflictState, writeConflictState } from "../src/conflict.ts";
 import {
   buildFeedbackMarkdown,
+  CI_PENDING_RETRY_MS,
   collectFollowUpItems,
   FEEDBACK_MAX_BYTES,
   FOLLOWUP_TIMEOUT_MS,
@@ -2234,12 +2235,17 @@ describe("implementFollowUp", () => {
 
   test("CI still pending skips OpenCode", async () => {
     await withDirs(async (home, workdir) => {
+      let listed = 0;
+      const waits: number[] = [];
       const api = makeApi({
         listIssueComments: async () => [],
-        listCommitStatuses: async () => [
-          { id: 1, context: "build", status: "failure" },
-          { id: 2, context: "test", status: "pending" },
-        ],
+        listCommitStatuses: async () => {
+          listed++;
+          return [
+            { id: 1, context: "build", status: "failure" },
+            { id: 2, context: "test", status: "pending" },
+          ];
+        },
       });
       let openCode = 0;
       const result = await implementFollowUp({
@@ -2260,9 +2266,63 @@ describe("implementFollowUp", () => {
           return { status: "ok" };
         },
         logger: () => undefined,
+        sleep: async (ms) => {
+          waits.push(ms);
+        },
       });
       expect(result).toEqual({ status: "skipped", reason: "CI still pending" });
       expect(openCode).toBe(0);
+      expect(listed).toBe(2);
+      expect(waits).toEqual([CI_PENDING_RETRY_MS]);
+    });
+  });
+
+  test("pending then terminal completed wake re-lists once and runs OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      let listed = 0;
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => {
+          listed++;
+          if (listed === 1) {
+            return [
+              { id: 1, context: "build", status: "failure" },
+              { id: 2, context: "test", status: "pending" },
+            ];
+          }
+          return [{ id: 1, context: "build", status: "failure" }];
+        },
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+        sleep: async () => undefined,
+      });
+      expect(result.status).toBe("no-changes");
+      expect(openCode).toBe(1);
+      expect(listed).toBe(2);
     });
   });
 
