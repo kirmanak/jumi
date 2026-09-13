@@ -368,7 +368,7 @@ export async function handleGithubWebhookEvent(
       } catch {
         return skipped("malformed workflow_job payload", logger);
       }
-      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.worker.api);
+      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.worker.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const jobs: IssueJob[] = decision.jobs.map((partial) => ({ ...partial, delivery, receivedAt }));
@@ -383,7 +383,7 @@ export async function handleGithubWebhookEvent(
       } catch {
         return skipped("malformed push payload", logger);
       }
-      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.worker.api);
+      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.worker.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const jobs: IssueJob[] = [];
@@ -472,7 +472,8 @@ export async function handleGithubWebhookEvent(
         for (const partial of woken) addJob(partial);
       } catch (err) {
         if (jobs.length === 0) {
-          return skipped(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`, logger);
+          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
+          return skipped("failed to list blocked issues", logger);
         }
       }
     }

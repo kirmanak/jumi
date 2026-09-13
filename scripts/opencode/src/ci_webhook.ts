@@ -62,14 +62,16 @@ function workflowJobNotCompletedReason(payload: GiteaWorkflowJobPayload): string
 export async function shouldEnqueueWorkflowJobFollowUp(
   payload: GiteaWorkflowJobPayload,
   policy: CiWebhookPolicy,
-  api: Pick<IssueApi, "listOpenPulls" | "getIssue">
+  api: Pick<IssueApi, "listOpenPulls" | "getIssue">,
+  logger?: (message: string) => void
 ): Promise<CiWebhookDecision> {
   let owner: string;
   let repo: string;
   try {
     ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
   } catch (err) {
-    return { type: "skip", reason: err instanceof Error ? err.message : String(err) };
+    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    return { type: "skip", reason: "repository not allowed" };
   }
 
   if (!isWorkflowJobCompleted(payload)) {

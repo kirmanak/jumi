@@ -323,7 +323,8 @@ export function shouldEnqueuePullRejectedFollowUp(
 export async function shouldEnqueuePullAssign(
   payload: GiteaPRPayload,
   policy: FollowUpWebhookPolicy,
-  api?: Pick<IssueApi, "getIssue">
+  api?: Pick<IssueApi, "getIssue">,
+  logger?: (message: string) => void
 ): Promise<PullAssignWebhookDecision> {
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   const pr = payload.pull_request;
@@ -355,9 +356,10 @@ export async function shouldEnqueuePullAssign(
         return { type: "skip", reason: "closing issue already assigned" };
       }
     } catch (err) {
+      logger?.(`failed to load issue: ${err instanceof Error ? err.message : String(err)}`);
       return {
         type: "skip",
-        reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}`,
+        reason: "failed to load issue",
       };
     }
   }

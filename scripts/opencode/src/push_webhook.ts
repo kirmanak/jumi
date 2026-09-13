@@ -43,7 +43,8 @@ function pushSender(payload: GiteaPushPayload): string {
 export async function shouldEnqueuePushConflicts(
   payload: GiteaPushPayload,
   policy: PushWebhookPolicy,
-  api: Pick<IssueApi, "listOpenPulls" | "getIssue">
+  api: Pick<IssueApi, "listOpenPulls" | "getIssue">,
+  logger?: (message: string) => void
 ): Promise<PushWebhookDecision> {
   const defaultRef = `refs/heads/${payload.repository.default_branch}`;
   if (!payload.ref.startsWith("refs/heads/")) {
@@ -61,7 +62,8 @@ export async function shouldEnqueuePushConflicts(
   try {
     ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
   } catch (err) {
-    return { type: "skip", reason: err instanceof Error ? err.message : String(err) };
+    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    return { type: "skip", reason: "repository not allowed" };
   }
 
   const pulls = await api.listOpenPulls(owner, repo);

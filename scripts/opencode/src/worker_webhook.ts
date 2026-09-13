@@ -155,7 +155,7 @@ export async function handleWorkerWebhookEvent(
       );
     }
     try {
-      const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api);
+      const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       if (decision.type === "cancel") {
         const result = deps.cancel
@@ -196,7 +196,7 @@ export async function handleWorkerWebhookEvent(
       return skipped("malformed workflow_job payload", logger);
     }
     try {
-      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api);
+      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const keys: string[] = [];
@@ -226,7 +226,7 @@ export async function handleWorkerWebhookEvent(
       return skipped("malformed push payload", logger);
     }
     try {
-      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.api);
+      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const keys: string[] = [];
@@ -297,7 +297,8 @@ export async function handleWorkerWebhookEvent(
         for (const partial of woken) addJob(partial);
       } catch (err) {
         if (jobs.length === 0) {
-          return skipped(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`, logger);
+          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
+          return skipped("failed to list blocked issues", logger);
         }
       }
     }

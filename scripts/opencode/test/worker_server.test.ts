@@ -253,7 +253,7 @@ describe("createWorkerFetchHandler", () => {
       )
     );
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "failed to load issue: gitea 502" });
+    expect(await responseJson(response)).toEqual({ skipped: "failed to load issue" });
     expect(queue.jobs).toHaveLength(0);
   });
 
