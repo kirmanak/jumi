@@ -1,4 +1,4 @@
-import { GITHUB_API_URL, GITHUB_GIT_USERNAME } from "./github_auth.ts";
+import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
 import type {
   ActionJob,
   Check,
@@ -17,8 +17,9 @@ import type {
 } from "./ports.ts";
 
 export type GithubAuth = {
-  getInstallationToken(): Promise<string>;
-  refreshInstallationToken?(): Promise<string>;
+  getInstallationToken(target?: GithubTokenTarget): Promise<string>;
+  refreshInstallationToken?(target?: GithubTokenTarget): Promise<string>;
+  rememberInstallation?(installationId: string, owner?: string, repo?: string): void;
 };
 
 export type GithubGitCredentials = {
@@ -416,6 +417,24 @@ function decodeTail(buf: Uint8Array, maxBytes: number): string {
   return new TextDecoder().decode(slice);
 }
 
+function repoTargetFromPath(path: string): GithubTokenTarget | undefined {
+  const match = path.match(/^\/repos\/([^/?#]+)\/([^/?#]+)/);
+  if (!match?.[1] || !match[2]) return undefined;
+  return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]) };
+}
+
+function tokenTargetFromGraphql(variables?: Record<string, unknown>): GithubTokenTarget | undefined {
+  const owner = typeof variables?.owner === "string" ? variables.owner : undefined;
+  const repo =
+    typeof variables?.name === "string"
+      ? variables.name
+      : typeof variables?.repo === "string"
+        ? variables.repo
+        : undefined;
+  if (!owner || !repo) return undefined;
+  return { owner, repo };
+}
+
 function pullNumberFromUrl(url: string | undefined): number | undefined {
   if (!url) return undefined;
   const match = url.match(/\/pulls\/(\d+)(?:\?|$)/);
@@ -444,20 +463,29 @@ export class GithubAPI {
     this.base = (opts.apiUrl ?? GITHUB_API_URL).replace(/\/+$/, "");
   }
 
-  async gitAccessToken(opts?: { refresh?: boolean }): Promise<string> {
+  rememberInstallation(installationId: string, owner?: string, repo?: string): void {
+    this.auth?.rememberInstallation?.(installationId, owner, repo);
+  }
+
+  async gitAccessToken(opts?: { refresh?: boolean } & GithubTokenTarget): Promise<string> {
     if (this.auth) {
-      if (opts?.refresh && this.auth.refreshInstallationToken) return this.auth.refreshInstallationToken();
-      return this.auth.getInstallationToken();
+      const target: GithubTokenTarget = {
+        ...(opts?.owner ? { owner: opts.owner } : {}),
+        ...(opts?.repo ? { repo: opts.repo } : {}),
+        ...(opts?.installationId ? { installationId: opts.installationId } : {}),
+      };
+      if (opts?.refresh && this.auth.refreshInstallationToken) return this.auth.refreshInstallationToken(target);
+      return this.auth.getInstallationToken(target);
     }
     return this.staticToken as string;
   }
 
-  private async accessToken(): Promise<string> {
-    return this.gitAccessToken();
+  private async accessToken(target?: GithubTokenTarget): Promise<string> {
+    return this.gitAccessToken(target);
   }
 
-  private async headers(): Promise<Record<string, string>> {
-    const token = await this.accessToken();
+  private async headers(target?: GithubTokenTarget): Promise<Record<string, string>> {
+    const token = await this.accessToken(target);
     return {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
@@ -467,11 +495,11 @@ export class GithubAPI {
     };
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, target?: GithubTokenTarget): Promise<T> {
     const url = `${this.base}${path}`;
     const res = await fetch(url, {
       method,
-      headers: await this.headers(),
+      headers: await this.headers(target ?? repoTargetFromPath(path)),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
@@ -486,7 +514,7 @@ export class GithubAPI {
     const url = `${this.base}${path}`;
     const res = await fetch(url, {
       method: "GET",
-      headers: await this.headers(),
+      headers: await this.headers(repoTargetFromPath(path)),
       redirect: "manual",
     });
     if (res.status >= 300 && res.status < 400) {
@@ -506,17 +534,17 @@ export class GithubAPI {
     return decodeTail(new Uint8Array(await res.arrayBuffer()), maxBytes);
   }
 
-  private get<T>(path: string) {
-    return this.request<T>("GET", path);
+  private get<T>(path: string, target?: GithubTokenTarget) {
+    return this.request<T>("GET", path, undefined, target);
   }
-  private post<T>(path: string, body: unknown) {
-    return this.request<T>("POST", path, body);
+  private post<T>(path: string, body: unknown, target?: GithubTokenTarget) {
+    return this.request<T>("POST", path, body, target);
   }
-  private patch<T>(path: string, body: unknown) {
-    return this.request<T>("PATCH", path, body);
+  private patch<T>(path: string, body: unknown, target?: GithubTokenTarget) {
+    return this.request<T>("PATCH", path, body, target);
   }
-  private put<T>(path: string, body: unknown) {
-    return this.request<T>("PUT", path, body);
+  private put<T>(path: string, body: unknown, target?: GithubTokenTarget) {
+    return this.request<T>("PUT", path, body, target);
   }
 
   private repoPath(owner: string, repo: string): string {
@@ -545,11 +573,15 @@ export class GithubAPI {
     }
   }
 
-  private async graphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
-    const payload = await this.post<{ data?: T; errors?: GraphqlError[] }>("/graphql", {
-      query,
-      ...(variables ? { variables } : {}),
-    });
+  private async graphql<T>(query: string, variables?: Record<string, unknown>, target?: GithubTokenTarget): Promise<T> {
+    const payload = await this.post<{ data?: T; errors?: GraphqlError[] }>(
+      "/graphql",
+      {
+        query,
+        ...(variables ? { variables } : {}),
+      },
+      target ?? tokenTargetFromGraphql(variables)
+    );
     if (payload.errors?.length) {
       throw new Error(`GitHub GraphQL → ${payload.errors[0]?.message ?? "error"}`);
     }
@@ -557,12 +589,14 @@ export class GithubAPI {
     return payload.data;
   }
 
-  private async loadViewer(): Promise<{ login?: string; databaseId?: number }> {
+  private async loadViewer(target?: GithubTokenTarget): Promise<{ login?: string; databaseId?: number }> {
     if (this.viewerLogin && this.viewerDatabaseId != null) {
       return { login: this.viewerLogin, databaseId: this.viewerDatabaseId };
     }
     const data = await this.graphql<{ viewer?: { login?: string; databaseId?: number } }>(
-      "query { viewer { login databaseId } }"
+      "query { viewer { login databaseId } }",
+      undefined,
+      target
     );
     const login = data.viewer?.login;
     const databaseId = data.viewer?.databaseId;
@@ -571,13 +605,13 @@ export class GithubAPI {
     return { login: this.viewerLogin, databaseId: this.viewerDatabaseId };
   }
 
-  private async getViewerLogin(): Promise<string | undefined> {
+  private async getViewerLogin(target?: GithubTokenTarget): Promise<string | undefined> {
     if (this.viewerLogin) return this.viewerLogin;
-    return (await this.loadViewer()).login;
+    return (await this.loadViewer(target)).login;
   }
 
-  async gitIdentity(): Promise<{ name: string; email: string }> {
-    const viewer = await this.loadViewer();
+  async gitIdentity(target?: GithubTokenTarget): Promise<{ name: string; email: string }> {
+    const viewer = await this.loadViewer(target);
     if (!viewer.login || viewer.databaseId == null) throw new Error("GitHub viewer identity is missing");
     return {
       name: viewer.login,
@@ -585,9 +619,9 @@ export class GithubAPI {
     };
   }
 
-  async resolveGitCredentials(): Promise<GithubGitCredentials> {
-    const token = await this.gitAccessToken({ refresh: true });
-    const identity = await this.gitIdentity();
+  async resolveGitCredentials(target?: GithubTokenTarget): Promise<GithubGitCredentials> {
+    const token = await this.gitAccessToken({ refresh: true, ...target });
+    const identity = await this.gitIdentity(target);
     return {
       username: GITHUB_GIT_USERNAME,
       token,
@@ -761,7 +795,7 @@ export class GithubAPI {
     let event = toGithubReviewEvent(review.event);
     let body = review.body;
     if (needsSelfReviewGuard(event)) {
-      const [pr, me] = await Promise.all([this.getPR(owner, repo, index), this.getViewerLogin()]);
+      const [pr, me] = await Promise.all([this.getPR(owner, repo, index), this.getViewerLogin({ owner, repo })]);
       if (!me || loginEquals(pr.user?.login, me)) {
         event = "COMMENT";
       }
@@ -796,16 +830,24 @@ export class GithubAPI {
 
   async resolvePullComment(owner: string, repo: string, commentId: number): Promise<void> {
     const threadId = await this.reviewThreadId(owner, repo, commentId);
-    await this.graphql("mutation ($id: ID!) { resolveReviewThread(input: {threadId: $id}) { clientMutationId } }", {
-      id: threadId,
-    });
+    await this.graphql(
+      "mutation ($id: ID!) { resolveReviewThread(input: {threadId: $id}) { clientMutationId } }",
+      {
+        id: threadId,
+      },
+      { owner, repo }
+    );
   }
 
   async unresolvePullComment(owner: string, repo: string, commentId: number): Promise<void> {
     const threadId = await this.reviewThreadId(owner, repo, commentId);
-    await this.graphql("mutation ($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { clientMutationId } }", {
-      id: threadId,
-    });
+    await this.graphql(
+      "mutation ($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { clientMutationId } }",
+      {
+        id: threadId,
+      },
+      { owner, repo }
+    );
   }
 
   async dismissPullReview(

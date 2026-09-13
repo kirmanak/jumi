@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createPublicKey, generateKeyPairSync, verify } from "node:crypto";
-import { createGithubAppJwt, GITHUB_API_URL, GithubAppAuth } from "../src/github_auth.ts";
+import {
+  createGithubAppJwt,
+  GITHUB_API_URL,
+  GithubAppAuth,
+  githubInstallationFromPayload,
+} from "../src/github_auth.ts";
 
 const { privateKey: pem, publicKey: publicPem } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -187,5 +192,113 @@ describe("GitHub App installation token cache", () => {
           installationId: INSTALLATION_ID,
         })
     ).toThrow("Missing GitHub App private key");
+  });
+
+  test("constructor does not require installation id", () => {
+    expect(() => new GithubAppAuth({ appId: APP_ID, privateKey: pem })).not.toThrow();
+  });
+
+  test("getInstallationToken without target or hint fails closed", async () => {
+    const auth = new GithubAppAuth({
+      appId: APP_ID,
+      privateKey: pem,
+      now: () => NOW_MS,
+      fetchImpl: async () => {
+        throw new Error("should not fetch");
+      },
+    });
+    await expect(auth.getInstallationToken()).rejects.toThrow("Missing GitHub App installation ID");
+  });
+
+  test("webhook installation.id mints against that id", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const auth = new GithubAppAuth({
+      appId: APP_ID,
+      privateKey: pem,
+      now: () => NOW_MS,
+      fetchImpl: async (url, init) => {
+        requests.push({ url, method: init?.method ?? "GET" });
+        return fixtureResponse();
+      },
+    });
+    auth.rememberWebhookPayload({
+      installation: { id: 789 },
+      repository: { full_name: "kirmanak/jumi" },
+    });
+    expect(await auth.getInstallationToken({ owner: "kirmanak", repo: "jumi" })).toBe(TOKEN_FIXTURE.token);
+    expect(requests).toEqual([{ url: `${GITHUB_API_URL}/app/installations/789/access_tokens`, method: "POST" }]);
+  });
+
+  test("no installation on payload looks up GET /repos/kirmanak/jumi/installation then mints", async () => {
+    const requests: Array<{ url: string; method: string; headers: Headers }> = [];
+    const auth = new GithubAppAuth({
+      appId: APP_ID,
+      privateKey: pem,
+      now: () => NOW_MS,
+      fetchImpl: async (url, init) => {
+        requests.push({ url, method: init?.method ?? "GET", headers: new Headers(init?.headers) });
+        if (String(url).endsWith("/installation")) {
+          return new Response(JSON.stringify({ id: 321, account: { login: "kirmanak" } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return fixtureResponse({ token: "ghs_looked_up" });
+      },
+    });
+    expect(
+      githubInstallationFromPayload({ repository: { full_name: "kirmanak/jumi" } }).installationId
+    ).toBeUndefined();
+    expect(await auth.getInstallationToken({ owner: "kirmanak", repo: "jumi" })).toBe("ghs_looked_up");
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.url).toBe(`${GITHUB_API_URL}/repos/kirmanak/jumi/installation`);
+    expect(requests[0]?.method).toBe("GET");
+    expect(requests[0]?.headers.get("Accept")).toBe("application/vnd.github+json");
+    const authorization = requests[0]?.headers.get("Authorization") ?? "";
+    expect(authorization.startsWith("Bearer ")).toBe(true);
+    expectValidJwt(authorization.slice("Bearer ".length));
+    expect(requests[1]?.url).toBe(`${GITHUB_API_URL}/app/installations/321/access_tokens`);
+    expect(requests[1]?.method).toBe("POST");
+    expect(await auth.getInstallationToken({ owner: "kirmanak", repo: "jumi" })).toBe("ghs_looked_up");
+    expect(requests).toHaveLength(2);
+  });
+
+  test("token cache does not reuse install A's token for repo on install B", async () => {
+    const requests: string[] = [];
+    const auth = new GithubAppAuth({
+      appId: APP_ID,
+      privateKey: pem,
+      installationId: "999",
+      now: () => NOW_MS,
+      fetchImpl: async (url) => {
+        requests.push(url);
+        if (url.endsWith("/repos/acme/a/installation")) {
+          return Response.json({ id: 1 });
+        }
+        if (url.endsWith("/repos/beta/b/installation")) {
+          return Response.json({ id: 2 });
+        }
+        if (url.includes("/app/installations/1/access_tokens")) {
+          return fixtureResponse({ token: "ghs_install_a" });
+        }
+        if (url.includes("/app/installations/2/access_tokens")) {
+          return fixtureResponse({ token: "ghs_install_b" });
+        }
+        if (url.includes("/app/installations/999/access_tokens")) {
+          return fixtureResponse({ token: "ghs_hint" });
+        }
+        throw new Error(`unexpected ${url}`);
+      },
+    });
+
+    expect(await auth.getInstallationToken({ owner: "acme", repo: "a" })).toBe("ghs_install_a");
+    expect(await auth.getInstallationToken({ owner: "beta", repo: "b" })).toBe("ghs_install_b");
+    expect(await auth.getInstallationToken({ owner: "acme", repo: "a" })).toBe("ghs_install_a");
+    expect(await auth.getInstallationToken()).toBe("ghs_hint");
+    expect(requests.filter((url) => url.includes("/app/installations/1/access_tokens"))).toHaveLength(1);
+    expect(requests.filter((url) => url.includes("/app/installations/2/access_tokens"))).toHaveLength(1);
+    expect(requests.filter((url) => url.includes("/app/installations/999/access_tokens"))).toHaveLength(1);
+    expect(requests.some((url) => url.includes("/repos/acme/a/installation"))).toBe(true);
+    expect(requests.some((url) => url.includes("/repos/beta/b/installation"))).toBe(true);
   });
 });

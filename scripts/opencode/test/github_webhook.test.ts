@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  githubWebhookPolicy,
+  handleGithubWebhookEvent,
   hasJumiLabel,
   isGithubBotSender,
   shouldEnqueueGithubIssue,
@@ -485,6 +487,64 @@ describe("POST /webhooks/github", () => {
     );
     expect(response.status).toBe(503);
     expect(await responseJson(response)).toEqual({ error: "pr lookup failed" });
+  });
+
+  test("webhook with installation.id is remembered for mint", async () => {
+    const remembered: Array<{ id: string; owner?: string; repo?: string }> = [];
+    const response = await handleGithubWebhookEvent(
+      encodeJson({
+        ...labeledPayload(),
+        installation: { id: 789 },
+        repository: {
+          ...githubRepo,
+          full_name: "kirmanak/jumi",
+          name: "jumi",
+          html_url: "https://github.com/kirmanak/jumi",
+          clone_url: "https://github.com/kirmanak/jumi.git",
+        },
+      }),
+      "issues",
+      "delivery-1",
+      githubWebhookPolicy({
+        webhookSecret: "webhook-secret",
+        maxWebhookBytes: 1_048_576,
+        allowedOrgs: ["kirmanak"],
+        allowedRepos: [],
+        botUsername: "kirmanak-jumi[bot]",
+      }),
+      {
+        worker: {
+          queue: { enqueue: () => ({ key: "implement:kirmanak/jumi#12", queued: true }) },
+        },
+        rememberInstallation: (id, owner, repo) => remembered.push({ id, owner, repo }),
+      }
+    );
+    expect(response.status).toBe(202);
+    expect(remembered).toEqual([{ id: "789", owner: "kirmanak", repo: "jumi" }]);
+  });
+
+  test("webhook without installation.id does not remember an install", async () => {
+    const remembered: Array<{ id: string; owner?: string; repo?: string }> = [];
+    const response = await handleGithubWebhookEvent(
+      encodeJson(labeledPayload()),
+      "issues",
+      "delivery-1",
+      githubWebhookPolicy({
+        webhookSecret: "webhook-secret",
+        maxWebhookBytes: 1_048_576,
+        allowedOrgs: ["kirmanak"],
+        allowedRepos: [],
+        botUsername: "kirmanak-jumi[bot]",
+      }),
+      {
+        worker: {
+          queue: { enqueue: () => ({ key: "implement:kirmanak/demo#12", queued: true }) },
+        },
+        rememberInstallation: (id, owner, repo) => remembered.push({ id, owner, repo }),
+      }
+    );
+    expect(response.status).toBe(202);
+    expect(remembered).toEqual([]);
   });
 
   test("skips status and check_run", async () => {

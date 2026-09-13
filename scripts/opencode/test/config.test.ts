@@ -225,7 +225,6 @@ describe("loadConfig", () => {
     FORGE: "github",
     GITHUB_APP_ID: "123",
     GITHUB_APP_PRIVATE_KEY: githubPem,
-    GITHUB_APP_INSTALLATION_ID: "456",
     GITHUB_WEBHOOK_SECRET: "gh-secret",
     FORGE_URL: "https://github.com/",
     GITHUB_ALLOWED_ORGS: "acme",
@@ -251,9 +250,6 @@ describe("loadConfig", () => {
       "GITHUB_APP_ID"
     );
     expect(() => loadConfig({ ...githubRequired, GITHUB_APP_PRIVATE_KEY: "" })).toThrow("GITHUB_APP_PRIVATE_KEY");
-    expect(() => loadConfig({ ...githubRequired, GITHUB_APP_INSTALLATION_ID: "" })).toThrow(
-      "GITHUB_APP_INSTALLATION_ID"
-    );
     expect(() => loadConfig({ ...githubRequired, FORGE_URL: "" })).toThrow("FORGE_URL");
     expect(() => loadConfig({ ...githubRequired, GITHUB_ALLOWED_ORGS: "" })).toThrow("GITHUB_ALLOWED_ORGS");
   });
@@ -268,13 +264,19 @@ describe("loadConfig", () => {
     expect(config.allowedRepos).toEqual([]);
     expect(config.githubAppId).toBe("123");
     expect(config.githubAppPrivateKey).toBe(githubPem);
-    expect(config.githubAppInstallationId).toBe("456");
+    expect(config.githubAppInstallationId).toBeUndefined();
     expect(validateCloneUrl("https://github.com/kirmanak/jumi.git", config.giteaUrl)).toBe(
       "https://github.com/kirmanak/jumi.git"
     );
     expect(() => validateCloneUrl("https://gitea.kirmanak.stream/kirmanak/jumi.git", config.giteaUrl)).toThrow(
       "Clone URL origin does not match configured forge URL"
     );
+  });
+
+  test("FORGE=github treats GITHUB_APP_INSTALLATION_ID as an optional hint", () => {
+    expect(loadConfig(githubRequired).githubAppInstallationId).toBeUndefined();
+    expect(loadConfig({ ...githubRequired, GITHUB_APP_INSTALLATION_ID: "" }).githubAppInstallationId).toBeUndefined();
+    expect(loadConfig({ ...githubRequired, GITHUB_APP_INSTALLATION_ID: "456" }).githubAppInstallationId).toBe("456");
   });
 
   test("FORGE=github optional GITHUB_ALLOWED_REPOS and escaped PEM", () => {
@@ -310,7 +312,6 @@ describe("loadConfig", () => {
     const config = loadConfig({
       FORGE: "github",
       GITHUB_APP_ID: "123",
-      GITHUB_APP_INSTALLATION_ID: "456",
       FORGE_URL: "https://github.com/",
       GITHUB_ALLOWED_ORGS: "acme",
       JUMI_ROLE: "router",

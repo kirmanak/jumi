@@ -151,7 +151,7 @@ export function loadForgeBind(env: Env, opts: { requireWebhookSecret: boolean })
   if (forge === "github") {
     const githubAppId = requireEnv(env, GITHUB_ENV.appId);
     const githubAppPrivateKey = requirePem(env, GITHUB_ENV.appPrivateKey);
-    const githubAppInstallationId = requireEnv(env, GITHUB_ENV.appInstallationId);
+    const githubAppInstallationId = optionalEnv(env, GITHUB_ENV.appInstallationId);
     const webhookSecret = requireEnv(env, GITHUB_ENV.webhookSecret);
     const giteaUrl = normalizeUrl(requireEnv(env, GITHUB_ENV.url));
     requireEnv(env, GITHUB_ENV.allowedOrgs);

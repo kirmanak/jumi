@@ -109,7 +109,6 @@ describe("loadWorkerConfig", () => {
     FORGE: "github",
     GITHUB_APP_ID: "123",
     GITHUB_APP_PRIVATE_KEY: githubPem,
-    GITHUB_APP_INSTALLATION_ID: "456",
     GITHUB_WEBHOOK_SECRET: "gh-secret",
     FORGE_URL: "https://github.com/",
     GITHUB_ALLOWED_ORGS: "acme",
@@ -144,7 +143,14 @@ describe("loadWorkerConfig", () => {
     expect(config.allowedRepos).toEqual(["acme/a"]);
     expect(config.githubAppId).toBe("123");
     expect(config.githubAppPrivateKey).toBe(githubPem);
-    expect(config.githubAppInstallationId).toBe("456");
+    expect(config.githubAppInstallationId).toBeUndefined();
+  });
+
+  test("FORGE=github treats GITHUB_APP_INSTALLATION_ID as an optional hint", () => {
+    expect(loadWorkerConfig(githubRequired).githubAppInstallationId).toBeUndefined();
+    expect(loadWorkerConfig({ ...githubRequired, GITHUB_APP_INSTALLATION_ID: "456" }).githubAppInstallationId).toBe(
+      "456"
+    );
   });
 });
 

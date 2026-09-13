@@ -26,7 +26,7 @@ export function createGithubForge(config: {
   githubAppPrivateKey?: string;
   githubAppInstallationId?: string;
 }): Tracker & Forge {
-  if (config.githubAppId && config.githubAppPrivateKey && config.githubAppInstallationId) {
+  if (config.githubAppId && config.githubAppPrivateKey) {
     return new GithubAPI({
       auth: new GithubAppAuth({
         appId: config.githubAppId,

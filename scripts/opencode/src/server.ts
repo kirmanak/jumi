@@ -98,7 +98,7 @@ export async function runReviewJob(
       workspace,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
-      gitAuthResolver: gitAuthResolverFor(config, api),
+      gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
       botUsername: config.botUsername,
       home: config.home,
       sanitizeOpenCodeEnv: true,
@@ -487,7 +487,10 @@ function engineId(): string {
 }
 
 function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
-  const extra = api as ReviewApi & Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks">>;
+  const extra = api as ReviewApi &
+    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks">> & {
+      rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
+    };
   return {
     getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
     getRepo: (owner, repo) => api.getRepo(owner, repo),
@@ -496,6 +499,7 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)
       : undefined,
+    rememberInstallation: extra.rememberInstallation?.bind(extra),
   };
 }
 

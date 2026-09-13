@@ -8,6 +8,7 @@ import {
 } from "./followup_webhook.ts";
 import type { ForgeKind } from "./forge.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
+import { githubInstallationFromPayload } from "./github_auth.ts";
 import {
   blockedIssueJobsToEnqueue,
   type IssueWebhookDecision,
@@ -56,6 +57,7 @@ export type GithubWebhookDeps = {
   worker?: HandleWorkerWebhookDeps;
   getPR?: (owner: string, repo: string, index: number) => Promise<{ head: { sha: string } }>;
   logger?: (message: string) => void;
+  rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
 };
 
 export type GithubWebhookPolicy = WorkerWebhookPolicy & {
@@ -181,6 +183,19 @@ function validateGithubReview(
   };
 }
 
+function rememberWebhookInstallation(rawBody: Uint8Array, deps: GithubWebhookDeps): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(rawBody));
+  } catch {
+    return;
+  }
+  const info = githubInstallationFromPayload(parsed);
+  if (!info.installationId) return;
+  deps.rememberInstallation?.(info.installationId, info.owner, info.repo);
+  deps.worker?.api?.rememberInstallation?.(info.installationId, info.owner, info.repo);
+}
+
 function encodeJson(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
@@ -280,6 +295,7 @@ export async function handleGithubWebhookEvent(
   deps: GithubWebhookDeps
 ): Promise<Response> {
   const logger = deps.logger ?? ((message: string) => console.log(message));
+  rememberWebhookInstallation(rawBody, deps);
   if (event === "ping") return json(200, { ok: true });
   if (event === "status" || event === "check_run") {
     return skipped(`unsupported event ${event}`, logger);

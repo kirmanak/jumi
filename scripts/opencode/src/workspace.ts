@@ -123,7 +123,9 @@ export async function resolveGitAuth(opts: {
   return { giteaUrl: opts.giteaUrl, username: opts.botUsername, token: opts.giteaToken };
 }
 
-function hasGitCredentials(value: unknown): value is { resolveGitCredentials: () => Promise<GitCredentials> } {
+function hasGitCredentials(value: unknown): value is {
+  resolveGitCredentials: (target?: { owner?: string; repo?: string }) => Promise<GitCredentials>;
+} {
   return (
     typeof value === "object" &&
     value != null &&
@@ -134,11 +136,12 @@ function hasGitCredentials(value: unknown): value is { resolveGitCredentials: ()
 
 export function gitAuthResolverFor(
   config: { giteaUrl: string; giteaToken: string; botUsername: string },
-  api?: unknown
+  api?: unknown,
+  repo?: { owner: string; repo: string }
 ): GitAuthResolver {
   return async () => {
     if (hasGitCredentials(api)) {
-      const creds = await api.resolveGitCredentials();
+      const creds = await api.resolveGitCredentials(repo);
       return { giteaUrl: config.giteaUrl, ...creds };
     }
     return { giteaUrl: config.giteaUrl, username: config.botUsername, token: config.giteaToken };

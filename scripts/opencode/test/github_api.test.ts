@@ -818,6 +818,44 @@ describe("GithubAPI", () => {
     expect(urls[0]).toBe(`${GITHUB_API_URL}/repos/owner/repo`);
   });
 
+  test("REST and git credentials request the token for that owner/repo", async () => {
+    const targets: unknown[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/graphql")) {
+        return Response.json({ data: { viewer: { login: "kirmanak-jumi[bot]", databaseId: 7 } } });
+      }
+      return Response.json({
+        name: "jumi",
+        full_name: "kirmanak/jumi",
+        html_url: "https://github.com/kirmanak/jumi",
+        clone_url: "https://github.com/kirmanak/jumi.git",
+        default_branch: "main",
+        owner: { login: "kirmanak" },
+      });
+    }) as unknown as typeof fetch;
+
+    const client = new GithubAPI({
+      auth: {
+        getInstallationToken: async (target) => {
+          targets.push(target);
+          return "ghs_from_auth";
+        },
+        refreshInstallationToken: async (target) => {
+          targets.push({ refresh: true, ...target });
+          return "ghs_fresh";
+        },
+      },
+    });
+    await client.getRepo("kirmanak", "jumi");
+    const creds = await client.resolveGitCredentials({ owner: "kirmanak", repo: "jumi" });
+    expect(targets).toEqual([
+      { owner: "kirmanak", repo: "jumi" },
+      { refresh: true, owner: "kirmanak", repo: "jumi" },
+      { owner: "kirmanak", repo: "jumi" },
+    ]);
+    expect(creds.token).toBe("ghs_fresh");
+  });
+
   test("gitIdentity uses viewer login and databaseId for the noreply email", async () => {
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       if (String(url).includes("/graphql")) {
