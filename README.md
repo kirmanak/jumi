@@ -38,7 +38,7 @@ One `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `confli
 
 Router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). Cheap 202 skips log the reason. After the engine publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned to the bot, persist inserts a `follow-up` row.
 
-`router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` is not required for `engine`; required on `router` / worker. GitOps must set `DATABASE_URL` on the worker; process start stays fail-closed if unset (first-run assign then uses the in-memory queue — do not 202 those jobs into RAM).
+`router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` is not required for `engine`; required on `router` / worker. GitOps must set `DATABASE_URL` on the worker; process start stays fail-closed if unset (first-run assign then uses the in-memory queue — do not 202 those jobs into RAM).
 
 The org hook hits the **router** mailbox. Worker pods do not need a public webhook path. Worker HTTP (`POST /webhooks/gitea`) still exists for local/dev and healthz/metrics.
 

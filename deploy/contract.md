@@ -4,7 +4,7 @@ GitOps runtime contract for `jumi-reviewer` and `jumi-worker`. Not the applicati
 
 This file is the semver source of truth. Unchanged vs the last `vX.Y.Z` tag → patch. New optional GitOps (env/port/volume) → minor. Required GitOps change (new or removed required env, UID, probe, command, port, image target), or a `BREAKING` heading/marker → major. Reviewer and worker share one version.
 
-Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, or unknown fails process start). `GITEA_WEBHOOK_SECRET` is not required when `JUMI_ROLE=engine`. Worker requires `DATABASE_URL` (chart must set it; process start stays fail-closed if unset). Reviewer `DATABASE_URL` is required when `JUMI_ROLE` is `router` or `engine`. `FORGE` is optional (`gitea` or `github`; unset or empty = gitea). Router is the org-hook mailbox (assign/comment/CI/push write the shared ledger; worker HTTP is unused for correctness). Worker `workflow_job` wake uses the existing webhook port/secret (no new env).
+Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, or unknown fails process start). `GITEA_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` is not required when `JUMI_ROLE=engine`. Worker requires `DATABASE_URL` (chart must set it; process start stays fail-closed if unset). Reviewer `DATABASE_URL` is required when `JUMI_ROLE` is `router` or `engine`. `FORGE` is optional (`gitea` or `github`; unset or empty = gitea). Router is the org-hook mailbox (assign/comment/CI/push write the shared ledger; worker HTTP is unused for correctness). Worker `workflow_job` wake uses the existing webhook port/secret (no new env).
 
 ## GitOps
 

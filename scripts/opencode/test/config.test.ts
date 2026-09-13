@@ -289,11 +289,14 @@ describe("loadConfig", () => {
     expect(config.githubAppPrivateKey).toBe(githubPem);
   });
 
-  test("FORGE=github engine still requires GITHUB_WEBHOOK_SECRET; invalid PEM fails", () => {
+  test("FORGE=github engine does not require GITHUB_WEBHOOK_SECRET; router still does; invalid PEM fails", () => {
+    const engine = loadConfig({ ...githubRequired, JUMI_ROLE: "engine", GITHUB_WEBHOOK_SECRET: "" });
+    expect(engine.role).toBe("engine");
+    expect(engine.webhookSecret).toBe("");
+    expect(engine.githubAppId).toBe("123");
+    expect(engine.githubAppPrivateKey).toBe(githubPem);
     expect(loadConfig({ ...githubRequired, JUMI_ROLE: "engine" }).webhookSecret).toBe("gh-secret");
-    expect(() => loadConfig({ ...githubRequired, JUMI_ROLE: "engine", GITHUB_WEBHOOK_SECRET: "" })).toThrow(
-      "GITHUB_WEBHOOK_SECRET"
-    );
+    expect(() => loadConfig({ ...githubRequired, GITHUB_WEBHOOK_SECRET: "" })).toThrow("GITHUB_WEBHOOK_SECRET");
     expect(() => loadConfig({ ...githubRequired, GITHUB_APP_PRIVATE_KEY: "not-a-key" })).toThrow("Invalid PEM");
   });
 
