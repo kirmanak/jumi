@@ -2272,7 +2272,7 @@ describe("implementFollowUp", () => {
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
-        getActionJobLogs: async () => "Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
       });
       let openCode = 0;
       const result = await implementFollowUp({
@@ -2294,7 +2294,10 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({ status: "skipped", reason: "CI infra flake" });
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "CI infra flake: GitHub 140.82 checkout/cache timeout or unreachable",
+      });
       expect(openCode).toBe(0);
       expect(api.comments.some((body) => body.includes("infra flake"))).toBe(true);
     });

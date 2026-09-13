@@ -7,6 +7,7 @@ import {
   capFailedJobLog,
   classifyInfraFlake,
   dropUnpackNoise,
+  flakeSkipReason,
   hashText,
   infraFlakeReason,
   inspectCi,
@@ -53,7 +54,7 @@ describe("latestStatuses", () => {
 });
 
 describe("capFailedJobLog", () => {
-  test("keeps the last ##[error] plus nearby lines and drops unpack noise", () => {
+  test("keeps the last actions error plus nearby lines and drops unpack noise", () => {
     const lines = [
       "Unpacking foo (1.0)",
       "  inflating: bar",
@@ -76,29 +77,29 @@ describe("capFailedJobLog", () => {
 });
 
 describe("infraFlakeReason", () => {
-  test("detects GitHub 140.82 checkout timeout", () => {
+  test("detects GitHub checkout cache unreachable", () => {
     expect(infraFlakeReason("Failed to connect to 140.82.112.4 port 443: Connection timed out")).toContain("140.82");
   });
 
-  test("detects Helm remote-schema 429", () => {
+  test("detects Helm chart schema rate limiting", () => {
     expect(infraFlakeReason("helm: values.schema.json remote schema 429 Too Many Requests")).toContain("Helm");
   });
 
-  test("helm install/test timed out waiting is not a flake", () => {
+  test("helm install waiting condition is not a flake", () => {
     expect(
       infraFlakeReason("helm install my-release --timeout 5m\nError: timed out waiting for the condition")
     ).toBeUndefined();
   });
 
-  test("detects GARM dpkg cross-device link", () => {
+  test("detects GARM package unpack device mismatch", () => {
     expect(infraFlakeReason("dpkg: error processing archive: Invalid cross-device link")).toContain("GARM");
   });
 
-  test("detects tofu S3 state lock", () => {
+  test("detects tofu remote state contention", () => {
     expect(infraFlakeReason("tofu Error acquiring the state lock on s3")).toContain("S3");
   });
 
-  test("detects Docker Hub unauthenticated pull rate limit", () => {
+  test("detects Docker Hub anonymous pull throttling", () => {
     expect(
       infraFlakeReason(
         "reading manifest bookworm-slim in docker.io/library/debian: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit"
@@ -110,7 +111,7 @@ describe("infraFlakeReason", () => {
     expect(infraFlakeReason("##[error]Failed to find package 'platforms;android-37'")).toBeUndefined();
   });
 
-  test("bun (fail) log with 429 only in fixture text is not a flake", () => {
+  test("bun failing test with rate-limit only in fixture text is not a flake", () => {
     const log = [
       "bun test v1.2.3",
       "fixture: values.schema.json remote schema 429 Too Many Requests",
@@ -124,7 +125,7 @@ describe("infraFlakeReason", () => {
     expect(classifyInfraFlake(capFailedJobLog(log))).toBeUndefined();
   });
 
-  test("timestamped bun (fail) log with 429 only in fixture text is not a flake", () => {
+  test("timestamped bun failing test with rate-limit only in fixture text is not a flake", () => {
     const log = [
       "2026-09-12T10:59:26.0000000Z bun test v1.2.3",
       "2026-09-12T10:59:26.0000000Z fixture: values.schema.json remote schema 429 Too Many Requests",
@@ -138,37 +139,92 @@ describe("infraFlakeReason", () => {
     expect(classifyInfraFlake(capFailedJobLog(log))).toBeUndefined();
   });
 
-  test("bun fail title with 429 is not a flake", () => {
-    expect(classifyInfraFlake("(fail) detects Helm remote-schema 429")).toBeUndefined();
+  test("pass line with schema tokens is ignored", () => {
+    expect(classifyInfraFlake("(pass) detects Helm remote-schema 429")).toBeUndefined();
     expect(
       classifyInfraFlake(
         [
           "bun test v1.2.3",
-          "helm: values.schema.json remote schema 429 Too Many Requests",
-          "(fail) detects Helm remote-schema 429 [0.03ms]",
+          "fixture: values.schema.json remote schema 429 Too Many Requests",
+          "(pass) detects Helm remote-schema 429 [0.03ms]",
         ].join("\n")
       )
     ).toBeUndefined();
   });
 
-  test("mention of (fail) in a pass title does not hide a later job/step flake", () => {
+  test("pass title mentioning fail does not hide a later job step flake", () => {
     const log = [
-      "(pass) bun (fail) log with 429 only in fixture text is not a flake",
+      "(pass) bun fail log with rate-limit only in fixture text is not a flake",
       "helm: values.schema.json remote schema 429 Too Many Requests",
       "##[error]Process completed with exit code 1.",
     ].join("\n");
     expect(classifyInfraFlake(log)).toContain("Helm");
   });
 
-  test("true positives still match from the capped window", () => {
-    expect(classifyInfraFlake("Failed to connect to 140.82.112.4 port 443: Connection timed out")).toContain("140.82");
-    expect(classifyInfraFlake("helm: values.schema.json remote schema 429 Too Many Requests")).toContain("Helm");
-    expect(classifyInfraFlake("tofu Error acquiring the state lock on s3")).toContain("S3");
+  test("failing bun test does not hide a later job step flake", () => {
+    const log = [
+      "(fail) adds numbers [0.03ms]",
+      "helm: values.schema.json remote schema 429 Too Many Requests",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toContain("Helm");
+  });
+
+  test("true positives still match from unprefixed signatures plus actions error", () => {
+    const processCompleted = "##[error]Process completed with exit code 1.";
     expect(
       classifyInfraFlake(
-        "reading manifest bookworm-slim in docker.io/library/debian: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit"
+        ["Failed to connect to 140.82.112.4 port 443: Connection timed out", processCompleted].join("\n")
+      )
+    ).toContain("140.82");
+    expect(
+      classifyInfraFlake(["helm: values.schema.json remote schema 429 Too Many Requests", processCompleted].join("\n"))
+    ).toContain("Helm");
+    expect(
+      classifyInfraFlake(["dpkg: error processing archive: Invalid cross-device link", processCompleted].join("\n"))
+    ).toContain("GARM");
+    expect(classifyInfraFlake(["tofu Error acquiring the state lock on s3", processCompleted].join("\n"))).toContain(
+      "S3"
+    );
+    expect(
+      classifyInfraFlake(
+        [
+          "reading manifest bookworm-slim in docker.io/library/debian: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit",
+          processCompleted,
+        ].join("\n")
       )
     ).toContain("Docker Hub");
+    expect(
+      classifyInfraFlake(
+        [
+          "Error response from daemon: toomanyrequests: You have reached your unauthenticated pull rate limit",
+          processCompleted,
+        ].join("\n")
+      )
+    ).toContain("Docker Hub");
+    expect(
+      classifyInfraFlake(
+        [
+          "ERROR: failed to solve: toomanyrequests: You have reached your unauthenticated pull rate limit",
+          processCompleted,
+        ].join("\n")
+      )
+    ).toContain("Docker Hub");
+  });
+
+  test("skip reason includes the matcher class", () => {
+    expect(
+      flakeSkipReason([
+        {
+          name: "build",
+          state: "failure",
+          description: "",
+          capped: "",
+          logHash: "x",
+          flake: "Helm remote-schema timeout/429",
+        },
+      ])
+    ).toBe("CI infra flake: Helm remote-schema timeout/429");
   });
 });
 
@@ -271,7 +327,7 @@ describe("inspectCi", () => {
     }
   });
 
-  test("classifies Helm remote-schema 429 in the capped window as a flake", async () => {
+  test("classifies Helm schema rate limiting in the capped window as a flake", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
@@ -293,7 +349,7 @@ describe("inspectCi", () => {
     }
   });
 
-  test("does not treat bun fixture 429 as an infra flake", async () => {
+  test("does not treat bun fixture rate-limit text as an infra flake", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({

@@ -1,6 +1,14 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { buildCiMarkdown, CI_LOG_FILE, type CiInspection, flakeComment, inspectCi, recordCiHandled } from "./ci.ts";
+import {
+  buildCiMarkdown,
+  CI_LOG_FILE,
+  type CiInspection,
+  flakeComment,
+  flakeSkipReason,
+  inspectCi,
+  recordCiHandled,
+} from "./ci.ts";
 import { conflictStatePath, deleteClaim, followUpStatePath, stuckStatePath } from "./claim.ts";
 import {
   attachPrWorktree,
@@ -833,7 +841,7 @@ export async function implementFollowUp(opts: ImplementOptions): Promise<FollowU
         now,
       });
       await forgetClaim();
-      return { status: "skipped", reason: "CI infra flake" };
+      return { status: "skipped", reason: flakeSkipReason(ci.unhandled) };
     }
   }
   const conflictPath = conflictStatePath(opts.home, owner, repo, issueNumber);

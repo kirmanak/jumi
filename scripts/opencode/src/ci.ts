@@ -170,10 +170,21 @@ function stripGiteaLogTimestamp(line: string): string {
   return line.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/, "").trimStart();
 }
 
+const FAIL_OR_ERROR_LINE =
+  /^(?:\(fail\)|##\[error\]|Error:|fatal:|dpkg:|Error response from daemon:|ERROR:|helm:|Failed to connect\b|Could not resolve host\b|(?:tofu|terraform)\b|reading manifest\b)/;
+
+function failOrErrorEvidence(capped: string): string {
+  return capped
+    .split(/\r?\n/)
+    .map(stripGiteaLogTimestamp)
+    .filter((line) => !line.startsWith("(pass)") && FAIL_OR_ERROR_LINE.test(line))
+    .join("\n");
+}
+
 export function classifyInfraFlake(capped: string): string | undefined {
-  const bunFails = capped.split(/\r?\n/).filter((line) => stripGiteaLogTimestamp(line).startsWith("(fail)"));
-  if (bunFails.length > 0) return undefined;
-  return infraFlakeReason(capped);
+  const evidence = failOrErrorEvidence(capped);
+  if (!evidence) return undefined;
+  return infraFlakeReason(evidence);
 }
 
 export function jobMatchesCheck(job: ActionJob, checkName: string, sha: string): boolean {
@@ -300,10 +311,17 @@ export function buildCiMarkdown(opts: { sha: string; checks: FailedCheck[] }): s
   return trimToBytes(sections.join("\n"), CI_LOG_MAX_BYTES, false);
 }
 
+function uniqueFlakeReasons(checks: FailedCheck[]): string[] {
+  return [...new Set(checks.map((check) => check.flake).filter((value): value is string => Boolean(value)))];
+}
+
+export function flakeSkipReason(checks: FailedCheck[]): string {
+  return `CI infra flake: ${uniqueFlakeReasons(checks).join("; ")}`;
+}
+
 export function flakeComment(checks: FailedCheck[]): string {
-  const reasons = [...new Set(checks.map((check) => check.flake).filter((value): value is string => Boolean(value)))];
   const names = checks.map((check) => check.name).join(", ");
-  return `CI looks like an infra flake (${reasons.join("; ")}) on ${names}. A human needs to rerun.`;
+  return `CI looks like an infra flake (${uniqueFlakeReasons(checks).join("; ")}) on ${names}. A human needs to rerun.`;
 }
 
 async function logsForCheck(
