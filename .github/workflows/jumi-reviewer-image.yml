@@ -1,0 +1,135 @@
+name: Publish Jumi Reviewer Image
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # false: never cancel a push that already started (half-pushed immutable tag).
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: github.repository == 'kirmanak/jumi'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/kirmanak/jumi-reviewer
+      REGISTRY: ghcr.io
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Load tool versions
+        run: grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: scripts/opencode
+
+      - name: Run lint, typecheck, and tests
+        run: bun run ci
+        working-directory: scripts/opencode
+
+      - name: Compute version
+        run: echo "VERSION=$(bun src/release.ts next-version)" >> $GITHUB_ENV
+        working-directory: scripts/opencode
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push reviewer image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ghcr.io/kirmanak/jumi-reviewer:latest
+            ghcr.io/kirmanak/jumi-reviewer:${{ env.VERSION }}
+          build-args: |
+            BUN_VERSION=${{ env.BUN_VERSION }}
+            OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            HELM_VERSION=${{ env.HELM_VERSION }}
+            VERSION=${{ env.VERSION }}
+            REVISION=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/kirmanak/jumi
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Pull pushed image for verification
+        run: docker pull "${IMAGE}:${VERSION}"
+
+      - name: Verify image user and OCI labels
+        run: |
+          set -euo pipefail
+          actual_user="$(docker inspect --format '{{.Config.User}}' "${IMAGE}:${VERSION}")"
+          if [ "${actual_user}" != "10001:10001" ]; then
+            echo "Expected image user 10001:10001, got ${actual_user:-<empty>}" >&2
+            exit 1
+          fi
+          echo "Verified image user: ${actual_user}"
+          source_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "${IMAGE}:${VERSION}")"
+          if [ "${source_label}" != "https://github.com/kirmanak/jumi" ]; then
+            echo "Expected source https://github.com/kirmanak/jumi, got ${source_label:-<empty>}" >&2
+            exit 1
+          fi
+          revision_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${IMAGE}:${VERSION}")"
+          if [ "${revision_label}" != "${GITHUB_SHA}" ]; then
+            echo "Expected revision ${GITHUB_SHA}, got ${revision_label:-<empty>}" >&2
+            exit 1
+          fi
+          echo "Verified OCI source and revision labels"
+
+      - name: Verify reviewer runtime
+        run: |
+          set -euo pipefail
+          if docker run --rm "${IMAGE}:${VERSION}" sh -c 'command -v java >/dev/null 2>&1'; then
+            echo "reviewer image must not ship a JVM" >&2
+            exit 1
+          fi
+          docker run --rm "${IMAGE}:${VERSION}" python3 --version
+          docker run --rm "${IMAGE}:${VERSION}" helm version --short
+          docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/gitops-apply-review/SKILL.md
+          config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}:${VERSION}" sh -c 'cd /work && git init -q && opencode debug config')"
+          printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null
+          echo "Verified python3, helm, gitops-apply-review skill, and opencode debug config"
+
+      - name: Record registry manifest digest
+        run: |
+          set -euo pipefail
+          echo "Pushed ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          # Source of truth for the GitOps pin is the registry manifest Docker-Content-Digest after push.
+
+      - name: Verify anonymous pull
+        run: |
+          set -euo pipefail
+          docker rmi "${IMAGE}:${VERSION}" "${IMAGE}:latest" || true
+          docker logout "${REGISTRY}"
+          docker pull "${IMAGE}:${VERSION}"
+          docker pull "${IMAGE}:latest"
+          echo "Verified anonymous docker pull of ${IMAGE}:${VERSION} with no auth"
