@@ -478,10 +478,10 @@ describe("image labels and no double-build", () => {
     expect(reviewer).toContain("branches: [main]");
     expect(reviewer).not.toContain("type=sha");
     expect(reviewer).not.toContain(":${{ github.sha");
-    const release = await readFile(join(repoRoot, ".gitea/workflows/jumi-release.yml"), "utf8");
+    const release = await readFile(join(repoRoot, ".github/workflows/jumi-release.yml"), "utf8");
     expect(release).toContain("bun src/release.ts publish");
     expect(release).toContain("github.token");
-    expect(release).not.toContain("tags:");
+    expect(release).not.toMatch(/^\s*tags:/m);
   });
 });
 

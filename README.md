@@ -187,7 +187,7 @@ When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs an OpenInfer
 
 ## Image
 
-This repository’s image workflows publish `jumi-reviewer` and `jumi-worker` with tags `latest` and `vX.Y.Z`. Point GitOps at the registry **you** push to. Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A Gitea Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA).
+This repository’s image workflows publish `jumi-reviewer` and `jumi-worker` with tags `latest` and `vX.Y.Z`. Point GitOps at the registry **you** push to. Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A GitHub Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA).
 
 Required repository secrets for `.gitea/workflows/jumi-worker-image.yml`:
 
@@ -295,6 +295,7 @@ bun run server
 .github/
   workflows/
     jumi-reviewer-image.yml  # Reviewer image build/push to GHCR
+    jumi-release.yml         # Annotated vX.Y.Z git tag + GitHub Release
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
   opencode-implement.json    # Implement config (edit/write allow; skills.paths /app/review-skills; blanket skill allow)
@@ -302,7 +303,6 @@ bun run server
   workflows/
     opencode-checks.yml      # PR lint/typecheck/test and image build checks
     jumi-worker-image.yml    # Worker image build/push workflow
-    jumi-release.yml         # Annotated vX.Y.Z git tag + Gitea Release
 deploy/
   contract.md                # GitOps runtime contract (semver source of truth)
 review-skills/
