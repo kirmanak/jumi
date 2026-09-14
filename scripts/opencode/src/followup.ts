@@ -44,7 +44,7 @@ import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } fro
 import { buildTaskMarkdown, type ImplementOptions } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
-import { isQuotaError, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import {
   appendStuckFingerprint,
   evaluateStuck,
@@ -1134,7 +1134,9 @@ export async function implementFollowUp(
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
         });
-        if (result.status === "stuck") {
+        // Gate on the message so a future non-quota `stuck` producer uses the
+        // fingerprint path instead of the human-clear quota flag.
+        if (result.status === "stuck" && isQuotaText(result.message)) {
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);

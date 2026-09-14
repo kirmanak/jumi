@@ -52,7 +52,7 @@ import {
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
-import { isQuotaError, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import {
   appendStuckFingerprint,
   deleteStuckState,
@@ -312,7 +312,9 @@ export async function implementIssue(
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
         });
-        if (result.status === "stuck") {
+        // Gate on the message: only the quota path returns engine `stuck`
+        // today, but a future non-quota producer must not set the quota flag.
+        if (result.status === "stuck" && isQuotaText(result.message)) {
           await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
           await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);

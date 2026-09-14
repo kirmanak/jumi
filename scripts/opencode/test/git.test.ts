@@ -490,10 +490,16 @@ exec sleep 30
     );
   });
 
-  test("aborts while running when stderr shows Free/Go quota", async () => {
+  test("aborts while running when the isolated log shows Free/Go quota", async () => {
+    // Real `opencode run` without --print-logs emits only the banner to
+    // stderr; the quota error only reaches the per-run isolated log file as
+    // `message="stream error"` before the multi-hour sleep. The fake child
+    // reproduces that signal (log line, then sleep) — not a stderr line the
+    // binary never prints.
     await withFakeOpenCode(
       `#!/bin/sh
-printf 'Free usage exceeded, subscribe to Go\\n' >&2
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" providerID=opencode modelID=m error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
 exec sleep 30
 `,
       async (_binDir, workdir) => {
@@ -503,6 +509,7 @@ exec sleep 30
           model: "model",
           workdir,
           sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("stuck");
         expect(result.message).toContain("usage limit exceeded");
@@ -513,10 +520,56 @@ exec sleep 30
     );
   });
 
+  test("aborts on timestamped log rotation layout (1.15.5)", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: FreeUsageLimitError"\\n' >> "$XDG_DATA_HOME/opencode/log/2026-09-14T000000.log"
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const startedAt = Date.now();
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
+        });
+        expect(result.status).toBe("stuck");
+        expect(Date.now() - startedAt).toBeLessThan(20_000);
+      }
+    );
+  });
+
+  test("quota poll is independent of the memory sampler", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="GoUsageLimitError"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const startedAt = Date.now();
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          memorySampleIntervalMs: 0,
+          quotaPollIntervalMs: 50,
+        });
+        expect(result.status).toBe("stuck");
+        expect(Date.now() - startedAt).toBeLessThan(20_000);
+      }
+    );
+  });
+
   test("does not abort on bare usage-limit text without a Free/Go distinguisher", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-printf 'my-model usage limit reached, retry in 5s\\n' >&2
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="my-model usage limit reached, retry in 5s"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -524,16 +577,18 @@ printf 'my-model usage limit reached, retry in 5s\\n' >&2
           model: "model",
           workdir,
           sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("ok");
       }
     );
   });
 
-  test("does not abort on ordinary 429 stderr", async () => {
+  test("does not abort on ordinary 429 log lines", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-printf '429 Too Many Requests\\n' >&2
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: 429 Too Many Requests"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -541,6 +596,47 @@ printf '429 Too Many Requests\\n' >&2
           model: "model",
           workdir,
           sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
+        });
+        expect(result.status).toBe("ok");
+      }
+    );
+  });
+
+  test("does not abort on permission lines echoing quota strings without retry context", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=INFO run=abc message="evaluated permission=bash" pattern="grep FreeUsageLimitError"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
+        });
+        expect(result.status).toBe("ok");
+      }
+    );
+  });
+
+  test("does not abort on stderr tool traces containing quota literals", async () => {
+    // The live signal is the isolated log file, not the stderr stream: any
+    // tool trace or echoed file content containing quota literals must not
+    // kill a healthy run or set the human-clear quota flag.
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'FreeUsageLimitError in tool output\\n' >&2
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("ok");
       }

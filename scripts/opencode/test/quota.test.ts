@@ -1,10 +1,27 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hasQuotaRetryInDb, isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "../src/quota.ts";
-import { isQuotaStuck, markQuotaStuck, readStuckState } from "../src/stuck.ts";
+import {
+  hasQuotaInLogDir,
+  hasQuotaInLogText,
+  hasQuotaRetryInDb,
+  isQuotaError,
+  isQuotaLiveText,
+  isQuotaLogLine,
+  isQuotaText,
+  QUOTA_STUCK_TEXT,
+} from "../src/quota.ts";
+import {
+  cancelReviewWork,
+  clearQuotaStuck,
+  isQuotaStuck,
+  isReviewQuotaStuck,
+  markQuotaStuck,
+  REVIEW_QUOTA_TTL_MS,
+  readStuckState,
+} from "../src/stuck.ts";
 
 describe("isQuotaText", () => {
   test("matches Free/Go quota class", () => {
@@ -216,6 +233,110 @@ describe("quota stuck state", () => {
       const state = await readStuckState(path);
       expect(isQuotaStuck(state)).toBe(true);
       expect(state.quota?.reason).toBe(QUOTA_STUCK_TEXT);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("live quota pattern", () => {
+  test("drops the parent stuck dialect from the stream scan", () => {
+    expect(isQuotaLiveText(QUOTA_STUCK_TEXT)).toBe(false);
+    expect(isQuotaLiveText("FreeUsageLimitError")).toBe(true);
+    expect(isQuotaLiveText("Free usage exceeded, subscribe to Go")).toBe(true);
+    expect(isQuotaLiveText("my-model usage limit reached")).toBe(false);
+    expect(isQuotaLiveText("429 Too Many Requests")).toBe(false);
+  });
+
+  test("requires stream-error retry context in log lines", () => {
+    expect(
+      isQuotaLogLine(
+        'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"'
+      )
+    ).toBe(true);
+    // Permission lines echoing the tool command must not match.
+    expect(
+      isQuotaLogLine(
+        'timestamp=2026-09-14T00:00:00.000Z level=INFO run=abc message="evaluated permission=bash" pattern="grep FreeUsageLimitError"'
+      )
+    ).toBe(false);
+    // Quota string without retry context must not match.
+    expect(isQuotaLogLine("FreeUsageLimitError")).toBe(false);
+    expect(isQuotaLogLine("stream error: 429 Too Many Requests")).toBe(false);
+  });
+
+  test("scans log text line-wise", () => {
+    expect(
+      hasQuotaInLogText(
+        'level=INFO message="evaluated permission=bash" pattern="grep FreeUsageLimitError"\nlevel=ERROR message="stream error" error="FreeUsageLimitError"\n'
+      )
+    ).toBe(true);
+    expect(hasQuotaInLogText('level=INFO pattern="grep FreeUsageLimitError"\n')).toBe(false);
+    expect(hasQuotaInLogText(null)).toBe(false);
+  });
+
+  test("scans the isolated log dir in both layouts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-log-"));
+    try {
+      const logDir = join(dir, "log");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(logDir, { recursive: true });
+      expect(hasQuotaInLogDir(logDir)).toBe(false);
+      expect(hasQuotaInLogDir(join(dir, "missing"))).toBe(false);
+      await writeFile(
+        join(logDir, "opencode.log"),
+        'level=INFO ok\nlevel=ERROR run=abc message="stream error" error="GoUsageLimitError"\n'
+      );
+      expect(hasQuotaInLogDir(logDir)).toBe(true);
+      await rm(join(logDir, "opencode.log"));
+      expect(hasQuotaInLogDir(logDir)).toBe(false);
+      await writeFile(
+        join(logDir, "2026-09-14T000000.log"),
+        'level=ERROR run=abc message="stream error" error="free_tier_limit"\n'
+      );
+      expect(hasQuotaInLogDir(logDir)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reviewer quota TTL", () => {
+  test("expires after the TTL instead of blocking forever", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-review-quota-"));
+    try {
+      const path = join(dir, "37.stuck.json");
+      await markQuotaStuck(path, QUOTA_STUCK_TEXT);
+      const fresh = await readStuckState(path);
+      expect(isReviewQuotaStuck(fresh)).toBe(true);
+      // Worker flag stays permanent.
+      expect(isQuotaStuck(fresh)).toBe(true);
+      const expiredAt = Date.now() + REVIEW_QUOTA_TTL_MS + 1000;
+      expect(isReviewQuotaStuck(fresh, expiredAt)).toBe(false);
+      await clearQuotaStuck(path);
+      const cleared = await readStuckState(path);
+      expect(isReviewQuotaStuck(cleared)).toBe(false);
+      expect(isQuotaStuck(cleared)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("reviewer cancel clears the flag", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-review-cancel-"));
+    try {
+      const home = dir;
+      const { reviewStuckStatePath } = await import("../src/claim.ts");
+      const { writeFile } = await import("node:fs/promises");
+      const { mkdir } = await import("node:fs/promises");
+      const stuckPath = reviewStuckStatePath(home, "o", "r", 37);
+      await mkdir(join(home, "reviewer", "jobs", "o", "r"), { recursive: true });
+      await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT);
+      expect(isReviewQuotaStuck(await readStuckState(stuckPath))).toBe(true);
+      await cancelReviewWork({ home, owner: "o", repo: "r", prNumber: 37 });
+      expect(isReviewQuotaStuck(await readStuckState(stuckPath))).toBe(false);
+      // Idempotent.
+      await writeFile(stuckPath, "junk").catch(() => undefined);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

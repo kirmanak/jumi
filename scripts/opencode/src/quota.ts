@@ -1,15 +1,25 @@
-/** Quota abort: Free/Go usage-limit retry classification. Live abort watches
- * the child stderr stream (see git.ts); this DB check is the post-hoc
- * classifier only. */
+/** Quota abort: Free/Go usage-limit retry classification. Live abort polls
+ * the per-run isolated OpenCode log file (see git.ts); the DB check below is
+ * the post-hoc classifier only.
+ *
+ * Why the log file: pinned OpenCode 1.15.5 keeps retry status in memory
+ * (SessionStatus) and never writes a per-attempt row to the session DB while
+ * sleeping on a multi-hour retry-after, and `opencode run` without
+ * `--print-logs` emits only the `> build · <model>` banner to stderr (0 bytes
+ * on both streams with `--format json`). The fully-formed quota error only
+ * reaches OpenCode's own log file (`llm` service `stream error`, ~170ms after
+ * stream start) before the child sleeps. Tailing that file needs no
+ * `--print-logs`, no transcript dump to Loki, and no Phoenix. */
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 export const QUOTA_STUCK_TEXT = "stuck: usage limit exceeded";
 
 export const QUOTA_MESSAGE = "opencode stuck: usage limit exceeded";
 
-/** Deprecated: live quota abort watches the child stderr stream; no polling. Kept for compat. */
+/** Interval for the live log-file poll (see git.ts). Independent of the RSS sampler. */
 export const QUOTA_POLL_INTERVAL_MS = 5_000;
 
 // Free/Go usage-limit class only. Bare "usage limit reached" is intentionally
@@ -28,6 +38,19 @@ const QUOTA_PATTERNS = [
 export const QUOTA_ERROR_RE =
   /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|stuck:\s*usage limit exceeded/i;
 
+/** Narrow live pattern for stream/log scans. Drops the parent's own
+ * `stuck:` dialect (which OpenCode never emits) so tool traces or echoed file
+ * content containing that literal cannot kill a healthy run. Kept in
+ * `QUOTA_ERROR_RE`/`isQuotaText` for thrown errors and stuck comments. */
+export const QUOTA_LIVE_RE =
+  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit/i;
+
+/** Retry context required around a live match. The quota failure is logged by
+ * the `llm` service as `message="stream error"` with the provider error
+ * inline; permission-evaluation lines that merely echo a tool command
+ * containing a quota string never contain this marker. */
+const LOG_RETRY_RE = /stream error/i;
+
 export function isQuotaText(text: string | null | undefined): boolean {
   if (!text) return false;
   return QUOTA_ERROR_RE.test(text);
@@ -37,6 +60,92 @@ export function isQuotaError(err: unknown): boolean {
   if (!err) return false;
   const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
   return isQuotaText(text);
+}
+
+export function isQuotaLiveText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return QUOTA_LIVE_RE.test(text);
+}
+
+/**
+ * True when a single log line carries a quota failure in retry context:
+ * a `stream error` line containing a Free/Go quota string. Line-scoped so a
+ * permission line echoing `FreeUsageLimitError` from a tool command (no
+ * `stream error` marker) never matches, and the parent's own `stuck:` dialect
+ * (absent from `QUOTA_LIVE_RE`) never matches.
+ */
+export function isQuotaLogLine(line: string | null | undefined): boolean {
+  if (!line) return false;
+  if (!LOG_RETRY_RE.test(line)) return false;
+  return QUOTA_LIVE_RE.test(line);
+}
+
+/**
+ * Scan free-form log text for a quota retry line. Splits into lines so the
+ * retry marker and the quota string must share one log line. Never throws;
+ * tests only the regex, never logs the transcript.
+ */
+export function hasQuotaInLogText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  // Bound the split for pathological single-line blobs; quota lines are
+  // early and short, and the per-run isolated log stays small.
+  const capped = text.length > 10_000_000 ? text.slice(0, 10_000_000) : text;
+  for (const line of capped.split(/\r?\n/)) {
+    if (isQuotaLogLine(line)) return true;
+  }
+  return false;
+}
+
+const MAX_LOG_FILES = 20;
+const MAX_LOG_BYTES_PER_FILE = 10_000_000;
+
+/**
+ * Best-effort live/post-hoc scan of the per-run isolated OpenCode log dir
+ * (`<xdg-data>/opencode/log`, fresh per run so any hit belongs to this
+ * child). Handles both layouts: the single `opencode.log` (1.18.x) and the
+ * timestamped `*.log` rotation (1.15.5, keeps last 10). Returns false when the
+ * dir is missing, empty, or unreadable. Never throws; never logs content.
+ */
+export function hasQuotaInLogDir(logDir: string | null | undefined): boolean {
+  if (!logDir) return false;
+  let entries: string[];
+  try {
+    if (!existsSync(logDir)) return false;
+    entries = readdirSync(logDir);
+  } catch {
+    return false;
+  }
+  let checked = 0;
+  for (const entry of entries) {
+    if (checked >= MAX_LOG_FILES) break;
+    if (entry.startsWith(".")) continue;
+    const abs = join(logDir, entry);
+    let size = 0;
+    try {
+      const st = statSync(abs);
+      if (!st.isFile()) continue;
+      size = st.size;
+      if (size <= 0) continue;
+    } catch {
+      continue;
+    }
+    checked += 1;
+    try {
+      const capped = Math.min(size, MAX_LOG_BYTES_PER_FILE);
+      // Read the whole (capped) file; per-run logs stay small and quota can
+      // sit early (first failure) or late (quota after hours of work).
+      const buf = readFileSync(abs);
+      const text = buf.length > capped ? buf.subarray(0, capped).toString("utf8") : buf.toString("utf8");
+      if (hasQuotaInLogText(text)) return true;
+      // When capped in the middle, also check the tail window so a late quota
+      // line past the head cap still fires.
+      if (buf.length > capped) {
+        const tail = buf.subarray(buf.length - Math.min(buf.length, 1_000_000)).toString("utf8");
+        if (hasQuotaInLogText(tail)) return true;
+      }
+    } catch {}
+  }
+  return false;
 }
 
 function tableNames(db: Database): Set<string> {
@@ -137,10 +246,10 @@ function hasQuotaInOpenDb(db: Database): boolean {
 /**
  * Best-effort post-hoc quota classifier against the per-run OpenCode session
  * DB the parent already knows about (`OPENCODE_DB` under
- * `.jumi-tmp/opencode-session.db`). The live abort signal is the child
- * stderr stream; the pinned OpenCode never persists a per-attempt retry row
- * while it sleeps on a multi-hour retry-after, so this must not be polled as
- * the abort trigger.
+ * `.jumi-tmp/opencode-session.db`). The live abort signal is the per-run
+ * isolated log file (`hasQuotaInLogDir`); the pinned OpenCode never persists
+ * a per-attempt retry row while it sleeps on a multi-hour retry-after, so
+ * this must not be polled as the abort trigger.
  *
  * Returns false when the DB is missing, not yet initialized, locked, or
  * contains no quota/retry record. Never throws.

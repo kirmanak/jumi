@@ -25,7 +25,7 @@ import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } fro
 import { buildTaskMarkdown, type HelmRunner, type ImplementOptions, type OpenCodeRunner } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
-import { isQuotaError, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import {
   appendStuckFingerprint,
   evaluateStuck,
@@ -685,7 +685,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               abortSignal: opts.abortSignal,
               onPid: loop.engineOnPid(opts.onPid),
             });
-            if (continued.status === "stuck") {
+            // Gate on the message so a future non-quota `stuck` producer does
+            // not set the human-clear quota flag.
+            if (continued.status === "stuck" && isQuotaText(continued.message)) {
               await sticky(QUOTA_STUCK_TEXT, pr.number);
               await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
               throw new Error(QUOTA_STUCK_TEXT);
