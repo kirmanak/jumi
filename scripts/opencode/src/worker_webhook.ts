@@ -2,9 +2,9 @@ import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
-  shouldEnqueueIssueCommentFollowUp,
+  shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullAssign,
-  shouldEnqueuePullRejectedFollowUp,
+  shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import {
@@ -29,7 +29,7 @@ export interface WorkerWebhookQueue {
 }
 
 export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "getPR">> & {
+  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "getPR" | "getCollaboratorPermission">> & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -251,8 +251,20 @@ export async function handleWorkerWebhookEvent(
     if (isFollowUpWebhookEvent(event, eventType)) {
       const eventName = event ?? eventType ?? "issue_comment";
       const decision = isPullRequestPayloadFollowUp(event, eventType)
-        ? shouldEnqueuePullRejectedFollowUp(parsePullRejectedPayload(rawBody), policy, eventName)
-        : shouldEnqueueIssueCommentFollowUp(parseIssueCommentPayload(rawBody), policy, eventName);
+        ? await shouldEnqueuePullRejectedFollowUpWithTrust(
+            parsePullRejectedPayload(rawBody),
+            policy,
+            eventName,
+            undefined,
+            deps.api
+          )
+        : await shouldEnqueueIssueCommentFollowUpWithTrust(
+            parseIssueCommentPayload(rawBody),
+            policy,
+            eventName,
+            undefined,
+            deps.api
+          );
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const job: IssueJob = {
         ...decision.job,

@@ -28,6 +28,7 @@ function lastNonEmptyLine(text: string): string {
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   const defaults: ReviewApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getPR: async () => makePR(),
     getPRFiles: async () => [makeFile()],
     getIssue: async () => makeIssue(),

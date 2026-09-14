@@ -3,8 +3,8 @@ import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
-  shouldEnqueueIssueCommentFollowUp,
-  shouldEnqueuePullRejectedFollowUp,
+  shouldEnqueueIssueCommentFollowUpWithTrust,
+  shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import type { ForgeKind } from "./forge.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
@@ -428,8 +428,20 @@ export async function handleGithubWebhookEvent(
       }
       const decision =
         event === "pull_request_review"
-          ? shouldEnqueuePullRejectedFollowUp(parsePullRejectedPayload(rawBody), policy, eventName)
-          : shouldEnqueueIssueCommentFollowUp(parseIssueCommentPayload(commentBody), policy, eventName);
+          ? await shouldEnqueuePullRejectedFollowUpWithTrust(
+              parsePullRejectedPayload(rawBody),
+              policy,
+              eventName,
+              undefined,
+              deps.worker.api
+            )
+          : await shouldEnqueueIssueCommentFollowUpWithTrust(
+              parseIssueCommentPayload(commentBody),
+              policy,
+              eventName,
+              undefined,
+              deps.worker.api
+            );
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
       const result: EnqueueResult = await deps.worker.queue.enqueue(job);

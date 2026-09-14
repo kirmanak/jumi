@@ -901,4 +901,18 @@ describe("GithubAPI", () => {
       authorEmail: "42+kirmanak-jumi[bot]@users.noreply.github.com",
     });
   });
+
+  test("gets collaborator permission for write gating", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json({ permission: "write", role_name: "write", user: { login: "alice" } });
+    }) as unknown as typeof fetch;
+
+    const client = new GithubAPI({ token: "ghs_test" });
+    const info = await client.getCollaboratorPermission("owner", "repo", "alice");
+
+    expect(info.permission).toBe("write");
+    expect(urls[0]).toContain("/repos/owner/repo/collaborators/alice/permission");
+  });
 });

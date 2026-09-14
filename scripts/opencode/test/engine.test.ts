@@ -21,6 +21,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   const statuses: Array<{ sha: string; state: string; description?: string }> = [];
   const defaults: ReviewApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getPR: async () => makePR(),
     getPRFiles: async () => [makeFile()],
     getIssue: async () => makeIssue(),
