@@ -313,6 +313,17 @@ export class GiteaAPI {
     return toRepo(await this.get<GiteaRepo>(`/repos/${this.repoPath(owner, repo)}`));
   }
 
+  async getCollaboratorPermission(
+    owner: string,
+    repo: string,
+    username: string
+  ): Promise<{ permission: string; role_name?: string }> {
+    const info = await this.get<{ permission: string; role_name?: string }>(
+      `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
+    );
+    return { permission: info.permission, role_name: info.role_name };
+  }
+
   // ── Pull Requests ─────────────────────────────────────────────────────────────
 
   async getPR(owner: string, repo: string, index: number): Promise<Pull> {

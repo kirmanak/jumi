@@ -47,6 +47,25 @@ describe("classifyOpenCodeInfra", () => {
   test("tokens exist is a model attempt even when short", () => {
     expect(classifyOpenCodeInfra({ durationMs: 400, dbBefore: null, dbAfter: null, tokensExist: true })).toBe(false);
   });
+
+  test("provider-unavailable is not infra even when short", () => {
+    expect(
+      classifyOpenCodeInfra({
+        durationMs: 400,
+        stderr: "Error: 429 rate limit exceeded",
+        dbBefore: null,
+        dbAfter: null,
+      })
+    ).toBe(false);
+    expect(
+      classifyOpenCodeInfra({
+        durationMs: 400,
+        stderr: "model not found",
+        dbBefore: null,
+        dbAfter: null,
+      })
+    ).toBe(false);
+  });
 });
 
 describe("isInfraFailure", () => {

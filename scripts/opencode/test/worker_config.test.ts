@@ -44,6 +44,17 @@ describe("loadWorkerConfig", () => {
     expect(loadWorkerConfig({ ...required, OPENCODE_VARIANT: "xhigh" }).variant).toBe("xhigh");
   });
 
+  test("OPENCODE_FALLBACK_MODEL and VARIANT are omitted unless set", () => {
+    expect(loadWorkerConfig(required).fallbackModel).toBeUndefined();
+    expect(loadWorkerConfig(required).fallbackVariant).toBeUndefined();
+    expect(loadWorkerConfig({ ...required, OPENCODE_FALLBACK_MODEL: "" }).fallbackModel).toBeUndefined();
+    expect(loadWorkerConfig({ ...required, OPENCODE_FALLBACK_VARIANT: "" }).fallbackVariant).toBeUndefined();
+    expect(
+      loadWorkerConfig({ ...required, OPENCODE_FALLBACK_MODEL: "anthropic/claude-sonnet-4-6" }).fallbackModel
+    ).toBe("anthropic/claude-sonnet-4-6");
+    expect(loadWorkerConfig({ ...required, OPENCODE_FALLBACK_VARIANT: "high" }).fallbackVariant).toBe("high");
+  });
+
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {
     const config = loadWorkerConfig({
       ...required,

@@ -405,6 +405,7 @@ describe("POST /webhooks/github", () => {
           listOpenPulls: async () => [],
           getIssue: async () => githubIssue(),
           getPR: async () => fetched,
+          getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
         },
       },
     });
@@ -450,6 +451,7 @@ describe("POST /webhooks/github", () => {
         api: {
           listOpenPulls: async () => [],
           getIssue: async () => githubIssue(),
+          getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
           getPR: async () => {
             throw new Error("github 502");
           },

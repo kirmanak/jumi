@@ -28,8 +28,8 @@ describe("GithubAPI", () => {
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       urls.push(String(url));
       methods.push(init?.method ?? "GET");
-      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer token-1");
-      expect((init?.headers as Record<string, string>).Accept).toBe("application/vnd.github+json");
+      expect((init?.headers as Record<string, string> | undefined)?.Authorization).toBe("Bearer token-1");
+      expect((init?.headers as Record<string, string> | undefined)?.Accept).toBe("application/vnd.github+json");
       if (String(url).includes("page=1"))
         return Response.json(Array.from({ length: 50 }, () => ({ filename: "a.ts", status: "modified" })));
       if (String(url).includes("page=2")) return Response.json([]);
@@ -799,7 +799,7 @@ describe("GithubAPI", () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       urls.push(String(url));
-      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer ghs_from_auth");
+      expect((init?.headers as Record<string, string> | undefined)?.Authorization).toBe("Bearer ghs_from_auth");
       return Response.json({
         name: "repo",
         full_name: "owner/repo",
@@ -900,5 +900,19 @@ describe("GithubAPI", () => {
       authorName: "kirmanak-jumi[bot]",
       authorEmail: "42+kirmanak-jumi[bot]@users.noreply.github.com",
     });
+  });
+
+  test("gets collaborator permission for write gating", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json({ permission: "write", role_name: "write", user: { login: "alice" } });
+    }) as unknown as typeof fetch;
+
+    const client = new GithubAPI({ token: "ghs_test" });
+    const info = await client.getCollaboratorPermission("owner", "repo", "alice");
+
+    expect(info.permission).toBe("write");
+    expect(urls[0]).toContain("/repos/owner/repo/collaborators/alice/permission");
   });
 });

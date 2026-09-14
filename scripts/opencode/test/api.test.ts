@@ -15,7 +15,7 @@ describe("GiteaAPI", () => {
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       urls.push(String(url));
       methods.push(init?.method ?? "GET");
-      expect((init?.headers as Record<string, string>).Authorization).toBe("token token-1");
+      expect((init?.headers as Record<string, string> | undefined)?.Authorization).toBe("token token-1");
       if (String(url).includes("page=1"))
         return Response.json(Array.from({ length: 50 }, () => ({ filename: "a.ts" })));
       if (String(url).includes("page=2")) return Response.json([]);
@@ -552,5 +552,19 @@ describe("GiteaAPI", () => {
       repo: { full_name: "owner/repo", clone_url: "https://gitea.example.test/owner/repo.git" },
     });
     expect("label" in pull.head).toBe(false);
+  });
+
+  test("gets collaborator permission for write gating", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json({ permission: "write", role_name: "write", user: makeUser({ login: "alice" }) });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const info = await api.getCollaboratorPermission("owner", "repo", "alice");
+
+    expect(info.permission).toBe("write");
+    expect(urls[0]).toContain("/repos/owner/repo/collaborators/alice/permission");
   });
 });

@@ -27,6 +27,7 @@ function jumiCloser(overrides: Parameters<typeof makePR>[0] = {}) {
 function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
   const defaults: IssueApi = {
     getRepo: async () => repo,
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getIssue: async () => makeIssue(),
     getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [],

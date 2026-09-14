@@ -189,11 +189,17 @@ export interface Tracker {
   ): Promise<void>;
 }
 
+export interface CollaboratorPermission {
+  permission: string;
+  role_name?: string;
+}
+
 /** Forge: clone + PR + sticky + status (git host identity). */
 export interface Forge {
   getRepo(owner: string, repo: string): Promise<Repo>;
   getPR(owner: string, repo: string, index: number): Promise<Pull>;
   listOpenPulls(owner: string, repo: string): Promise<Pull[]>;
+  getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
   createPullRequest(
     owner: string,
     repo: string,
@@ -265,6 +271,7 @@ export type IssueApi = Tracker &
     | "listCommitStatuses"
     | "listActionJobs"
     | "getActionJobLogs"
+    | "getCollaboratorPermission"
   >;
 
 export function trackerRefOf(task: { trackerRef?: string; number: number }): string {

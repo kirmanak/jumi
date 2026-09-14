@@ -28,6 +28,7 @@ function lastNonEmptyLine(text: string): string {
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   const defaults: ReviewApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getPR: async () => makePR(),
     getPRFiles: async () => [makeFile()],
     getIssue: async () => makeIssue(),
@@ -633,6 +634,62 @@ describe("reviewPullRequest", () => {
       });
       expect(ran).toBe(2);
       expect(result).toEqual({ status: "posted" });
+    });
+  });
+
+  test("provider-unavailable primary hops once to the fallback model from scratch", async () => {
+    await withWorkspace(async (workspace) => {
+      const calls: Array<{ model: string; continueSession?: boolean; hop?: boolean }> = [];
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        fallbackModel: "anthropic/claude-sonnet-4-6",
+        api: makeApi(),
+        openCodeRunner: async (opts) => {
+          calls.push({ model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+          if (opts.model === "openai/gpt-5.5") {
+            return { status: "exit", exitCode: 1, message: "opencode exited with code 1:\n429 rate limit exceeded" };
+          }
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "posted" });
+      expect(calls).toEqual([
+        { model: "openai/gpt-5.5", continueSession: undefined, hop: undefined },
+        { model: "anthropic/claude-sonnet-4-6", continueSession: false, hop: true },
+      ]);
+    });
+  });
+
+  test("incomplete extras after a fallback hop continue that fallback session", async () => {
+    await withWorkspace(async (workspace) => {
+      const calls: Array<{ model: string; continueSession?: boolean; hop?: boolean }> = [];
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        fallbackModel: "anthropic/claude-sonnet-4-6",
+        api: makeApi(),
+        openCodeRunner: async (opts) => {
+          calls.push({ model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+          if (opts.model === "openai/gpt-5.5") {
+            await mkdir(join(workspace, ".jumi-tmp"), { recursive: true });
+            await writeFile(join(workspace, ".jumi-tmp", "opencode-session.db"), "primary");
+            return { status: "exit", exitCode: 1, message: "model not found" };
+          }
+          if (!opts.continueSession) {
+            await mkdir(join(workspace, ".jumi-tmp"), { recursive: true });
+            await writeFile(join(workspace, ".jumi-tmp", "opencode-session.db"), "fallback");
+            return { status: "ok", stdout: "chat dump" };
+          }
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "posted" });
+      expect(calls).toEqual([
+        { model: "openai/gpt-5.5", continueSession: undefined, hop: undefined },
+        { model: "anthropic/claude-sonnet-4-6", continueSession: false, hop: true },
+        { model: "anthropic/claude-sonnet-4-6", continueSession: true, hop: undefined },
+      ]);
     });
   });
 

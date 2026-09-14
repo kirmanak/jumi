@@ -30,6 +30,7 @@ import {
 import {
   CONFLICT_TIMEOUT_MS,
   MAX_CONFLICT_ROUNDS,
+  type MergeDefaultResult,
   mergeDefaultIntoWorktree,
   readConflictState,
   shouldIncrementRound,
@@ -41,14 +42,18 @@ import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, type ImplementOptions } from "./implement.ts";
-import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
+import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
+import { trustedWriteLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
+import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import {
   appendStuckFingerprint,
   evaluateStuck,
   fingerprintCiChecks,
   fingerprintError,
   fingerprintFollowUpText,
+  isQuotaStuck,
+  markQuotaStuck,
   readStuckState,
   stuckComment,
 } from "./stuck.ts";
@@ -226,12 +231,18 @@ export function isPointerStubBody(body: string | null | undefined): boolean {
   return POINTER_STUB_RE.test(text);
 }
 
-export function isJumiReviewSticky(comment: { body?: string | null }): boolean {
+export function isJumiReviewSticky(
+  comment: { body?: string | null; user?: { login?: string } },
+  botUsername?: string
+): boolean {
   const body = comment.body ?? "";
   if (!body.trim()) return false;
   if (!body.includes(REVIEW_MARKER)) return false;
   if (!hasFailureCheckTrailer(body)) return false;
   if (isJumiWorkerBody(body)) return false;
+  if (typeof botUsername === "string" && botUsername) {
+    if (!loginEquals(comment.user?.login, botUsername)) return false;
+  }
   return Boolean(parseReviewedCommitSha(body));
 }
 
@@ -294,11 +305,12 @@ export interface ReviewFindingMatchOpts {
 }
 
 export function isJumiReviewFinding(
-  comment: { body?: string | null },
+  comment: { body?: string | null; user?: { login?: string } },
   headSha: string,
-  opts: ReviewFindingMatchOpts = {}
+  opts: ReviewFindingMatchOpts = {},
+  botUsername?: string
 ): boolean {
-  if (!isJumiReviewSticky(comment)) return false;
+  if (!isJumiReviewSticky(comment, botUsername)) return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -355,8 +367,10 @@ export function isInScopeFollowUpComment(
   ignoreLogins: readonly string[] = [],
   findingOpts: ReviewFindingMatchOpts = {}
 ): boolean {
+  if (!loginEquals(comment.user?.login, botUsername) && loginInList(comment.user?.login, ignoreLogins)) return false;
   return (
-    isJumiReviewFinding(comment, headSha, findingOpts) || isInScopeHumanComment(comment, botUsername, ignoreLogins)
+    isJumiReviewFinding(comment, headSha, findingOpts, botUsername) ||
+    isInScopeHumanComment(comment, botUsername, ignoreLogins)
   );
 }
 
@@ -434,21 +448,28 @@ export async function collectFollowUpItems(
       return [];
     }),
   ]);
+  const candidateComments = rawComments.filter((comment) =>
+    isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts)
+  );
+  const candidateInlines = rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername, ignoreLogins));
+  const candidateReviews = rawReviews.filter(
+    (review) =>
+      (isRequestChangesReview(review) || isCommentReview(review)) &&
+      isInScopeHumanComment({ body: review.body ?? review.content ?? "", user: review.user }, botUsername, ignoreLogins)
+  );
+  const trusted = await trustedWriteLogins(api, owner, repo, [
+    ...candidateComments.map((comment) => comment.user?.login),
+    ...candidateInlines.map((comment) => comment.user?.login),
+    ...candidateReviews.map((review) => review.user?.login),
+  ]);
+  const isTrusted = (login: string | undefined): boolean =>
+    typeof login === "string" && trusted.has(login.toLowerCase());
+  const isBot = (login: string | undefined): boolean => loginEquals(login, botUsername);
   return {
-    comments: rawComments.filter((comment) =>
-      isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts)
-    ),
-    inlines: rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername, ignoreLogins)),
-    reviews: rawReviews.filter(
-      (review) =>
-        (isRequestChangesReview(review) || isCommentReview(review)) &&
-        isInScopeHumanComment(
-          { body: review.body ?? review.content ?? "", user: review.user },
-          botUsername,
-          ignoreLogins
-        )
-    ),
-    jumiStickies: rawComments.filter(isJumiReviewSticky),
+    comments: candidateComments.filter((comment) => isBot(comment.user?.login) || isTrusted(comment.user?.login)),
+    inlines: candidateInlines.filter((comment) => isTrusted(comment.user?.login)),
+    reviews: candidateReviews.filter((review) => isTrusted(review.user?.login)),
+    jumiStickies: rawComments.filter((comment) => isJumiReviewSticky(comment, botUsername)),
     jumiInlines: rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername)),
     jumiReviews: rawReviews.filter((review) => isJumiFailurePullReview(review, botUsername)),
     jumiFindingReviews: rawReviews.filter((review) =>
@@ -886,7 +907,13 @@ export async function implementFollowUp(
       ? { kind: "ci" as const, hash: ciHash }
       : undefined;
   const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
-  const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints, currentFingerprint);
+  const stuckState = await readStuckState(stuckPath);
+  if (isQuotaStuck(stuckState)) {
+    await sticky(QUOTA_STUCK_TEXT, pr.number);
+    await forgetClaim();
+    return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+  }
+  const stuckReason = evaluateStuck(stuckState.fingerprints, currentFingerprint);
   if (stuckReason) {
     await sticky(stuckComment(stuckReason), pr.number);
     await forgetClaim();
@@ -976,32 +1003,40 @@ export async function implementFollowUp(
         body: currentIssue.body ?? "",
         htmlUrl: currentIssue.html_url,
       };
-      const mergeResult = await mergeDefaultIntoWorktree({
-        git: loop.runConfiguredGit,
-        env: loop.env,
-        worktree,
-        defaultBranch: opts.job.defaultBranch,
-        headRef: branch,
-        job: taskJob,
-        pr,
-        model: opts.model,
-        variant: opts.variant,
-        home: opts.home,
-        sanitizeOpenCodeEnv: sanitizeEnv,
-        extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
-        maxOutputBytes: opts.maxOutputBytes,
-        timeoutMs: conflictTimeoutMs,
-        openCodeRunner: engine,
-        helmRunner: opts.helmRunner,
-        logger: log,
-        abortSignal: opts.abortSignal,
-        jobId: opts.jobId ?? opts.job.delivery,
-        ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
-        onPid: loop.engineOnPid(opts.onPid),
-      }).catch((err: unknown) => {
+      let mergeResult: MergeDefaultResult;
+      try {
+        mergeResult = await mergeDefaultIntoWorktree({
+          git: loop.runConfiguredGit,
+          env: loop.env,
+          worktree,
+          defaultBranch: opts.job.defaultBranch,
+          headRef: branch,
+          job: taskJob,
+          pr,
+          model: opts.model,
+          variant: opts.variant,
+          home: opts.home,
+          sanitizeOpenCodeEnv: sanitizeEnv,
+          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+          maxOutputBytes: opts.maxOutputBytes,
+          timeoutMs: conflictTimeoutMs,
+          openCodeRunner: engine,
+          helmRunner: opts.helmRunner,
+          logger: log,
+          abortSignal: opts.abortSignal,
+          jobId: opts.jobId ?? opts.job.delivery,
+          ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
+          onPid: loop.engineOnPid(opts.onPid),
+        });
+      } catch (err: unknown) {
+        if (isQuotaError(err)) {
+          await sticky(QUOTA_STUCK_TEXT, pr.number);
+          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+        }
         prefixMergeThrew = true;
         throw err;
-      });
+      }
       const persistConflictAttempt = async (result: typeof mergeResult) => {
         if (!shouldIncrementRound(result)) return;
         await writeConflictState(conflictPath, {
@@ -1091,50 +1126,71 @@ export async function implementFollowUp(
       }
       await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
-      const runEngine = async (label: string) => {
+      const runEngine = async (label: string): Promise<{ status: "skipped"; reason: string } | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
         followUpEngineRan = true;
-        throwIfEngineFailed(
-          await engine({
-            model: opts.model,
-            variant: opts.variant,
-            workdir: worktree,
-            home: opts.home,
-            sanitizeEnv,
-            extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
-            timeoutMs,
-            maxOutputBytes: opts.maxOutputBytes,
-            reviewLabel: `${owner}/${repo}#${issueNumber}`,
-            trace: {
-              kind: "follow-up",
-              owner,
-              repo,
-              sha: pr.head.sha,
-              jobId: opts.jobId ?? opts.job.delivery,
-            },
-            logger: log,
-            abortSignal: opts.abortSignal,
-            onPid: loop.engineOnPid(opts.onPid),
-          })
-        );
+        const result = await engine({
+          model: opts.model,
+          variant: opts.variant,
+          workdir: worktree,
+          home: opts.home,
+          sanitizeEnv,
+          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+          timeoutMs,
+          maxOutputBytes: opts.maxOutputBytes,
+          reviewLabel: `${owner}/${repo}#${issueNumber}`,
+          trace: {
+            kind: "follow-up",
+            owner,
+            repo,
+            sha: pr.head.sha,
+            jobId: opts.jobId ?? opts.job.delivery,
+          },
+          logger: log,
+          abortSignal: opts.abortSignal,
+          onPid: loop.engineOnPid(opts.onPid),
+        });
+        // Gate on the message so a future non-quota `stuck` producer uses the
+        // fingerprint path instead of the human-clear quota flag.
+        if (result.status === "stuck" && isQuotaText(result.message)) {
+          await sticky(QUOTA_STUCK_TEXT, pr.number);
+          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+        }
+        throwIfEngineFailed(result);
+        return undefined;
       };
 
-      await runEngine(`Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
+      const quotaFollowUp = await runEngine(
+        `Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`
+      );
+      if (quotaFollowUp) return quotaFollowUp;
 
-      const gate = await gateShipAfterOpenCode({
-        api: opts.api,
-        owner,
-        repo,
-        issueNumber,
-        botUsername: opts.botUsername,
-        snapshot: snapshotFromJob(taskJob),
-        closerPrNumber: pr.number,
-        continueOpenCode: async (issue) => {
-          await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
-          await runEngine(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
-        },
-      });
+      let gate: ShipGate;
+      try {
+        gate = await gateShipAfterOpenCode({
+          api: opts.api,
+          owner,
+          repo,
+          issueNumber,
+          botUsername: opts.botUsername,
+          snapshot: snapshotFromJob(taskJob),
+          closerPrNumber: pr.number,
+          continueOpenCode: async (issue) => {
+            await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+            const quotaContinued = await runEngine(
+              `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`
+            );
+            if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
+          },
+        });
+      } catch (err) {
+        if (isQuotaError(err)) {
+          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+        }
+        throw err;
+      }
       if (gate.action === "skip") {
         return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
       }
@@ -1174,6 +1230,14 @@ export async function implementFollowUp(
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
+      if (isQuotaError(err)) {
+        await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
+        await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        await loop.stopHeartbeat();
+        await loop.forgetSerialized().catch(() => undefined);
+        await loop.detachWorktree();
+        return;
+      }
       await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(
         () => undefined
       );
