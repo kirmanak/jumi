@@ -14,7 +14,7 @@ import {
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
-import { hasQuotaRetryInDb, QUOTA_MESSAGE, QUOTA_POLL_INTERVAL_MS } from "./quota.ts";
+import { hasQuotaRetryInDb, QUOTA_ERROR_RE, QUOTA_MESSAGE } from "./quota.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -216,12 +216,14 @@ async function readStreamLimited(
   stream: ReadableStream<Uint8Array>,
   label: string,
   maxBytes?: number,
-  keep: "head" | "tail" = "head"
+  keep: "head" | "tail" = "head",
+  onChunk?: (text: string) => void
 ): Promise<{ text: string; totalBytes: number }> {
   const chunks: Uint8Array[] = [];
   const state = { capturedBytes: 0 };
   let totalBytes = 0;
   const reader = stream.getReader();
+  const decoder = onChunk ? new TextDecoder() : undefined;
 
   try {
     while (true) {
@@ -229,6 +231,13 @@ async function readStreamLimited(
       if (done) break;
 
       totalBytes += value.byteLength;
+      if (decoder && onChunk) {
+        try {
+          onChunk(decoder.decode(value, { stream: true }));
+        } catch {
+          // Detection is best-effort; capture below still applies.
+        }
+      }
       if (!maxBytes || maxBytes <= 0) {
         chunks.push(value);
         state.capturedBytes += value.byteLength;
@@ -363,40 +372,32 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         : undefined;
 
     // Quota abort: while OpenCode sleeps on a Free/Go usage-limit retry-after
-    // (often hours), the child PID stays alive and RSS goes flat. Poll the
-    // per-run session DB the parent already knows about for the quota/retry
-    // class only (FreeUsageLimitError / GoUsageLimitError / "Free usage
-    // exceeded" and the Go sibling). Ordinary short-window 429s that OpenCode
-    // retries in seconds do not contain these strings and stay retries.
-    // No --print-logs, no transcript dump to Loki, no Phoenix required.
+    // (often hours), the child PID stays alive and RSS goes flat. The pinned
+    // OpenCode keeps retry status in memory (SessionStatus) and never writes
+    // a per-attempt row to the session DB while sleeping, so scan the
+    // already-captured stderr stream incrementally instead of polling the DB.
+    // Match the Free/Go quota class only; ordinary short-window 429s that
+    // OpenCode retries in seconds do not contain these strings and stay
+    // retries. No --print-logs, no transcript dump to Loki, no Phoenix.
     let quotaHit = false;
-    const quotaIntervalMs = opts.quotaPollIntervalMs ?? opts.memorySampleIntervalMs ?? QUOTA_POLL_INTERVAL_MS;
-    const quotaTimer =
-      quotaIntervalMs > 0
-        ? setInterval(() => {
-            if (quotaHit || timedOut || opts.abortSignal?.aborted) return;
-            let hit = false;
-            try {
-              hit = hasQuotaRetryInDb(dbPath);
-            } catch {
-              hit = false;
-            }
-            if (!hit) return;
-            quotaHit = true;
-            logDiagnostic(log, "opencode_quota", {
-              review: opts.reviewLabel,
-              elapsed_ms: Date.now() - trackerStartedAt,
-            });
-            try {
-              proc.kill();
-            } catch {
-              return;
-            }
-          }, quotaIntervalMs)
-        : undefined;
-    if (quotaTimer && typeof quotaTimer === "object" && "unref" in quotaTimer) {
-      (quotaTimer as { unref: () => void }).unref();
-    }
+    let quotaTail = "";
+    const onStderrChunk = (chunkText: string) => {
+      if (quotaHit || timedOut || opts.abortSignal?.aborted) return;
+      quotaTail += stripAnsi(chunkText);
+      // Keep overlap so a quota string split across pipe chunks still matches.
+      if (quotaTail.length > 1024) quotaTail = quotaTail.slice(-1024);
+      if (!QUOTA_ERROR_RE.test(quotaTail)) return;
+      quotaHit = true;
+      logDiagnostic(log, "opencode_quota", {
+        review: opts.reviewLabel,
+        elapsed_ms: Date.now() - trackerStartedAt,
+      });
+      try {
+        proc.kill();
+      } catch {
+        return;
+      }
+    };
 
     // Consume stdout, stderr, and the exit code concurrently.
     // Reading stderr in parallel is required to prevent a deadlock when the
@@ -410,7 +411,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     try {
       [stdoutResult, stderrResult, exitCode] = await Promise.all([
         readStreamLimited(proc.stdout, "opencode output", opts.maxOutputBytes),
-        readStreamLimited(proc.stderr, "opencode stderr", OPENCODE_STDERR_MAX_BYTES, "tail"),
+        readStreamLimited(proc.stderr, "opencode stderr", OPENCODE_STDERR_MAX_BYTES, "tail", onStderrChunk),
         proc.exited,
       ]);
     } catch (err) {
@@ -418,7 +419,6 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     } finally {
       opts.abortSignal?.removeEventListener("abort", onAbort);
       if (timeout) clearTimeout(timeout);
-      if (quotaTimer) clearInterval(quotaTimer);
       finalSample = await finalizeMemoryTracker(tracker, childPid);
     }
 
@@ -437,21 +437,27 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       dbAfter,
       tokensExist,
     });
-    // Final quota check for the race where the retry record landed just
-    // before exit and the poll interval missed it. Best-effort, never throws.
+    // Post-hoc quota classifier: stderr already drove the live abort above.
+    // The checks below only classify outcomes where the live hook missed
+    // (ANSI split across chunks) or the error record landed in the session
+    // DB (e.g. halt persisted assistantMessage.error). Best-effort, never
+    // throws. No transcript is logged; only the regex is tested.
     let quota = quotaHit;
+    if (!quota && stderr && QUOTA_ERROR_RE.test(stderr)) {
+      quota = true;
+    }
     if (!quota) {
       try {
         quota = hasQuotaRetryInDb(dbPath);
       } catch {
         quota = false;
       }
-      if (quota && !quotaHit) {
-        logDiagnostic(log, "opencode_quota", {
-          review: opts.reviewLabel,
-          elapsed_ms: durationMs,
-        });
-      }
+    }
+    if (quota && !quotaHit) {
+      logDiagnostic(log, "opencode_quota", {
+        review: opts.reviewLabel,
+        elapsed_ms: durationMs,
+      });
     }
 
     logDiagnostic(log, "opencode_end", {

@@ -18,6 +18,7 @@ export interface EngineRunOptions {
   maxOutputBytes?: number;
   reviewLabel?: string;
   memorySampleIntervalMs?: number;
+  /** Deprecated: live quota abort watches the child stderr stream; no polling. */
   quotaPollIntervalMs?: number;
   extraEnv?: Record<string, string>;
   abortSignal?: AbortSignal;

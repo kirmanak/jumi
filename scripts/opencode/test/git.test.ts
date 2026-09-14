@@ -490,6 +490,63 @@ exec sleep 30
     );
   });
 
+  test("aborts while running when stderr shows Free/Go quota", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'Free usage exceeded, subscribe to Go\\n' >&2
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const startedAt = Date.now();
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("stuck");
+        expect(result.message).toContain("usage limit exceeded");
+        expect(result.infra).toBe(false);
+        // Live abort: must not wait out the 30s sleep.
+        expect(Date.now() - startedAt).toBeLessThan(20_000);
+      }
+    );
+  });
+
+  test("does not abort on bare usage-limit text without a Free/Go distinguisher", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'my-model usage limit reached, retry in 5s\\n' >&2
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+      }
+    );
+  });
+
+  test("does not abort on ordinary 429 stderr", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf '429 Too Many Requests\\n' >&2
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+      }
+    );
+  });
+
   test("returns timeout when the child traps TERM and exits 0", async () => {
     await withFakeOpenCode(
       `#!/usr/bin/env python3
