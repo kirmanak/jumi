@@ -1,4 +1,4 @@
-/** Write-or-stronger permission bar shared by review ingest and follow-up wake. */
+/** Write-or-stronger permission bar for review ingest. */
 
 export type CollaboratorPermissionResult = {
   permission: string;
@@ -45,32 +45,28 @@ function permissionFromResult(result: CollaboratorPermissionResult | string | un
   return undefined;
 }
 
-/** Single-login check. Fail-closed if the forge cannot say they have write. */
-export async function hasWriteAccess(
-  api: CollaboratorPermissionApi,
-  owner: string,
-  repo: string,
-  login: string | undefined | null
-): Promise<boolean> {
-  const key = loginKey(login);
-  if (!key) return false;
-  const fn = api.getCollaboratorPermission;
-  if (typeof fn !== "function") return false;
-  try {
-    const result = await fn.call(api, owner, repo, login as string);
-    return isWritePermission(permissionFromResult(result));
-  } catch {
-    return false;
-  }
+export interface ResolvePermissionsResult {
+  /** Raw forge permission per lowercased login, fail-closed `"none"` on any lookup failure. */
+  detail: Map<string, string>;
+  /** Distinct logins queried. */
+  lookups: number;
+  /** Lookups that failed (including unavailable API); detail holds `"none"` for each. */
+  failures: number;
+  /** First forge error message (truncated), for server-side warning logs. Not for the prompt. */
+  sampleError?: string;
 }
 
-/** Raw permission string per login, lowercased. Fail-closed entries are `"none"`. */
+/**
+ * Raw permission strings per login, lowercased. Fail-closed entries are `"none"`.
+ * Counts per-login failures so callers can warn when a systemic forge denial
+ * demotes every writer to discussion instead of looking like a thread with no writers.
+ */
 export async function resolvePermissions(
   api: CollaboratorPermissionApi,
   owner: string,
   repo: string,
   logins: Iterable<string | undefined | null>
-): Promise<Map<string, string>> {
+): Promise<ResolvePermissionsResult> {
   const distinct = new Map<string, string>();
   for (const login of logins) {
     const key = loginKey(login);
@@ -83,41 +79,29 @@ export async function resolvePermissions(
   const fn = typeof api.getCollaboratorPermission === "function" ? api.getCollaboratorPermission : undefined;
   if (!fn) {
     for (const key of distinct.keys()) out.set(key, "none");
-    return out;
+    return {
+      detail: out,
+      lookups: distinct.size,
+      failures: distinct.size,
+      ...(distinct.size > 0 ? { sampleError: "collaborator permission API unavailable" } : {}),
+    };
   }
+  const errors: string[] = [];
   await Promise.all(
     [...distinct.entries()].map(async ([key, login]) => {
       try {
         const result = await fn.call(api, owner, repo, login);
         out.set(key, normalizePermission(permissionFromResult(result)));
-      } catch {
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
         out.set(key, "none");
       }
     })
   );
-  return out;
-}
-
-/** Write-access boolean per lowercased login. Fail-closed on any forge error. */
-export async function resolveWriteAccess(
-  api: CollaboratorPermissionApi,
-  owner: string,
-  repo: string,
-  logins: Iterable<string | undefined | null>
-): Promise<Map<string, boolean>> {
-  const permissions = await resolvePermissions(api, owner, repo, logins);
-  const out = new Map<string, boolean>();
-  for (const [key, permission] of permissions) {
-    out.set(key, isWritePermission(permission));
-  }
-  return out;
-}
-
-export function hasWriteForLogin(
-  permissions: ReadonlyMap<string, boolean> | undefined,
-  login: string | undefined | null
-): boolean {
-  const key = loginKey(login);
-  if (!key) return false;
-  return permissions?.get(key) === true;
+  return {
+    detail: out,
+    lookups: distinct.size,
+    failures: errors.length,
+    ...(errors.length > 0 && errors[0] ? { sampleError: errors[0].slice(0, 240) } : {}),
+  };
 }

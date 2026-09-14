@@ -1320,6 +1320,88 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("tags writer comments as product intent and records permission diagnostics", async () => {
+    await withWorkspace(async (workspace) => {
+      let prompt = "";
+      const logs: string[] = [];
+      await reviewPullRequest({
+        ...reviewOptions(workspace),
+        logger: (message: string) => {
+          logs.push(message);
+        },
+        api: makeApi({
+          listIssueComments: async () => [
+            makeComment({
+              id: 10,
+              body: "please handle timeouts",
+              user: makeUser({ login: "alice" }),
+            }),
+            makeComment({
+              id: 11,
+              body: "me too",
+              user: makeUser({ login: "bob" }),
+            }),
+          ],
+          getCollaboratorPermission: async (_owner, _repo, login) => {
+            if (login.toLowerCase() === "alice") return { permission: "write" };
+            return { permission: "read" };
+          },
+        }),
+        openCodeRunner: async (opts) => {
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(prompt).toContain('author="alice"');
+      expect(prompt).toContain('permission="write"');
+      expect(prompt).toContain('intent="product">');
+      expect(prompt).toContain('author="bob"');
+      expect(prompt).toContain('permission="read"');
+      expect(prompt).toContain('intent="discussion">');
+      expect(logs.join("\n")).toContain("event=review_thread");
+      expect(logs.join("\n")).toContain("permission_lookups=2");
+      expect(logs.join("\n")).toContain("permission_failures=0");
+    });
+  });
+
+  test("warns and stays fail-closed when permission lookups fail", async () => {
+    await withWorkspace(async (workspace) => {
+      let prompt = "";
+      const logs: string[] = [];
+      await reviewPullRequest({
+        ...reviewOptions(workspace),
+        logger: (message: string) => {
+          logs.push(message);
+        },
+        api: makeApi({
+          listIssueComments: async () => [
+            makeComment({
+              id: 10,
+              body: "please handle timeouts",
+              user: makeUser({ login: "alice" }),
+            }),
+          ],
+          getCollaboratorPermission: async () => {
+            throw new Error("Gitea API GET /repos/kirmanak/demo/collaborators/alice/permission → 403: forbidden");
+          },
+        }),
+        openCodeRunner: async (opts) => {
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(prompt).toContain('intent="discussion">');
+      expect(prompt).toContain('permission="none"');
+      expect(prompt).not.toContain('intent="product">');
+      expect(logs.join("\n")).toContain("1/1 lookups failed");
+      expect(logs.join("\n")).toContain("permission_failures=1");
+    });
+  });
+
   const matchingContract = `# Deploy contract
 
 ## GitOps

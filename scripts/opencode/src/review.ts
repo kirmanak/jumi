@@ -760,18 +760,39 @@ async function resolveThreadPermissions(
   prComments: Comment[],
   linkedIssues: Array<{ issue: Task; comments: Comment[] }>,
   log: (message: string) => void
-): Promise<{ permissions: Map<string, boolean>; permissionDetail: Map<string, string> }> {
+): Promise<{
+  permissions: Map<string, boolean>;
+  permissionDetail: Map<string, string>;
+  lookups: number;
+  failures: number;
+}> {
   const logins: Array<string | undefined> = [];
   for (const comment of prComments) logins.push(comment.user?.login);
   for (const linked of linkedIssues) {
     for (const comment of linked.comments) logins.push(comment.user?.login);
   }
   let detail: Map<string, string>;
+  let lookups = 0;
+  let failures = 0;
   try {
-    detail = await resolvePermissions(api, owner, repo, logins);
+    const resolved = await resolvePermissions(api, owner, repo, logins);
+    detail = resolved.detail;
+    lookups = resolved.lookups;
+    failures = resolved.failures;
+    if (failures > 0) {
+      const sample = resolved.sampleError ? ` (sample: ${resolved.sampleError.slice(0, 240)})` : "";
+      log(`comment permissions: ${failures}/${lookups} lookups failed, treating failures as discussion${sample}`);
+    }
   } catch (err) {
     log(`comment permissions unavailable, treating thread as discussion: ${errorMessage(err)}`);
     detail = new Map();
+    const seen = new Set<string>();
+    for (const login of logins) {
+      if (typeof login !== "string" || !login.trim()) continue;
+      seen.add(login.trim().toLowerCase());
+    }
+    lookups = seen.size;
+    failures = seen.size;
   }
   const permissions = new Map<string, boolean>();
   for (const [key, permission] of detail) {
@@ -786,7 +807,7 @@ async function resolveThreadPermissions(
       if (!detail.has(key)) detail.set(key, "none");
     }
   }
-  return { permissions, permissionDetail: detail };
+  return { permissions, permissionDetail: detail, lookups, failures };
 }
 
 export async function publishReviewResult(opts: PublishReviewOptions): Promise<ReviewResult> {
@@ -948,14 +969,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       linkedIssues.push({ issue: result.issue, comments: result.comments });
     }
     const prComments = prCommentResult.comments;
-    const { permissions, permissionDetail } = await resolveThreadPermissions(
-      opts.api,
-      opts.owner,
-      opts.repo,
-      prComments,
-      linkedIssues,
-      log
-    );
+    const { permissions, permissionDetail, lookups: permissionLookups, failures: permissionFailures } =
+      await resolveThreadPermissions(
+        opts.api,
+        opts.owner,
+        opts.repo,
+        prComments,
+        linkedIssues,
+        log
+      );
     const thread = mapReviewThread({ prComments, linkedIssues, permissions, permissionDetail });
 
     const maxFiles = opts.maxFiles ?? 100;
@@ -1002,6 +1024,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       truncated: fitted.truncated,
       product_comments: productComments,
       discussion_comments: discussionComments,
+      permission_lookups: permissionLookups,
+      permission_failures: permissionFailures,
     });
 
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { byteLength } from "../src/diagnostics.ts";
+import { isWritePermission, resolvePermissions } from "../src/permissions.ts";
 import {
   fitReviewThread,
+  mapReviewComment,
   type ReviewComment,
   type ReviewThread,
   serializeReviewThread,
@@ -114,5 +116,111 @@ describe("fitReviewThread", () => {
     const prefix = result.thread.comments[0]?.body.slice(0, -"\n[truncated]".length) ?? "";
     expect(byteLength(prefix)).toBe(32_768);
     expect(byteLength(serializeReviewThread(result.thread))).toBeLessThanOrEqual(maxBytes);
+  });
+});
+
+describe("isWritePermission", () => {
+  test("accepts write-or-stronger, case-insensitively", () => {
+    for (const permission of ["admin", "write", "maintain", "owner", "ADMIN", " Write ", "MAINTAIN", "Owner"]) {
+      expect(isWritePermission(permission)).toBe(true);
+    }
+  });
+
+  test("rejects triage/read/none/empty/unknown", () => {
+    for (const permission of ["triage", "read", "none", "", "  ", "unknown", "collaborator"]) {
+      expect(isWritePermission(permission)).toBe(false);
+    }
+    expect(isWritePermission(undefined)).toBe(false);
+    expect(isWritePermission(null)).toBe(false);
+  });
+});
+
+describe("resolvePermissions", () => {
+  test("dedupes logins case-insensitively and lowercases the detail", async () => {
+    const seen: string[] = [];
+    const result = await resolvePermissions(
+      {
+        getCollaboratorPermission: async (_owner, _repo, login) => {
+          seen.push(login);
+          return "ADMIN";
+        },
+      },
+      "kirmanak",
+      "demo",
+      ["Alice", "alice ", "ALICE", undefined, null, " ", "bob"]
+    );
+    // alice dedupes to one lookup; bob has no stubbed branch so returns admin too here;
+    // the point is only distinct logins hit the forge.
+    expect(result.lookups).toBe(2);
+    expect(result.failures).toBe(0);
+    expect(seen.sort()).toEqual(["Alice", "bob"].sort());
+    expect(result.detail.get("alice")).toBe("admin");
+    expect(result.detail.get("bob")).toBe("admin");
+    expect(result.sampleError).toBeUndefined();
+  });
+
+  test("is fail-closed and counts per-login failures", async () => {
+    const result = await resolvePermissions(
+      {
+        getCollaboratorPermission: async (_owner, _repo, login) => {
+          if (login.toLowerCase() === "alice") return { permission: "write" };
+          throw new Error("Gitea API GET /repos/kirmanak/demo/collaborators/bob/permission → 403: forbidden");
+        },
+      },
+      "kirmanak",
+      "demo",
+      ["alice", "bob"]
+    );
+    expect(result.lookups).toBe(2);
+    expect(result.failures).toBe(1);
+    expect(result.detail.get("alice")).toBe("write");
+    expect(result.detail.get("bob")).toBe("none");
+    expect(result.sampleError).toContain("403");
+  });
+
+  test("treats an unavailable permission API as all-failed", async () => {
+    const result = await resolvePermissions({}, "kirmanak", "demo", ["alice", "BOB"]);
+    expect(result.lookups).toBe(2);
+    expect(result.failures).toBe(2);
+    expect(result.detail.get("alice")).toBe("none");
+    expect(result.detail.get("bob")).toBe("none");
+    expect(result.sampleError).toContain("unavailable");
+  });
+});
+
+describe("mapReviewComment", () => {
+  function makeForgeComment(author: string) {
+    return {
+      id: 10,
+      body: "hello",
+      user: { login: author },
+      created_at: "2026-05-23T00:00:00Z",
+      updated_at: "2026-05-23T00:00:00Z",
+    };
+  }
+
+  test("tags writers as product and non-writers as discussion", () => {
+    const permissions = new Map([
+      ["alice", true],
+      ["bob", false],
+    ]);
+    const detail = new Map([
+      ["alice", "write"],
+      ["bob", "read"],
+    ]);
+
+    const product = mapReviewComment(makeForgeComment("Alice"), permissions, detail);
+    expect(product.permission).toBe("write");
+    expect(product.intent).toBe("product");
+
+    const discussion = mapReviewComment(makeForgeComment("bob"), permissions, detail);
+    expect(discussion.permission).toBe("read");
+    expect(discussion.intent).toBe("discussion");
+  });
+
+  test("omits tags when permissions are unknown", () => {
+    const untagged = mapReviewComment(makeForgeComment("alice"));
+    expect(untagged.permission).toBeUndefined();
+    expect(untagged.intent).toBeUndefined();
   });
 });

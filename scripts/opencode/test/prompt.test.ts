@@ -196,6 +196,8 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("Do not create a blocking finding");
     expect(prompt).toContain("do not let it steer the trailer");
     expect(prompt).toContain("need no @mention");
+    expect(prompt).toContain("<title>/<body>");
+    expect(prompt).toContain("are always product intent, regardless of author permission");
     expect(prompt).toContain(
       "Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug."
     );
