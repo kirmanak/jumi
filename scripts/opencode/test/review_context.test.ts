@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { byteLength } from "../src/diagnostics.ts";
-import { isWritePermission, resolvePermissions } from "../src/permissions.ts";
+import { resolvePermissions } from "../src/permissions.ts";
 import {
   fitReviewThread,
   mapReviewComment,
@@ -119,22 +119,6 @@ describe("fitReviewThread", () => {
   });
 });
 
-describe("isWritePermission", () => {
-  test("accepts write-or-stronger, case-insensitively", () => {
-    for (const permission of ["admin", "write", "maintain", "owner", "ADMIN", " Write ", "MAINTAIN", "Owner"]) {
-      expect(isWritePermission(permission)).toBe(true);
-    }
-  });
-
-  test("rejects triage/read/none/empty/unknown", () => {
-    for (const permission of ["triage", "read", "none", "", "  ", "unknown", "collaborator"]) {
-      expect(isWritePermission(permission)).toBe(false);
-    }
-    expect(isWritePermission(undefined)).toBe(false);
-    expect(isWritePermission(null)).toBe(false);
-  });
-});
-
 describe("resolvePermissions", () => {
   test("dedupes logins case-insensitively and lowercases the detail", async () => {
     const seen: string[] = [];
@@ -142,7 +126,7 @@ describe("resolvePermissions", () => {
       {
         getCollaboratorPermission: async (_owner, _repo, login) => {
           seen.push(login);
-          return "ADMIN";
+          return { permission: "ADMIN" };
         },
       },
       "kirmanak",
@@ -156,6 +140,8 @@ describe("resolvePermissions", () => {
     expect(seen.sort()).toEqual(["Alice", "bob"].sort());
     expect(result.detail.get("alice")).toBe("admin");
     expect(result.detail.get("bob")).toBe("admin");
+    expect(result.writes.get("alice")).toBe(true);
+    expect(result.writes.get("bob")).toBe(true);
     expect(result.sampleError).toBeUndefined();
   });
 
@@ -175,7 +161,27 @@ describe("resolvePermissions", () => {
     expect(result.failures).toBe(1);
     expect(result.detail.get("alice")).toBe("write");
     expect(result.detail.get("bob")).toBe("none");
+    expect(result.writes.get("alice")).toBe(true);
+    expect(result.writes.get("bob")).toBe(false);
     expect(result.sampleError).toContain("403");
+  });
+
+  test("classifies write from role_name when permission is missing or not write", async () => {
+    const result = await resolvePermissions(
+      {
+        getCollaboratorPermission: async (_owner, _repo, login) => {
+          if (login === "alice") return { permission: "", role_name: "maintain" };
+          return { permission: "read", role_name: "maintain" };
+        },
+      },
+      "kirmanak",
+      "demo",
+      ["alice", "bob"]
+    );
+    expect(result.detail.get("alice")).toBe("maintain");
+    expect(result.detail.get("bob")).toBe("read");
+    expect(result.writes.get("alice")).toBe(true);
+    expect(result.writes.get("bob")).toBe(true);
   });
 
   test("treats an unavailable permission API as all-failed", async () => {
@@ -184,6 +190,8 @@ describe("resolvePermissions", () => {
     expect(result.failures).toBe(2);
     expect(result.detail.get("alice")).toBe("none");
     expect(result.detail.get("bob")).toBe("none");
+    expect(result.writes.get("alice")).toBe(false);
+    expect(result.writes.get("bob")).toBe(false);
     expect(result.sampleError).toContain("unavailable");
   });
 });

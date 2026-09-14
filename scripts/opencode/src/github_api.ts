@@ -636,11 +636,7 @@ export class GithubAPI {
     return toRepo(await this.get<GithubRepo>(`/repos/${this.repoPath(owner, repo)}`));
   }
 
-  async getCollaboratorPermission(
-    owner: string,
-    repo: string,
-    username: string
-  ): Promise<{ permission: string; role_name?: string }> {
+  async getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission> {
     const info = await this.get<{ permission: string; role_name?: string }>(
       `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
     );
@@ -917,16 +913,6 @@ export class GithubAPI {
 
   async getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string> {
     return this.requestText(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/logs`);
-  }
-
-  async getCollaboratorPermission(owner: string, repo: string, login: string): Promise<CollaboratorPermission> {
-    const data = await this.get<{ permission?: string; role_name?: string }>(
-      `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(login)}/permission`
-    );
-    return {
-      permission: data.permission ?? data.role_name ?? "none",
-      ...(data.role_name ? { roleName: data.role_name } : {}),
-    };
   }
 
   private async listReviewThreads(owner: string, repo: string, number: number): Promise<ReviewThreadNode[]> {

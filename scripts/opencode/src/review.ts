@@ -6,7 +6,7 @@ import { withModelHop } from "./fallback.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { isInfraFailure } from "./infra.ts";
-import { isWritePermission, resolvePermissions } from "./permissions.ts";
+import { resolvePermissions } from "./permissions.ts";
 import type {
   CheckPayload,
   Comment,
@@ -781,11 +781,13 @@ async function resolveThreadPermissions(
     for (const comment of linked.comments) logins.push(comment.user?.login);
   }
   let detail: Map<string, string>;
+  let writes: Map<string, boolean>;
   let lookups = 0;
   let failures = 0;
   try {
     const resolved = await resolvePermissions(api, owner, repo, logins);
     detail = resolved.detail;
+    writes = resolved.writes;
     lookups = resolved.lookups;
     failures = resolved.failures;
     if (failures > 0) {
@@ -795,6 +797,7 @@ async function resolveThreadPermissions(
   } catch (err) {
     log(`comment permissions unavailable, treating thread as discussion: ${errorMessage(err)}`);
     detail = new Map();
+    writes = new Map();
     const seen = new Set<string>();
     for (const login of logins) {
       if (typeof login !== "string" || !login.trim()) continue;
@@ -803,10 +806,7 @@ async function resolveThreadPermissions(
     lookups = seen.size;
     failures = seen.size;
   }
-  const permissions = new Map<string, boolean>();
-  for (const [key, permission] of detail) {
-    permissions.set(key, isWritePermission(permission));
-  }
+  const permissions = new Map<string, boolean>(writes);
   // Fail-closed for logins the forge could not report: missing entries are discussion.
   for (const login of logins) {
     if (typeof login !== "string" || !login.trim()) continue;
@@ -999,15 +999,12 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       linkedIssues.push({ issue: result.issue, comments: result.comments });
     }
     const prComments = prCommentResult.comments;
-    const { permissions, permissionDetail, lookups: permissionLookups, failures: permissionFailures } =
-      await resolveThreadPermissions(
-        opts.api,
-        opts.owner,
-        opts.repo,
-        prComments,
-        linkedIssues,
-        log
-      );
+    const {
+      permissions,
+      permissionDetail,
+      lookups: permissionLookups,
+      failures: permissionFailures,
+    } = await resolveThreadPermissions(opts.api, opts.owner, opts.repo, prComments, linkedIssues, log);
     const thread = mapReviewThread({ prComments, linkedIssues, permissions, permissionDetail });
 
     const maxFiles = opts.maxFiles ?? 100;

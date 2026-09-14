@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { hasWriteAccess, hasWritePermission, trustedWriteLogins } from "../src/permissions.ts";
+import {
+  hasWriteAccess,
+  hasWriteAccessFromPermission,
+  hasWritePermission,
+  trustedWriteLogins,
+} from "../src/permissions.ts";
 
 describe("hasWritePermission", () => {
   test("allows write, admin, owner, and maintain/push role names", () => {
@@ -15,11 +20,26 @@ describe("hasWritePermission", () => {
   test("denies read, triage, none, and unknown", () => {
     expect(hasWritePermission("read")).toBe(false);
     expect(hasWritePermission("none")).toBe(false);
+    expect(hasWritePermission("maintain")).toBe(false);
     expect(hasWritePermission("read", "triage")).toBe(false);
     expect(hasWritePermission("read", "read")).toBe(false);
     expect(hasWritePermission(undefined)).toBe(false);
     expect(hasWritePermission("", "")).toBe(false);
     expect(hasWritePermission("custom", "custom")).toBe(false);
+  });
+});
+
+describe("hasWriteAccessFromPermission", () => {
+  test("uses permission and role_name, not roleName", () => {
+    expect(hasWriteAccessFromPermission({ permission: "write", role_name: "maintain" })).toBe(true);
+    expect(hasWriteAccessFromPermission({ permission: "read", role_name: "maintain" })).toBe(true);
+    expect(hasWriteAccessFromPermission({ permission: "", role_name: "maintain" })).toBe(true);
+    expect(hasWriteAccessFromPermission({ permission: "maintain" })).toBe(false);
+    expect(hasWriteAccessFromPermission({ permission: "read" })).toBe(false);
+    expect(hasWriteAccessFromPermission({ permission: "read", roleName: "maintain" } as { permission: string })).toBe(
+      false
+    );
+    expect(hasWriteAccessFromPermission(undefined)).toBe(false);
   });
 });
 

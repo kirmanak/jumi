@@ -1423,6 +1423,33 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("tags maintain role_name as product intent even when permission is not write", async () => {
+    await withWorkspace(async (workspace) => {
+      let prompt = "";
+      await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          listIssueComments: async () => [
+            makeComment({
+              id: 10,
+              body: "please handle timeouts",
+              user: makeUser({ login: "alice" }),
+            }),
+          ],
+          getCollaboratorPermission: async () => ({ permission: "read", role_name: "maintain" }),
+        }),
+        openCodeRunner: async (opts) => {
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(prompt).toContain('permission="read"');
+      expect(prompt).toContain('intent="product">');
+    });
+  });
+
   test("warns and stays fail-closed when permission lookups fail", async () => {
     await withWorkspace(async (workspace) => {
       let prompt = "";
