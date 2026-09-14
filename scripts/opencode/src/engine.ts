@@ -27,6 +27,7 @@ export interface EngineRunOptions {
   trace?: TraceContext;
   prompt?: string;
   continueSession?: boolean;
+  hop?: boolean;
 }
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";

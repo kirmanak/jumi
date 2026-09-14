@@ -28,8 +28,8 @@ describe("GithubAPI", () => {
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       urls.push(String(url));
       methods.push(init?.method ?? "GET");
-      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer token-1");
-      expect((init?.headers as Record<string, string>).Accept).toBe("application/vnd.github+json");
+      expect((init?.headers as Record<string, string> | undefined)?.Authorization).toBe("Bearer token-1");
+      expect((init?.headers as Record<string, string> | undefined)?.Accept).toBe("application/vnd.github+json");
       if (String(url).includes("page=1"))
         return Response.json(Array.from({ length: 50 }, () => ({ filename: "a.ts", status: "modified" })));
       if (String(url).includes("page=2")) return Response.json([]);
@@ -799,7 +799,7 @@ describe("GithubAPI", () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       urls.push(String(url));
-      expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer ghs_from_auth");
+      expect((init?.headers as Record<string, string> | undefined)?.Authorization).toBe("Bearer ghs_from_auth");
       return Response.json({
         name: "repo",
         full_name: "owner/repo",

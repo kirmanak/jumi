@@ -330,6 +330,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     review: opts.reviewLabel,
     model: opts.model,
     variant: opts.variant ?? null,
+    hop: opts.hop === true ? true : undefined,
     prompt_bytes: promptBytes,
     prompt_bytes_h: formatBytes(promptBytes),
     opencode_db: dbPath,
@@ -520,6 +521,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
 
     logDiagnostic(log, "opencode_end", {
       review: opts.reviewLabel,
+      model: opts.model,
+      hop: opts.hop === true ? true : undefined,
       exit_code: exitCode,
       duration_ms: Date.now() - tracker.startedAtMs,
       samples: tracker.samples,

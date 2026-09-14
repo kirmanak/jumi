@@ -15,7 +15,7 @@ describe("GiteaAPI", () => {
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
       urls.push(String(url));
       methods.push(init?.method ?? "GET");
-      expect((init?.headers as Record<string, string>).Authorization).toBe("token token-1");
+      expect((init?.headers as Record<string, string> | undefined)?.Authorization).toBe("token token-1");
       if (String(url).includes("page=1"))
         return Response.json(Array.from({ length: 50 }, () => ({ filename: "a.ts" })));
       if (String(url).includes("page=2")) return Response.json([]);

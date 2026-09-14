@@ -455,22 +455,13 @@ export async function collectFollowUpItems(
   const candidateReviews = rawReviews.filter(
     (review) =>
       (isRequestChangesReview(review) || isCommentReview(review)) &&
-      isInScopeHumanComment(
-        { body: review.body ?? review.content ?? "", user: review.user },
-        botUsername,
-        ignoreLogins
-      )
+      isInScopeHumanComment({ body: review.body ?? review.content ?? "", user: review.user }, botUsername, ignoreLogins)
   );
-  const trusted = await trustedWriteLogins(
-    api,
-    owner,
-    repo,
-    [
-      ...candidateComments.map((comment) => comment.user?.login),
-      ...candidateInlines.map((comment) => comment.user?.login),
-      ...candidateReviews.map((review) => review.user?.login),
-    ]
-  );
+  const trusted = await trustedWriteLogins(api, owner, repo, [
+    ...candidateComments.map((comment) => comment.user?.login),
+    ...candidateInlines.map((comment) => comment.user?.login),
+    ...candidateReviews.map((review) => review.user?.login),
+  ]);
   const isTrusted = (login: string | undefined): boolean =>
     typeof login === "string" && trusted.has(login.toLowerCase());
   const isBot = (login: string | undefined): boolean => loginEquals(login, botUsername);
