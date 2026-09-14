@@ -11,6 +11,7 @@ concurrency:
 
 jobs:
   image:
+    if: github.repository == 'kirmanak/jumi'
     # GitHub-hosted runner with Docker Buildx.
     runs-on: ubuntu-latest
     permissions:
@@ -64,6 +65,8 @@ jobs:
           target: worker
           platforms: linux/amd64
           load: true
+          provenance: false
+          sbom: false
           tags: jumi-worker:test
           build-args: |
             BUN_VERSION=${{ env.BUN_VERSION }}
@@ -149,6 +152,7 @@ jobs:
           echo "Verified OCI labels"
 
       - name: Build and push worker image
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -156,6 +160,8 @@ jobs:
           target: worker
           platforms: linux/amd64
           push: true
+          provenance: false
+          sbom: false
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ env.VERSION }}
@@ -170,3 +176,19 @@ jobs:
             org.opencontainers.image.source=https://github.com/kirmanak/jumi
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Record registry manifest digest
+        run: |
+          set -euo pipefail
+          echo "Pushed ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          # Source of truth for the GitOps pin is the registry manifest Docker-Content-Digest after push.
+
+      - name: Verify anonymous pull
+        run: |
+          set -euo pipefail
+          docker rmi "${IMAGE}:${VERSION}" "${IMAGE}:latest" || true
+          docker logout "${REGISTRY}"
+          docker pull "${IMAGE}:${VERSION}"
+          docker pull "${IMAGE}:latest"
+          echo "Verified anonymous docker pull of ${IMAGE}:${VERSION} with no auth"

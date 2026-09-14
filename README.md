@@ -197,7 +197,7 @@ Required repository variables:
 
 | Name | Description |
 |------|-------------|
-| `CONTAINER_REGISTRY_USER` | User that can push packages |
+| `CONTAINER_REGISTRY_USER` | Only needed for manual `bash .gitea/scripts/build-*.sh` pushes |
 
 Pull requests run the same lint/typecheck/test gate and build the image without publishing it.
 
