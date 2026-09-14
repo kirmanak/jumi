@@ -83,6 +83,7 @@ function makeApi(
   const commentIndexes: number[] = [];
   const defaults: IssueApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getIssue: async () => makeIssue(),
     getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [jumiPr()],
@@ -3281,5 +3282,54 @@ describe("needsFollowUp", () => {
         })
       ).toBe(false);
     });
+  });
+
+  test("excludes outsider comments without write access from feedback", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+        makeComment({ id: 56, body: "outsider drive-by", user: makeUser({ login: "mallory" }) }),
+      ],
+      getCollaboratorPermission: async (_owner, _repo, username) =>
+        username.toLowerCase() === "alice"
+          ? { permission: "write", role_name: "write" }
+          : { permission: "read", role_name: "read" },
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
+    expect(items.comments.map((comment) => comment.id)).toEqual([55]);
+  });
+
+  test("trusted wake does not pull outsider reviews or inlines", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({ id: 1, body: "please change this", state: "REQUEST_CHANGES", user: makeUser({ login: "alice" }) }),
+        makeReview({ id: 2, body: "outsider nit", state: "COMMENT", user: makeUser({ login: "mallory" }) }),
+      ],
+      listPullReviewComments: async () => [
+        makeComment({ id: 11, body: "trusted inline", user: makeUser({ login: "alice" }) }),
+        makeComment({ id: 12, body: "outsider inline", user: makeUser({ login: "mallory" }) }),
+      ],
+      getCollaboratorPermission: async (_owner, _repo, username) =>
+        username.toLowerCase() === "alice"
+          ? { permission: "write", role_name: "write" }
+          : { permission: "read", role_name: "read" },
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
+    expect(items.reviews.map((review) => review.id)).toEqual([1]);
+    expect(items.inlines.map((comment) => comment.id)).toEqual([11]);
+  });
+
+  test("collect is fail-closed when permission lookup throws", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+      ],
+      getCollaboratorPermission: async () => {
+        throw new Error("forge 500");
+      },
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
+    expect(items.comments).toEqual([]);
   });
 });

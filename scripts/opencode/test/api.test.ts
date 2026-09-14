@@ -553,4 +553,18 @@ describe("GiteaAPI", () => {
     });
     expect("label" in pull.head).toBe(false);
   });
+
+  test("gets collaborator permission for write gating", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json({ permission: "write", role_name: "write", user: makeUser({ login: "alice" }) });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const info = await api.getCollaboratorPermission("owner", "repo", "alice");
+
+    expect(info.permission).toBe("write");
+    expect(urls[0]).toContain("/repos/owner/repo/collaborators/alice/permission");
+  });
 });

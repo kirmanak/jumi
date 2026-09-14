@@ -42,6 +42,7 @@ import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, type ImplementOptions } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
+import { trustedWriteLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
   appendStuckFingerprint,
@@ -434,20 +435,35 @@ export async function collectFollowUpItems(
       return [];
     }),
   ]);
+  const candidateComments = rawComments.filter((comment) =>
+    isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts)
+  );
+  const candidateInlines = rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername, ignoreLogins));
+  const candidateReviews = rawReviews.filter(
+    (review) =>
+      (isRequestChangesReview(review) || isCommentReview(review)) &&
+      isInScopeHumanComment(
+        { body: review.body ?? review.content ?? "", user: review.user },
+        botUsername,
+        ignoreLogins
+      )
+  );
+  const trusted = await trustedWriteLogins(
+    api,
+    owner,
+    repo,
+    [
+      ...candidateComments.map((comment) => comment.user?.login),
+      ...candidateInlines.map((comment) => comment.user?.login),
+      ...candidateReviews.map((review) => review.user?.login),
+    ]
+  );
+  const isTrusted = (login: string | undefined): boolean =>
+    typeof login === "string" && trusted.has(login.toLowerCase());
   return {
-    comments: rawComments.filter((comment) =>
-      isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts)
-    ),
-    inlines: rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername, ignoreLogins)),
-    reviews: rawReviews.filter(
-      (review) =>
-        (isRequestChangesReview(review) || isCommentReview(review)) &&
-        isInScopeHumanComment(
-          { body: review.body ?? review.content ?? "", user: review.user },
-          botUsername,
-          ignoreLogins
-        )
-    ),
+    comments: candidateComments.filter((comment) => isTrusted(comment.user?.login)),
+    inlines: candidateInlines.filter((comment) => isTrusted(comment.user?.login)),
+    reviews: candidateReviews.filter((review) => isTrusted(review.user?.login)),
     jumiStickies: rawComments.filter(isJumiReviewSticky),
     jumiInlines: rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername)),
     jumiReviews: rawReviews.filter((review) => isJumiFailurePullReview(review, botUsername)),

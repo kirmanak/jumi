@@ -307,6 +307,9 @@ describe("createFetchHandler router mailbox", () => {
       },
       listOpenPulls: async () => [jumiPr()],
       getIssue: async () => makeIssue(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getRepo: async () => makeRepo(),
+      getPR: async (_owner: string, _repo: string, index: number) => makePR({ number: index }),
     };
   }
 

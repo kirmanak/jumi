@@ -1,10 +1,11 @@
 import { hasLabel, type IssueAssignees, type PickupPolicy } from "./assignee.ts";
 import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_webhook.ts";
+import { hasWriteAccess } from "./permissions.ts";
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
-  shouldEnqueueIssueCommentFollowUp,
-  shouldEnqueuePullRejectedFollowUp,
+  shouldEnqueueIssueCommentFollowUpWithTrust,
+  shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import type { ForgeKind } from "./forge.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
@@ -417,6 +418,13 @@ export async function handleGithubWebhookEvent(
       if (isIgnoredFollowupSender(githubSender, policy.followupIgnoreLogins)) {
         return skipped("sender ignored", logger);
       }
+      if (isObject(parsed) && isObject(parsed.repository) && typeof parsed.repository.full_name === "string") {
+        const [permOwner, permRepo] = (parsed.repository.full_name as string).split("/");
+        if (permOwner && permRepo) {
+          const trusted = await hasWriteAccess(deps.worker.api, permOwner, permRepo, githubSender?.login);
+          if (!trusted) return skipped("sender lacks write access", logger);
+        }
+      }
       const eventName = event ?? "issue_comment";
       let commentBody = rawBody;
       if (event === "pull_request_review_comment") commentBody = issueCommentBody(rawBody);
@@ -427,8 +435,20 @@ export async function handleGithubWebhookEvent(
       }
       const decision =
         event === "pull_request_review"
-          ? shouldEnqueuePullRejectedFollowUp(parsePullRejectedPayload(rawBody), policy, eventName)
-          : shouldEnqueueIssueCommentFollowUp(parseIssueCommentPayload(commentBody), policy, eventName);
+          ? await shouldEnqueuePullRejectedFollowUpWithTrust(
+              parsePullRejectedPayload(rawBody),
+              policy,
+              eventName,
+              undefined,
+              deps.worker.api
+            )
+          : await shouldEnqueueIssueCommentFollowUpWithTrust(
+              parseIssueCommentPayload(commentBody),
+              policy,
+              eventName,
+              undefined,
+              deps.worker.api
+            );
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
       const result: EnqueueResult = await deps.worker.queue.enqueue(job);
