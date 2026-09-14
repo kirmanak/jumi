@@ -40,12 +40,7 @@ describe("hasWriteAccess", () => {
       )
     ).toBe(false);
     expect(
-      await hasWriteAccess(
-        { getCollaboratorPermission: async () => ({ permission: "write" }) },
-        "o",
-        "r",
-        undefined
-      )
+      await hasWriteAccess({ getCollaboratorPermission: async () => ({ permission: "write" }) }, "o", "r", undefined)
     ).toBe(false);
   });
 
