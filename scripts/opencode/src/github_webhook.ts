@@ -120,10 +120,7 @@ export function isGithubBotSender(sender: { login?: string; type?: string } | un
   return /\[bot\]$/i.test(sender.login ?? "");
 }
 
-export function isFactoryBotSender(
-  sender: { login?: string } | undefined,
-  botUsername: string
-): boolean {
+export function isFactoryBotSender(sender: { login?: string } | undefined, botUsername: string): boolean {
   if (!sender?.login) return false;
   return sender.login.toLowerCase() === botUsername.toLowerCase();
 }

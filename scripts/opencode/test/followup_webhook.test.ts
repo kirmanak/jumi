@@ -859,9 +859,15 @@ describe("follow-up write gating", () => {
       );
       expect(decision.type).toBe("enqueue");
     }
-    const maintain = await shouldEnqueueIssueCommentFollowUpWithTrust(makeIssueCommentPayload(), policy, "issue_comment", undefined, {
-      getCollaboratorPermission: async () => ({ permission: "write", role_name: "maintain" }),
-    });
+    const maintain = await shouldEnqueueIssueCommentFollowUpWithTrust(
+      makeIssueCommentPayload(),
+      policy,
+      "issue_comment",
+      undefined,
+      {
+        getCollaboratorPermission: async () => ({ permission: "write", role_name: "maintain" }),
+      }
+    );
     expect(maintain.type).toBe("enqueue");
   });
 
@@ -876,9 +882,15 @@ describe("follow-up write gating", () => {
       );
       expect(decision).toEqual({ type: "skip", reason: "sender lacks write access" });
     }
-    const triage = await shouldEnqueueIssueCommentFollowUpWithTrust(makeIssueCommentPayload(), policy, "issue_comment", undefined, {
-      getCollaboratorPermission: async () => ({ permission: "read", role_name: "triage" }),
-    });
+    const triage = await shouldEnqueueIssueCommentFollowUpWithTrust(
+      makeIssueCommentPayload(),
+      policy,
+      "issue_comment",
+      undefined,
+      {
+        getCollaboratorPermission: async () => ({ permission: "read", role_name: "triage" }),
+      }
+    );
     expect(triage).toEqual({ type: "skip", reason: "sender lacks write access" });
     expect(
       await shouldEnqueueIssueCommentFollowUpWithTrust(makeIssueCommentPayload(), policy, "issue_comment")
