@@ -39,15 +39,20 @@ export function isProviderUnavailableResult(result: EngineResult): boolean {
   if (result.status !== "exit") return false;
   if (result.infra === true) return false;
   if (result.exitCode === 143) return false;
-  return looksLikeProviderUnavailable([result.message, result.stdout].filter(Boolean).join("\n"));
+  return looksLikeProviderUnavailable(result.message ?? "");
 }
 
 export function openCodeSessionDbPath(workdir: string): string {
   return join(workdir, ".jumi-tmp", OPENCODE_SESSION_DB);
 }
 
+export function openCodeLogDirPath(workdir: string): string {
+  return join(workdir, ".jumi-tmp", "xdg-data", "opencode", "log");
+}
+
 export async function clearOpenCodeSession(workdir: string): Promise<void> {
   await rm(openCodeSessionDbPath(workdir), { force: true });
+  await rm(openCodeLogDirPath(workdir), { recursive: true, force: true });
 }
 
 async function remainingCoversTimeout(hop: ModelHopOptions, timeoutMs: number | undefined): Promise<boolean> {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Engine, EngineFailedError, type EngineResult } from "../src/engine.ts";
@@ -7,10 +7,12 @@ import {
   clearOpenCodeSession,
   isProviderUnavailableResult,
   looksLikeProviderUnavailable,
+  openCodeLogDirPath,
   openCodeSessionDbPath,
   shouldHopInsteadOfQuotaStuck,
   withModelHop,
 } from "../src/fallback.ts";
+import { runOpenCode } from "../src/git.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
 
 const unavailable: EngineResult = {
@@ -54,6 +56,14 @@ describe("isProviderUnavailableResult", () => {
       false
     );
     expect(isProviderUnavailableResult({ ...unavailable, infra: true })).toBe(false);
+    expect(
+      isProviderUnavailableResult({
+        status: "exit",
+        exitCode: 1,
+        stdout: "429 rate limit exceeded",
+        message: "opencode exited with code 1",
+      })
+    ).toBe(false);
   });
 });
 
@@ -119,12 +129,20 @@ describe("withModelHop", () => {
   });
 
   test("does not hop on infra, timeout, 143, abort, or continueSession extras", async () => {
-    const cases: Array<{ result?: EngineResult; error?: Error; opts?: { continueSession?: boolean } }> = [
+    const abortErr = new Error("cancelled");
+    abortErr.name = "AbortError";
+    const cases: Array<{
+      result?: EngineResult;
+      error?: Error;
+      opts?: { continueSession?: boolean; abortSignal?: AbortSignal };
+    }> = [
       { result: { status: "timeout", message: "429 rate limit exceeded" } },
       { result: { status: "exit", exitCode: 143, message: "429 rate limit exceeded" } },
       { result: { status: "exit", exitCode: 1, message: "EACCES: mkdir", infra: true } },
       { error: new EngineFailedError("missing API key", true) },
       { result: unavailable, opts: { continueSession: true } },
+      { result: unavailable, opts: { abortSignal: AbortSignal.abort() } },
+      { error: abortErr },
     ];
     for (const entry of cases) {
       let n = 0;
@@ -141,6 +159,26 @@ describe("withModelHop", () => {
       }
       expect(n).toBe(1);
     }
+  });
+
+  test("does not hop when only stdout quotes a provider-unavailable string", async () => {
+    const models: string[] = [];
+    const stdoutHit: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      stdout: "429 rate limit exceeded",
+      message: "opencode exited with code 1",
+    };
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      return stdoutHit;
+    };
+    const result = await withModelHop(engine, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
+      model: "openai/gpt-5.5",
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(stdoutHit);
+    expect(models).toEqual(["openai/gpt-5.5"]);
   });
 
   test("skips hop when lease extend fails", async () => {
@@ -271,6 +309,35 @@ describe("withModelHop", () => {
     ]);
   });
 
+  test("hop does not classify leftover primary quota logs as fallback stuck", async () => {
+    const originalPath = process.env.PATH;
+    const binDir = await mkdtemp(join(tmpdir(), "jumi-hop-bin-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-hop-work-"));
+    try {
+      await writeFile(join(binDir, "opencode"), "#!/bin/sh\nprintf 'ok\\n'\n");
+      await chmod(join(binDir, "opencode"), 0o755);
+      process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+      const logDir = openCodeLogDirPath(workdir);
+      await mkdir(logDir, { recursive: true });
+      await writeFile(
+        join(logDir, "opencode.log"),
+        'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: FreeUsageLimitError"\n'
+      );
+      const result = await withModelHop(runOpenCode, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
+        model: "opencode/big-pickle",
+        workdir,
+        sanitizeEnv: true,
+        quotaPollIntervalMs: 0,
+      });
+      expect(result.status).toBe("ok");
+      expect(result.stdout).toContain("ok");
+    } finally {
+      process.env.PATH = originalPath;
+      await rm(binDir, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
   test("quota stuck does not hop when fallback is the same provider", async () => {
     const quotaStuck: EngineResult = { status: "stuck", message: QUOTA_MESSAGE };
     const models: string[] = [];
@@ -288,13 +355,16 @@ describe("withModelHop", () => {
 });
 
 describe("clearOpenCodeSession", () => {
-  test("removes the session db", async () => {
+  test("removes the session db and isolated log dir", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-session-"));
     try {
-      await mkdir(join(dir, ".jumi-tmp"), { recursive: true });
+      const logDir = openCodeLogDirPath(dir);
+      await mkdir(logDir, { recursive: true });
       await writeFile(openCodeSessionDbPath(dir), "db");
+      await writeFile(join(logDir, "opencode.log"), 'message="stream error" error="FreeUsageLimitError"\n');
       await clearOpenCodeSession(dir);
       expect(await Bun.file(openCodeSessionDbPath(dir)).exists()).toBe(false);
+      expect(await Bun.file(join(logDir, "opencode.log")).exists()).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
