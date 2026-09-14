@@ -635,6 +635,17 @@ export class GithubAPI {
     return toRepo(await this.get<GithubRepo>(`/repos/${this.repoPath(owner, repo)}`));
   }
 
+  async getCollaboratorPermission(
+    owner: string,
+    repo: string,
+    username: string
+  ): Promise<{ permission: string; role_name?: string }> {
+    const info = await this.get<{ permission: string; role_name?: string }>(
+      `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
+    );
+    return { permission: info.permission, role_name: info.role_name };
+  }
+
   async getPR(owner: string, repo: string, index: number): Promise<Pull> {
     return toPull(await this.get<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`));
   }

@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   followUpSkipReason,
   shouldEnqueueIssueCommentFollowUp,
+  shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullAssign,
   shouldEnqueuePullRejectedFollowUp,
+  shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "../src/followup_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
@@ -26,6 +28,18 @@ const policy = {
   allowedOrgs: ["kirmanak"],
   allowedRepos: [],
   botUsername: "jumi",
+};
+
+const writeApi = {
+  listOpenPulls: async () => [],
+  getIssue: async () => makeIssue(),
+  getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+};
+
+const readApi = {
+  listOpenPulls: async () => [],
+  getIssue: async () => makeIssue(),
+  getCollaboratorPermission: async () => ({ permission: "read", role_name: "read" }),
 };
 
 function reviewCommentPayload() {
@@ -633,7 +647,7 @@ describe("shouldEnqueuePullAssign", () => {
         throw new Error("gitea 502");
       },
     });
-    expect(decision).toEqual({ type: "skip", reason: "failed to load issue: gitea 502" });
+    expect(decision).toEqual({ type: "skip", reason: "failed to load issue" });
   });
 
   test("skips a closer PR when getIssue is unavailable", async () => {
@@ -710,7 +724,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
 
   test("enqueues issue_comment created on a jumi PR", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const response = await handler(await signedRequest(makeIssueCommentPayload(), { event: "issue_comment" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
@@ -720,7 +734,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
 
   test("enqueues X-Gitea-Event: pull_request_rejected for a jumi PR", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const response = await handler(
       await signedRequest(
         makePayload({
@@ -756,7 +770,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
 
   test("accepts Event-Type pull_request_review_comment with Event pull_request_comment", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const response = await handler(
       await signedRequest(reviewCommentPayload(), {
         event: "pull_request_comment",
@@ -771,7 +785,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
 
   test("enqueues PR-payload comment review with content and no id", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const response = await handler(
       await signedRequest(
         makePayload({
@@ -801,7 +815,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
 
   test("Event pull_request_comment with a review-shaped payload never 400s", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const body = reviewCommentPayload();
     expect("issue" in body).toBe(false);
     expect("comment" in body).toBe(false);
@@ -811,5 +825,97 @@ describe("createWorkerFetchHandler follow-up events", () => {
     expect(json).not.toHaveProperty("error");
     expect(json).toEqual({ key: "kirmanak/demo#12", queued: true });
     expect(queue.jobs[0]?.mode).toBe("follow-up");
+  });
+
+  test("skips issue_comment from a reader without write access", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: readApi });
+    const response = await handler(await signedRequest(makeIssueCommentPayload(), { event: "issue_comment" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("skips issue_comment when permission lookup is unavailable (fail-closed)", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const response = await handler(await signedRequest(makeIssueCommentPayload(), { event: "issue_comment" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+});
+
+describe("follow-up write gating", () => {
+  test("issue comment wakes for write, maintain, admin, and owner", async () => {
+    for (const permission of ["write", "admin", "owner"]) {
+      const api = { getCollaboratorPermission: async () => ({ permission, role_name: permission }) };
+      const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(
+        makeIssueCommentPayload(),
+        policy,
+        "issue_comment",
+        undefined,
+        api
+      );
+      expect(decision.type).toBe("enqueue");
+    }
+    const maintain = await shouldEnqueueIssueCommentFollowUpWithTrust(makeIssueCommentPayload(), policy, "issue_comment", undefined, {
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "maintain" }),
+    });
+    expect(maintain.type).toBe("enqueue");
+  });
+
+  test("issue comment skips for read, triage, none, and lookup failure", async () => {
+    for (const permission of ["read", "none"]) {
+      const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(
+        makeIssueCommentPayload(),
+        policy,
+        "issue_comment",
+        undefined,
+        { getCollaboratorPermission: async () => ({ permission, role_name: permission }) }
+      );
+      expect(decision).toEqual({ type: "skip", reason: "sender lacks write access" });
+    }
+    const triage = await shouldEnqueueIssueCommentFollowUpWithTrust(makeIssueCommentPayload(), policy, "issue_comment", undefined, {
+      getCollaboratorPermission: async () => ({ permission: "read", role_name: "triage" }),
+    });
+    expect(triage).toEqual({ type: "skip", reason: "sender lacks write access" });
+    expect(
+      await shouldEnqueueIssueCommentFollowUpWithTrust(makeIssueCommentPayload(), policy, "issue_comment")
+    ).toEqual({ type: "skip", reason: "sender lacks write access" });
+    expect(
+      await shouldEnqueueIssueCommentFollowUpWithTrust(makeIssueCommentPayload(), policy, "issue_comment", undefined, {
+        getCollaboratorPermission: async () => {
+          throw new Error("forge 500");
+        },
+      })
+    ).toEqual({ type: "skip", reason: "sender lacks write access" });
+  });
+
+  test("ignore list still wins even when the sender has write", async () => {
+    const ignorePolicy = { ...policy, followupIgnoreLogins: ["renovate-bot"] };
+    const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(
+      makeIssueCommentPayload({ sender: makeUser({ login: "renovate-bot" }) }),
+      ignorePolicy,
+      "issue_comment",
+      undefined,
+      writeApi
+    );
+    expect(decision).toEqual({ type: "skip", reason: "sender ignored" });
+  });
+
+  test("pull rejection wakes for write and skips for read", async () => {
+    const payload = reviewCommentPayload();
+    expect(
+      (await shouldEnqueuePullRejectedFollowUpWithTrust(payload, policy, "pull_request_rejected", undefined, writeApi))
+        .type
+    ).toBe("enqueue");
+    expect(
+      await shouldEnqueuePullRejectedFollowUpWithTrust(payload, policy, "pull_request_rejected", undefined, readApi)
+    ).toEqual({ type: "skip", reason: "sender lacks write access" });
+    expect(await shouldEnqueuePullRejectedFollowUpWithTrust(payload, policy, "pull_request_rejected")).toEqual({
+      type: "skip",
+      reason: "sender lacks write access",
+    });
   });
 });

@@ -24,6 +24,7 @@ function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { commen
   const comments: string[] = [];
   const defaults: ReviewApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getPR: async () =>
       makePR({
         body: "Fixes #12",
@@ -57,6 +58,7 @@ function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { commen
 function makeIssueApi(overrides: Partial<IssueApi> = {}): IssueApi {
   const defaults: IssueApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getIssue: async () => makeIssue(),
     getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [],

@@ -3,8 +3,8 @@ import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
-  shouldEnqueueIssueCommentFollowUp,
-  shouldEnqueuePullRejectedFollowUp,
+  shouldEnqueueIssueCommentFollowUpWithTrust,
+  shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import type { ForgeKind } from "./forge.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
@@ -348,7 +348,8 @@ export async function handleGithubWebhookEvent(
           logger(`queue unavailable: ${err.message}`);
           return json(503, { error: "queue unavailable" });
         }
-        return json(400, { error: err instanceof Error ? err.message : String(err) });
+        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+        return json(400, { error: "invalid webhook payload" });
       }
     }
     return skipped(action ? `unsupported action ${action}` : `unsupported event ${event ?? "pull_request"}`, logger);
@@ -367,7 +368,7 @@ export async function handleGithubWebhookEvent(
       } catch {
         return skipped("malformed workflow_job payload", logger);
       }
-      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.worker.api);
+      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.worker.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const jobs: IssueJob[] = decision.jobs.map((partial) => ({ ...partial, delivery, receivedAt }));
@@ -382,7 +383,7 @@ export async function handleGithubWebhookEvent(
       } catch {
         return skipped("malformed push payload", logger);
       }
-      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.worker.api);
+      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.worker.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const jobs: IssueJob[] = [];
@@ -427,8 +428,20 @@ export async function handleGithubWebhookEvent(
       }
       const decision =
         event === "pull_request_review"
-          ? shouldEnqueuePullRejectedFollowUp(parsePullRejectedPayload(rawBody), policy, eventName)
-          : shouldEnqueueIssueCommentFollowUp(parseIssueCommentPayload(commentBody), policy, eventName);
+          ? await shouldEnqueuePullRejectedFollowUpWithTrust(
+              parsePullRejectedPayload(rawBody),
+              policy,
+              eventName,
+              undefined,
+              deps.worker.api
+            )
+          : await shouldEnqueueIssueCommentFollowUpWithTrust(
+              parseIssueCommentPayload(commentBody),
+              policy,
+              eventName,
+              undefined,
+              deps.worker.api
+            );
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
       const result: EnqueueResult = await deps.worker.queue.enqueue(job);
@@ -471,7 +484,8 @@ export async function handleGithubWebhookEvent(
         for (const partial of woken) addJob(partial);
       } catch (err) {
         if (jobs.length === 0) {
-          return skipped(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`, logger);
+          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
+          return skipped("failed to list blocked issues", logger);
         }
       }
     }
@@ -487,7 +501,8 @@ export async function handleGithubWebhookEvent(
       logger(`queue unavailable: ${err.message}`);
       return json(503, { error: "queue unavailable" });
     }
-    return json(400, { error: err instanceof Error ? err.message : String(err) });
+    logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+    return json(400, { error: "invalid webhook payload" });
   }
 }
 
