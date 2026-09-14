@@ -18,6 +18,7 @@ export interface EngineRunOptions {
   maxOutputBytes?: number;
   reviewLabel?: string;
   memorySampleIntervalMs?: number;
+  quotaPollIntervalMs?: number;
   extraEnv?: Record<string, string>;
   abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;

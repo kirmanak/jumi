@@ -18,6 +18,7 @@ import type {
   Task,
 } from "./ports.ts";
 import { buildIncompleteWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
+import { isQuotaError, QUOTA_STUCK_TEXT } from "./quota.ts";
 import {
   CONTRACT_PATH,
   contractEnvIssues,
@@ -32,6 +33,8 @@ import {
   evaluateStuck,
   fingerprintError,
   fingerprintReviewArtifact,
+  isQuotaStuck,
+  markQuotaStuck,
   readStuckState,
   reviewStuckStatePath,
   stuckComment,
@@ -860,7 +863,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
   if (opts.home) {
     const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
-    const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints);
+    const stuckState = await readStuckState(stuckPath);
+    if (isQuotaStuck(stuckState)) {
+      await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
+      await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+      return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+    }
+    const stuckReason = evaluateStuck(stuckState.fingerprints);
     if (stuckReason) {
       await opts.persistResult?.({ kind: "skip", reason: stuckComment(stuckReason) });
       await upsertStuckComment(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckReason);
@@ -1029,6 +1038,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           jobId: opts.jobId,
         },
       });
+      if (engineResult.status === "stuck") {
+        if (opts.home) {
+          await markQuotaStuck(
+            reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
+            QUOTA_STUCK_TEXT
+          ).catch(() => undefined);
+        }
+        throw new Error(QUOTA_STUCK_TEXT);
+      }
       throwIfEngineFailed(engineResult);
 
       await logParentDiag(log, "post_opencode", {
@@ -1128,6 +1146,23 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
     if (isInfraFailure(err)) throw err;
+    if (isQuotaError(err)) {
+      if (opts.home) {
+        await markQuotaStuck(
+          reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
+          QUOTA_STUCK_TEXT
+        ).catch(() => undefined);
+      }
+      if (!persisted && !persistFailed) {
+        await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
+        await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+        const skipped: ReviewResult = { status: "skipped", reason: QUOTA_STUCK_TEXT };
+        const { state, description } = statusForResult(skipped);
+        await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, state, description, pr.html_url);
+        return skipped;
+      }
+      throw err;
+    }
     if (!persisted && !persistFailed) {
       const message = `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`;
       await opts.persistResult?.({ kind: "error", error: message });

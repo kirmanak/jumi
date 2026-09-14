@@ -14,6 +14,7 @@ import {
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
+import { hasQuotaRetryInDb, QUOTA_MESSAGE, QUOTA_POLL_INTERVAL_MS } from "./quota.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -361,6 +362,42 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           }, opts.timeoutMs)
         : undefined;
 
+    // Quota abort: while OpenCode sleeps on a Free/Go usage-limit retry-after
+    // (often hours), the child PID stays alive and RSS goes flat. Poll the
+    // per-run session DB the parent already knows about for the quota/retry
+    // class only (FreeUsageLimitError / GoUsageLimitError / "Free usage
+    // exceeded" and the Go sibling). Ordinary short-window 429s that OpenCode
+    // retries in seconds do not contain these strings and stay retries.
+    // No --print-logs, no transcript dump to Loki, no Phoenix required.
+    let quotaHit = false;
+    const quotaIntervalMs = opts.quotaPollIntervalMs ?? opts.memorySampleIntervalMs ?? QUOTA_POLL_INTERVAL_MS;
+    const quotaTimer =
+      quotaIntervalMs > 0
+        ? setInterval(() => {
+            if (quotaHit || timedOut || opts.abortSignal?.aborted) return;
+            let hit = false;
+            try {
+              hit = hasQuotaRetryInDb(dbPath);
+            } catch {
+              hit = false;
+            }
+            if (!hit) return;
+            quotaHit = true;
+            logDiagnostic(log, "opencode_quota", {
+              review: opts.reviewLabel,
+              elapsed_ms: Date.now() - trackerStartedAt,
+            });
+            try {
+              proc.kill();
+            } catch {
+              return;
+            }
+          }, quotaIntervalMs)
+        : undefined;
+    if (quotaTimer && typeof quotaTimer === "object" && "unref" in quotaTimer) {
+      (quotaTimer as { unref: () => void }).unref();
+    }
+
     // Consume stdout, stderr, and the exit code concurrently.
     // Reading stderr in parallel is required to prevent a deadlock when the
     // child writes more than the OS pipe buffer (~64KB) to stderr. Keep only a
@@ -381,6 +418,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     } finally {
       opts.abortSignal?.removeEventListener("abort", onAbort);
       if (timeout) clearTimeout(timeout);
+      if (quotaTimer) clearInterval(quotaTimer);
       finalSample = await finalizeMemoryTracker(tracker, childPid);
     }
 
@@ -399,6 +437,22 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       dbAfter,
       tokensExist,
     });
+    // Final quota check for the race where the retry record landed just
+    // before exit and the poll interval missed it. Best-effort, never throws.
+    let quota = quotaHit;
+    if (!quota) {
+      try {
+        quota = hasQuotaRetryInDb(dbPath);
+      } catch {
+        quota = false;
+      }
+      if (quota && !quotaHit) {
+        logDiagnostic(log, "opencode_quota", {
+          review: opts.reviewLabel,
+          elapsed_ms: durationMs,
+        });
+      }
+    }
 
     logDiagnostic(log, "opencode_end", {
       review: opts.reviewLabel,
@@ -429,6 +483,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
       infra,
+      quota,
     });
     await exportOpenCodeTrace({ dbPath, trace: opts.trace });
 
@@ -436,6 +491,10 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       const err = new Error("cancelled");
       err.name = "AbortError";
       throw err;
+    }
+
+    if (quota) {
+      return { status: "stuck", exitCode, stdout, message: QUOTA_MESSAGE, infra: false, durationMs };
     }
 
     if (runError) {

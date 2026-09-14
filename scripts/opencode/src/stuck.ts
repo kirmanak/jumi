@@ -16,9 +16,16 @@ export interface StuckFingerprint {
   hash: string;
 }
 
+export interface QuotaStuck {
+  reason: string;
+  updatedAt: string;
+}
+
 export interface StuckState {
   fingerprints: StuckFingerprint[];
   updatedAt: string;
+  /** Set when OpenCode hit a Free/Go usage-limit retry. Cleared with the file on kill-switch cancel. */
+  quota?: QuotaStuck;
 }
 
 export { reviewStuckStatePath, stuckStatePath };
@@ -139,7 +146,7 @@ function emptyStuckState(): StuckState {
 
 function parseStuckState(parsed: unknown): StuckState {
   if (!parsed || typeof parsed !== "object") return emptyStuckState();
-  const rec = parsed as { fingerprints?: unknown; updatedAt?: unknown };
+  const rec = parsed as { fingerprints?: unknown; updatedAt?: unknown; quota?: unknown };
   const fingerprints: StuckFingerprint[] = [];
   if (Array.isArray(rec.fingerprints)) {
     for (const entry of rec.fingerprints) {
@@ -150,10 +157,22 @@ function parseStuckState(parsed: unknown): StuckState {
       }
     }
   }
-  return {
+  let quota: QuotaStuck | undefined;
+  if (rec.quota && typeof rec.quota === "object") {
+    const q = rec.quota as { reason?: unknown; updatedAt?: unknown };
+    if (typeof q.reason === "string" && q.reason.trim()) {
+      quota = {
+        reason: q.reason,
+        updatedAt: typeof q.updatedAt === "string" ? q.updatedAt : "",
+      };
+    }
+  }
+  const state: StuckState = {
     fingerprints,
     updatedAt: typeof rec.updatedAt === "string" ? rec.updatedAt : "",
   };
+  if (quota) state.quota = quota;
+  return state;
 }
 
 export async function readStuckState(path: string): Promise<StuckState> {
@@ -177,7 +196,27 @@ export async function appendStuckFingerprint(
 ): Promise<void> {
   const state = await readStuckState(path);
   const fingerprints = [...state.fingerprints, fingerprint].slice(-STUCK_HISTORY_LIMIT);
-  await writeStuckState(path, { fingerprints, updatedAt: now().toISOString() });
+  const next: StuckState = { fingerprints, updatedAt: now().toISOString() };
+  if (state.quota) next.quota = state.quota;
+  await writeStuckState(path, next);
+}
+
+export function isQuotaStuck(state: StuckState | undefined | null): boolean {
+  return Boolean(state?.quota?.reason?.trim());
+}
+
+export function quotaStuckReason(state: StuckState | undefined | null): string | undefined {
+  const reason = state?.quota?.reason?.trim();
+  return reason ? reason : undefined;
+}
+
+export async function markQuotaStuck(path: string, reason: string, now = () => new Date()): Promise<void> {
+  const state = await readStuckState(path);
+  await writeStuckState(path, {
+    fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
+    updatedAt: now().toISOString(),
+    quota: { reason, updatedAt: now().toISOString() },
+  });
 }
 
 export async function deleteStuckState(home: string, owner: string, repo: string, issueNumber: number): Promise<void> {

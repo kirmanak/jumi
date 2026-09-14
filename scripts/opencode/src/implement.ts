@@ -49,14 +49,17 @@ import {
   pullRequestClosesIssue,
   upsertWorkerComment,
 } from "./gitea_issues.ts";
-import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
+import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
+import { isQuotaError, QUOTA_STUCK_TEXT } from "./quota.ts";
 import {
   appendStuckFingerprint,
   deleteStuckState,
   evaluateStuck,
   fingerprintError,
+  isQuotaStuck,
+  markQuotaStuck,
   readStuckState,
   stuckComment,
 } from "./stuck.ts";
@@ -208,7 +211,13 @@ export async function implementIssue(
   }
 
   const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
-  const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints);
+  const stuckState = await readStuckState(stuckPath);
+  if (isQuotaStuck(stuckState)) {
+    await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+    await forgetClaim();
+    return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+  }
+  const stuckReason = evaluateStuck(stuckState.fingerprints);
   if (stuckReason) {
     await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, stuckComment(stuckReason));
     await forgetClaim();
@@ -274,33 +283,42 @@ export async function implementIssue(
         "Jumi is implementing this issue."
       );
 
-      const runEngine = async (label: string, kind: "implement" | "follow-up" = "implement", prompt?: string) => {
+      const runEngine = async (
+        label: string,
+        kind: "implement" | "follow-up" = "implement",
+        prompt?: string
+      ): Promise<ImplementResult | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
-        throwIfEngineFailed(
-          await engine({
-            model: opts.model,
-            variant: opts.variant,
-            workdir: worktree,
-            home: opts.home,
-            sanitizeEnv,
-            extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
-            timeoutMs: opts.timeoutMs,
-            maxOutputBytes: opts.maxOutputBytes,
-            reviewLabel: `${owner}/${repo}#${issueNumber}`,
-            trace: {
-              kind,
-              owner,
-              repo,
-              sha: headSha,
-              jobId: opts.jobId ?? opts.job.delivery,
-            },
-            ...(prompt != null ? { prompt } : {}),
-            logger: log,
-            abortSignal: opts.abortSignal,
-            onPid: loop.engineOnPid(opts.onPid),
-          })
-        );
+        const result = await engine({
+          model: opts.model,
+          variant: opts.variant,
+          workdir: worktree,
+          home: opts.home,
+          sanitizeEnv,
+          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+          timeoutMs: opts.timeoutMs,
+          maxOutputBytes: opts.maxOutputBytes,
+          reviewLabel: `${owner}/${repo}#${issueNumber}`,
+          trace: {
+            kind,
+            owner,
+            repo,
+            sha: headSha,
+            jobId: opts.jobId ?? opts.job.delivery,
+          },
+          ...(prompt != null ? { prompt } : {}),
+          logger: log,
+          abortSignal: opts.abortSignal,
+          onPid: loop.engineOnPid(opts.onPid),
+        });
+        if (result.status === "stuck") {
+          await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+        }
+        throwIfEngineFailed(result);
+        return undefined;
       };
 
       const addWorktreeFromDefault = async () => {
@@ -385,21 +403,23 @@ export async function implementIssue(
         return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
       };
 
-      await runEngine(
+      const quotaSkip = await runEngine(
         `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
         "implement",
         queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : undefined
       );
+      if (quotaSkip) return quotaSkip;
 
       const firstYield = await handleYield(false);
       if (firstYield === "retry") {
         log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
         await resetAfterRejectedYield();
-        await runEngine(
+        const quotaRetry = await runEngine(
           `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
           "implement",
           BLOCKED_BY_REJECTED_PROMPT
         );
+        if (quotaRetry) return quotaRetry;
         const secondYield = await handleYield(true);
         if (secondYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
         if (secondYield !== "continue") return secondYield;
@@ -407,18 +427,30 @@ export async function implementIssue(
         return firstYield;
       }
 
-      const gate = await gateShipAfterOpenCode({
-        api: opts.api,
-        owner,
-        repo,
-        issueNumber,
-        botUsername: opts.botUsername,
-        snapshot: snapshotFromJob(opts.job),
-        continueOpenCode: async (issue) => {
-          await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
-          await runEngine(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`, "follow-up");
-        },
-      });
+      let gate: ShipGate;
+      try {
+        gate = await gateShipAfterOpenCode({
+          api: opts.api,
+          owner,
+          repo,
+          issueNumber,
+          botUsername: opts.botUsername,
+          snapshot: snapshotFromJob(opts.job),
+          continueOpenCode: async (issue) => {
+            await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
+            const quotaContinued = await runEngine(
+              `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
+              "follow-up"
+            );
+            if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
+          },
+        });
+      } catch (err) {
+        if (isQuotaError(err)) {
+          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+        }
+        throw err;
+      }
       if (gate.action === "skip") {
         return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
       }
@@ -458,6 +490,16 @@ export async function implementIssue(
       return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
     },
     async (err) => {
+      if (isQuotaError(err)) {
+        await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT).catch(
+          () => undefined
+        );
+        await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        await loop.stopHeartbeat();
+        await loop.forgetSerialized().catch(() => undefined);
+        await loop.detachWorktree();
+        return;
+      }
       await upsertWorkerComment(
         opts.api,
         owner,
