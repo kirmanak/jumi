@@ -79,6 +79,8 @@ export interface RunReviewJobExtras {
   heartbeatMs?: number;
   jobId?: string;
   breaker?: InfraCircuitBreaker;
+  remainingLeaseMs?: () => number | Promise<number>;
+  extendLease?: () => Promise<boolean>;
 }
 
 export async function runReviewJob(
@@ -98,6 +100,10 @@ export async function runReviewJob(
       expectedHeadSha: job.headSha,
       model: config.model,
       variant: config.variant,
+      fallbackModel: config.fallbackModel,
+      fallbackVariant: config.fallbackVariant,
+      remainingLeaseMs: extras.remainingLeaseMs,
+      extendLease: extras.extendLease,
       workspace,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
@@ -430,6 +436,12 @@ export async function processEngineTick(
       ...extras,
       abortSignal: abort.signal,
       jobId: String(row.id),
+      remainingLeaseMs: async () => {
+        const current = await store.get(row.id);
+        if (current?.leasedUntil == null) return 0;
+        return Math.max(0, current.leasedUntil - Date.now());
+      },
+      extendLease: () => store.heartbeat(row.id, leasedBy, config.leaseMs),
       persistResult: async (persisted) => {
         await store.saveResult(row.id, leasedBy, persisted);
       },

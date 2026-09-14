@@ -1,4 +1,5 @@
 import { EngineFailedError } from "./engine.ts";
+import { looksLikeProviderUnavailable } from "./fallback.ts";
 
 export const INFRA_SHORT_MS = 2_000;
 export const INFRA_MAX_RETRIES = 8;
@@ -28,6 +29,7 @@ export function classifyOpenCodeInfra(input: {
   tokensExist?: boolean;
 }): boolean {
   if (input.tokensExist) return false;
+  if (looksLikeProviderUnavailable(input.stderr ?? "")) return false;
   if (input.durationMs >= INFRA_SHORT_MS) return false;
   if (looksLikeInfraStderr(input.stderr ?? "")) return true;
   if (sessionDbGrew(input.dbBefore, input.dbAfter)) return false;

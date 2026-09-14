@@ -64,6 +64,8 @@ export function createIssueQueue(
           followupIgnoreLogins: config.followupIgnoreLogins,
           model: config.model,
           variant: config.variant,
+          fallbackModel: config.fallbackModel,
+          fallbackVariant: config.fallbackVariant,
           home: config.home,
           workdir: config.workdir,
           maxOutputBytes: config.maxOutputBytes,
@@ -321,6 +323,14 @@ export async function processWorkerTick(
       followupIgnoreLogins: config.followupIgnoreLogins,
       model: config.model,
       variant: config.variant,
+      fallbackModel: config.fallbackModel,
+      fallbackVariant: config.fallbackVariant,
+      remainingLeaseMs: async () => {
+        const current = await store.get(row.id);
+        if (current?.leasedUntil == null) return 0;
+        return Math.max(0, current.leasedUntil - Date.now());
+      },
+      extendLease: () => store.heartbeat(row.id, leasedBy, config.leaseMs),
       home: config.home,
       workdir: config.workdir,
       maxOutputBytes: config.maxOutputBytes,

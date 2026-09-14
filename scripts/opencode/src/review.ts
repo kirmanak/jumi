@@ -2,6 +2,7 @@ import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
+import { withModelHop } from "./fallback.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { isInfraFailure } from "./infra.ts";
@@ -91,6 +92,10 @@ export interface ReviewOptions {
   expectedHeadSha?: string;
   model: string;
   variant?: string;
+  fallbackModel?: string;
+  fallbackVariant?: string;
+  remainingLeaseMs?: () => number | Promise<number>;
+  extendLease?: () => Promise<boolean>;
   workspace: string;
   giteaUrl: string;
   giteaToken: string;
@@ -853,7 +858,13 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
 
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
-  const engine = resolveEngine(opts, openCodeEngine);
+  const engine = withModelHop(resolveEngine(opts, openCodeEngine), {
+    fallbackModel: opts.fallbackModel,
+    fallbackVariant: opts.fallbackVariant,
+    remainingLeaseMs: opts.remainingLeaseMs,
+    extendLease: opts.extendLease,
+    logger: log,
+  });
   throwIfAborted(opts.abortSignal);
   const repoFullName = `${opts.owner}/${opts.repo}`;
   const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);

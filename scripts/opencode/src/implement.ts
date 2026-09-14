@@ -90,6 +90,10 @@ export interface ImplementOptions extends PickupPolicy {
   followupIgnoreLogins?: readonly string[];
   model: string;
   variant?: string;
+  fallbackModel?: string;
+  fallbackVariant?: string;
+  remainingLeaseMs?: () => number | Promise<number>;
+  extendLease?: () => Promise<boolean>;
   home: string;
   workdir: string;
   timeoutMs?: number;

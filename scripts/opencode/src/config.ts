@@ -22,6 +22,8 @@ export interface ServiceConfig {
   followupIgnoreLogins: string[];
   model: string;
   variant?: string;
+  fallbackModel?: string;
+  fallbackVariant?: string;
   opencodeConfig?: string;
   opencodeWellKnownUrl?: string;
   opencodeWellKnownKey: string;
@@ -207,6 +209,8 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
     variant: optionalEnv(resolved, "OPENCODE_VARIANT"),
+    fallbackModel: optionalEnv(resolved, "OPENCODE_FALLBACK_MODEL"),
+    fallbackVariant: optionalEnv(resolved, "OPENCODE_FALLBACK_VARIANT"),
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
     opencodeWellKnownUrl: parseOpenCodeWellKnownUrl(resolved.OPENCODE_WELLKNOWN_URL),
     opencodeWellKnownKey:
