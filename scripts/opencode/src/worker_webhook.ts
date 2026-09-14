@@ -155,7 +155,7 @@ export async function handleWorkerWebhookEvent(
       );
     }
     try {
-      const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api);
+      const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       if (decision.type === "cancel") {
         const result = deps.cancel
@@ -177,7 +177,8 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      return json(400, { error: err instanceof Error ? err.message : String(err) });
+      logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+      return json(400, { error: "invalid webhook payload" });
     }
   }
   // Gitea 1.27: assignment uses X-Gitea-Event=issues and X-Gitea-Event-Type=issue_assign.
@@ -195,7 +196,7 @@ export async function handleWorkerWebhookEvent(
       return skipped("malformed workflow_job payload", logger);
     }
     try {
-      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api);
+      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const keys: string[] = [];
@@ -211,7 +212,8 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      return json(500, { error: err instanceof Error ? err.message : String(err) });
+      logger(`workflow job webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      return json(500, { error: "internal error" });
     }
   }
 
@@ -224,7 +226,7 @@ export async function handleWorkerWebhookEvent(
       return skipped("malformed push payload", logger);
     }
     try {
-      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.api);
+      const decision = await shouldEnqueuePushConflicts(payload, policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const keys: string[] = [];
@@ -240,7 +242,8 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      return json(500, { error: err instanceof Error ? err.message : String(err) });
+      logger(`push webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      return json(500, { error: "internal error" });
     }
   }
 
@@ -294,7 +297,8 @@ export async function handleWorkerWebhookEvent(
         for (const partial of woken) addJob(partial);
       } catch (err) {
         if (jobs.length === 0) {
-          return skipped(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`, logger);
+          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
+          return skipped("failed to list blocked issues", logger);
         }
       }
     }
@@ -324,6 +328,7 @@ export async function handleWorkerWebhookEvent(
       logger(`queue unavailable: ${err.message}`);
       return json(503, { error: "queue unavailable" });
     }
-    return json(400, { error: err instanceof Error ? err.message : String(err) });
+    logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+    return json(400, { error: "invalid webhook payload" });
   }
 }

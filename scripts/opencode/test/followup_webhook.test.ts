@@ -633,7 +633,7 @@ describe("shouldEnqueuePullAssign", () => {
         throw new Error("gitea 502");
       },
     });
-    expect(decision).toEqual({ type: "skip", reason: "failed to load issue: gitea 502" });
+    expect(decision).toEqual({ type: "skip", reason: "failed to load issue" });
   });
 
   test("skips a closer PR when getIssue is unavailable", async () => {
