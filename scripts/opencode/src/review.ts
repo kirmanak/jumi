@@ -5,6 +5,7 @@ import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { isInfraFailure } from "./infra.ts";
+import { isWritePermission, resolvePermissions } from "./permissions.ts";
 import type {
   CheckPayload,
   Comment,
@@ -752,6 +753,42 @@ async function loadLinkedIssue(
   }
 }
 
+async function resolveThreadPermissions(
+  api: ReviewApi,
+  owner: string,
+  repo: string,
+  prComments: Comment[],
+  linkedIssues: Array<{ issue: Task; comments: Comment[] }>,
+  log: (message: string) => void
+): Promise<{ permissions: Map<string, boolean>; permissionDetail: Map<string, string> }> {
+  const logins: Array<string | undefined> = [];
+  for (const comment of prComments) logins.push(comment.user?.login);
+  for (const linked of linkedIssues) {
+    for (const comment of linked.comments) logins.push(comment.user?.login);
+  }
+  let detail: Map<string, string>;
+  try {
+    detail = await resolvePermissions(api, owner, repo, logins);
+  } catch (err) {
+    log(`comment permissions unavailable, treating thread as discussion: ${errorMessage(err)}`);
+    detail = new Map();
+  }
+  const permissions = new Map<string, boolean>();
+  for (const [key, permission] of detail) {
+    permissions.set(key, isWritePermission(permission));
+  }
+  // Fail-closed for logins the forge could not report: missing entries are discussion.
+  for (const login of logins) {
+    if (typeof login !== "string" || !login.trim()) continue;
+    const key = login.trim().toLowerCase();
+    if (!permissions.has(key)) {
+      permissions.set(key, false);
+      if (!detail.has(key)) detail.set(key, "none");
+    }
+  }
+  return { permissions, permissionDetail: detail };
+}
+
 export async function publishReviewResult(opts: PublishReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
   const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
@@ -911,7 +948,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       linkedIssues.push({ issue: result.issue, comments: result.comments });
     }
     const prComments = prCommentResult.comments;
-    const thread = mapReviewThread({ prComments, linkedIssues });
+    const { permissions, permissionDetail } = await resolveThreadPermissions(
+      opts.api,
+      opts.owner,
+      opts.repo,
+      prComments,
+      linkedIssues,
+      log
+    );
+    const thread = mapReviewThread({ prComments, linkedIssues, permissions, permissionDetail });
 
     const maxFiles = opts.maxFiles ?? 100;
     const maxPatchBytes = opts.maxPatchBytes ?? 500_000;
@@ -940,6 +985,12 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     if (fitted.truncated) {
       notes.push(`Thread context truncated to maxThreadBytes (dropped ${fitted.droppedCommentBodies} comment bodies).`);
     }
+    const allFittedComments = [
+      ...fitted.thread.comments,
+      ...fitted.thread.linkedIssues.flatMap((issue) => issue.comments),
+    ];
+    const productComments = allFittedComments.filter((comment) => comment.intent === "product").length;
+    const discussionComments = allFittedComments.filter((comment) => comment.intent === "discussion").length;
     logDiagnostic(log, "review_thread", {
       review: reviewLabel,
       pr_comments: fitted.thread.comments.length,
@@ -949,6 +1000,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       thread_bytes_h: formatBytes(fitted.threadBytes),
       max_thread_bytes: maxThreadBytes,
       truncated: fitted.truncated,
+      product_comments: productComments,
+      discussion_comments: discussionComments,
     });
 
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;

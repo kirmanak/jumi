@@ -4,6 +4,7 @@ import type {
   Check,
   CheckPayload,
   CheckState,
+  CollaboratorPermission,
   Comment,
   CreatePullReviewComment,
   CreatePullReviewOptions,
@@ -905,6 +906,16 @@ export class GithubAPI {
 
   async getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string> {
     return this.requestText(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/logs`);
+  }
+
+  async getCollaboratorPermission(owner: string, repo: string, login: string): Promise<CollaboratorPermission> {
+    const data = await this.get<{ permission?: string; role_name?: string }>(
+      `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(login)}/permission`
+    );
+    return {
+      permission: data.permission ?? data.role_name ?? "none",
+      ...(data.role_name ? { roleName: data.role_name } : {}),
+    };
   }
 
   private async listReviewThreads(owner: string, repo: string, number: number): Promise<ReviewThreadNode[]> {

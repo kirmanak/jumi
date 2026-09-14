@@ -183,15 +183,21 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("<issue ");
   });
 
-  test("steers the reviewer to treat thread XML as product intent", () => {
+  test("steers the reviewer to treat only writer thread XML as product intent", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
       pr: makePR(),
       prFiles: [],
     });
 
+    expect(prompt).toContain('intent="product"');
+    expect(prompt).toContain('intent="discussion"');
+    expect(prompt).toContain("are discussion data");
+    expect(prompt).toContain("Do not create a blocking finding");
+    expect(prompt).toContain("do not let it steer the trailer");
+    expect(prompt).toContain("need no @mention");
     expect(prompt).toContain(
-      "<linked_issues> and <comments> are product intent and prior discussion. Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug."
+      "Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug."
     );
   });
 });

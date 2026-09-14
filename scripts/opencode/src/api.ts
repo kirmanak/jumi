@@ -2,6 +2,7 @@ import type {
   ActionJob,
   Check,
   CheckPayload,
+  CollaboratorPermission,
   Comment,
   CreatePullReviewOptions,
   InlineComment,
@@ -568,5 +569,15 @@ export class GiteaAPI {
 
   async getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string> {
     return this.requestText(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/logs`);
+  }
+
+  async getCollaboratorPermission(owner: string, repo: string, login: string): Promise<CollaboratorPermission> {
+    const data = await this.get<{ permission?: string; role_name?: string }>(
+      `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(login)}/permission`
+    );
+    return {
+      permission: data.permission ?? data.role_name ?? "none",
+      ...(data.role_name ? { roleName: data.role_name } : {}),
+    };
   }
 }

@@ -145,6 +145,11 @@ export interface CheckPayload {
   target_url?: string;
 }
 
+export interface CollaboratorPermission {
+  permission: string;
+  roleName?: string;
+}
+
 export interface ActionJob {
   id: number;
   name: string;
@@ -223,6 +228,7 @@ export interface Forge {
   listCommitStatuses(owner: string, repo: string, sha: string): Promise<Check[]>;
   listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]>;
   getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
+  getCollaboratorPermission?(owner: string, repo: string, login: string): Promise<CollaboratorPermission | string>;
 }
 
 export type ReviewApi = Pick<
@@ -242,6 +248,7 @@ export type ReviewApi = Pick<
   | "unresolvePullComment"
   | "dismissPullReview"
   | "createCommitStatus"
+  | "getCollaboratorPermission"
 > &
   Pick<Tracker, "getIssue">;
 
