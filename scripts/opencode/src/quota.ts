@@ -33,17 +33,19 @@ const QUOTA_PATTERNS = [
   "Go limit reached",
   "free_tier_limit",
   "account_rate_limit",
+  "Rate limit exceeded. Please try again later.",
+  "Insufficient balance",
 ] as const;
 
 export const QUOTA_ERROR_RE =
-  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|stuck:\s*usage limit exceeded/i;
+  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|stuck:\s*usage limit exceeded/i;
 
 /** Narrow live pattern for stream/log scans. Drops the parent's own
  * `stuck:` dialect (which OpenCode never emits) so tool traces or echoed file
  * content containing that literal cannot kill a healthy run. Kept in
  * `QUOTA_ERROR_RE`/`isQuotaText` for thrown errors and stuck comments. */
 export const QUOTA_LIVE_RE =
-  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit/i;
+  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance/i;
 
 /** Retry context required around a live match. The quota failure is logged by
  * the `llm` service as `message="stream error"` with the provider error

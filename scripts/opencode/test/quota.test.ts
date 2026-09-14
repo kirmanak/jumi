@@ -32,12 +32,15 @@ describe("isQuotaText", () => {
     expect(isQuotaText("Go limit reached")).toBe(true);
     expect(isQuotaText('{"reason":"free_tier_limit"}')).toBe(true);
     expect(isQuotaText('{"reason":"account_rate_limit"}')).toBe(true);
+    expect(isQuotaText("Rate limit exceeded. Please try again later.")).toBe(true);
+    expect(isQuotaText("Insufficient balance")).toBe(true);
     expect(isQuotaText(QUOTA_STUCK_TEXT)).toBe(true);
   });
 
   test("ignores ordinary short-window 429s", () => {
     expect(isQuotaText("429 Too Many Requests")).toBe(false);
     expect(isQuotaText("Provider is overloaded")).toBe(false);
+    expect(isQuotaText("Rate limit exceeded")).toBe(false);
     expect(isQuotaText("")).toBe(false);
     expect(isQuotaText(null)).toBe(false);
     expect(isQuotaText(undefined)).toBe(false);
@@ -244,8 +247,11 @@ describe("live quota pattern", () => {
     expect(isQuotaLiveText(QUOTA_STUCK_TEXT)).toBe(false);
     expect(isQuotaLiveText("FreeUsageLimitError")).toBe(true);
     expect(isQuotaLiveText("Free usage exceeded, subscribe to Go")).toBe(true);
+    expect(isQuotaLiveText("Rate limit exceeded. Please try again later.")).toBe(true);
+    expect(isQuotaLiveText("Insufficient balance")).toBe(true);
     expect(isQuotaLiveText("my-model usage limit reached")).toBe(false);
     expect(isQuotaLiveText("429 Too Many Requests")).toBe(false);
+    expect(isQuotaLiveText("Rate limit exceeded")).toBe(false);
   });
 
   test("requires stream-error retry context in log lines", () => {
@@ -263,6 +269,18 @@ describe("live quota pattern", () => {
     // Quota string without retry context must not match.
     expect(isQuotaLogLine("FreeUsageLimitError")).toBe(false);
     expect(isQuotaLogLine("stream error: 429 Too Many Requests")).toBe(false);
+    expect(isQuotaLogLine('message="stream error" error.error="Rate limit exceeded"')).toBe(false);
+  });
+
+  test("matches captured Zen stream-error log lines", () => {
+    const insufficient =
+      'message="stream error" providerID=opencode modelID=gpt-5.4-nano small=true agent=title error.error="AI_APICallError: Insufficient balance. Manage your billing here: https://opencode.ai/workspace/example/billing"';
+    const rateLimit =
+      'message="stream error" providerID=opencode modelID=muse-spark-1.3-contributor-free small=false agent=build error.error="AI_APICallError: Rate limit exceeded. Please try again later."';
+    expect(isQuotaLogLine(insufficient)).toBe(true);
+    expect(isQuotaLogLine(rateLimit)).toBe(true);
+    expect(hasQuotaInLogText(`${insufficient}\n`)).toBe(true);
+    expect(hasQuotaInLogText(`${rateLimit}\n`)).toBe(true);
   });
 
   test("scans log text line-wise", () => {
