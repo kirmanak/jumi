@@ -328,6 +328,9 @@ export function shouldEnqueuePullRejectedFollowUp(
  * Write-gated wake for issue/PR comments. Fail-closed: without a positive
  * write (or maintain/admin/owner) collaborator permission for the sender,
  * skip. Keep the ignore-login overlay: write is necessary, not sufficient.
+ * Scope checks run before the permission lookup so out-of-scope PRs
+ * (forks, drafts, non-Jumi PRs) never cost a forge round-trip and keep
+ * their scope skip reason.
  */
 export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   payload: GiteaIssueCommentPayload,
@@ -336,25 +339,18 @@ export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   closingIssue?: GiteaIssue,
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
-  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
-  if (loginEquals(payload.sender?.login, policy.botUsername)) {
-    return { type: "skip", reason: "sender is bot" };
-  }
-  if (loginInList(payload.sender?.login, policy.followupIgnoreLogins)) {
-    return { type: "skip", reason: "sender ignored" };
-  }
-  const body = payload.comment.body ?? "";
-  if (!body.trim()) return { type: "skip", reason: "empty comment body" };
-  if (isJumiInternalBody(body)) return { type: "skip", reason: "jumi internal comment" };
-  if (!(await hasWriteAccess(api, owner, repo, payload.sender?.login))) {
+  const scope = shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
+  if (scope.type === "skip") return scope;
+  if (!(await hasWriteAccess(api, scope.job.owner, scope.job.repo, payload.sender?.login))) {
     return { type: "skip", reason: "sender lacks write access" };
   }
-  return shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
+  return scope;
 }
 
 /**
  * Write-gated wake for request-changes / review rejections. Same bar as
  * comments: people and Apps need current write or stronger; unknown is skip.
+ * Scope first, permission second — same reason as comments.
  */
 export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   payload: GiteaPRPayload,
@@ -363,17 +359,12 @@ export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   closingIssue?: GiteaIssue,
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
-  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
-  if (loginEquals(payload.sender?.login, policy.botUsername)) {
-    return { type: "skip", reason: "sender is bot" };
-  }
-  if (loginInList(payload.sender?.login, policy.followupIgnoreLogins)) {
-    return { type: "skip", reason: "sender ignored" };
-  }
-  if (!(await hasWriteAccess(api, owner, repo, payload.sender?.login))) {
+  const scope = shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
+  if (scope.type === "skip") return scope;
+  if (!(await hasWriteAccess(api, scope.job.owner, scope.job.repo, payload.sender?.login))) {
     return { type: "skip", reason: "sender lacks write access" };
   }
-  return shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
+  return scope;
 }
 
 export async function shouldEnqueuePullAssign(

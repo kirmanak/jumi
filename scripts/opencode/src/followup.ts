@@ -227,12 +227,18 @@ export function isPointerStubBody(body: string | null | undefined): boolean {
   return POINTER_STUB_RE.test(text);
 }
 
-export function isJumiReviewSticky(comment: { body?: string | null }): boolean {
+export function isJumiReviewSticky(
+  comment: { body?: string | null; user?: { login?: string } },
+  botUsername?: string
+): boolean {
   const body = comment.body ?? "";
   if (!body.trim()) return false;
   if (!body.includes(REVIEW_MARKER)) return false;
   if (!hasFailureCheckTrailer(body)) return false;
   if (isJumiWorkerBody(body)) return false;
+  if (typeof botUsername === "string" && botUsername) {
+    if (!loginEquals(comment.user?.login, botUsername)) return false;
+  }
   return Boolean(parseReviewedCommitSha(body));
 }
 
@@ -295,11 +301,12 @@ export interface ReviewFindingMatchOpts {
 }
 
 export function isJumiReviewFinding(
-  comment: { body?: string | null },
+  comment: { body?: string | null; user?: { login?: string } },
   headSha: string,
-  opts: ReviewFindingMatchOpts = {}
+  opts: ReviewFindingMatchOpts = {},
+  botUsername?: string
 ): boolean {
-  if (!isJumiReviewSticky(comment)) return false;
+  if (!isJumiReviewSticky(comment, botUsername)) return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -356,8 +363,10 @@ export function isInScopeFollowUpComment(
   ignoreLogins: readonly string[] = [],
   findingOpts: ReviewFindingMatchOpts = {}
 ): boolean {
+  if (!loginEquals(comment.user?.login, botUsername) && loginInList(comment.user?.login, ignoreLogins)) return false;
   return (
-    isJumiReviewFinding(comment, headSha, findingOpts) || isInScopeHumanComment(comment, botUsername, ignoreLogins)
+    isJumiReviewFinding(comment, headSha, findingOpts, botUsername) ||
+    isInScopeHumanComment(comment, botUsername, ignoreLogins)
   );
 }
 
@@ -465,7 +474,7 @@ export async function collectFollowUpItems(
     comments: candidateComments.filter((comment) => isBot(comment.user?.login) || isTrusted(comment.user?.login)),
     inlines: candidateInlines.filter((comment) => isTrusted(comment.user?.login)),
     reviews: candidateReviews.filter((review) => isTrusted(review.user?.login)),
-    jumiStickies: rawComments.filter(isJumiReviewSticky),
+    jumiStickies: rawComments.filter((comment) => isJumiReviewSticky(comment, botUsername)),
     jumiInlines: rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername)),
     jumiReviews: rawReviews.filter((review) => isJumiFailurePullReview(review, botUsername)),
     jumiFindingReviews: rawReviews.filter((review) =>
