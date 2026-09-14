@@ -18,6 +18,7 @@ import type {
   Task,
 } from "./ports.ts";
 import { buildIncompleteWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
+import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import {
   CONTRACT_PATH,
   contractEnvIssues,
@@ -29,9 +30,12 @@ import {
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import {
   appendStuckFingerprint,
+  clearQuotaStuck,
   evaluateStuck,
   fingerprintError,
   fingerprintReviewArtifact,
+  isReviewQuotaStuck,
+  markQuotaStuck,
   readStuckState,
   reviewStuckStatePath,
   stuckComment,
@@ -860,7 +864,22 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
   if (opts.home) {
     const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
-    const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints);
+    const stuckState = await readStuckState(stuckPath);
+    // Reviewer quota uses a TTL (not permanent like the worker flag): quota
+    // resets in hours/days, and nothing else clears this per-PR file, so an
+    // expired flag re-checks instead of blocking the PR forever. Use
+    // `cancelReviewWork` (deleteReviewStuckState) as the human kill-switch
+    // equivalent to the worker cancel path.
+    if (isReviewQuotaStuck(stuckState)) {
+      await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
+      await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+      return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+    }
+    if (stuckState.quota) {
+      // Expired quota: clear the stale flag so the next run starts clean.
+      await clearQuotaStuck(stuckPath).catch(() => undefined);
+    }
+    const stuckReason = evaluateStuck(stuckState.fingerprints);
     if (stuckReason) {
       await opts.persistResult?.({ kind: "skip", reason: stuckComment(stuckReason) });
       await upsertStuckComment(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckReason);
@@ -1029,6 +1048,18 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           jobId: opts.jobId,
         },
       });
+      // Only the quota path in git.ts returns engine `stuck`; gate on the
+      // message so a future non-quota `stuck` producer falls through to the
+      // fingerprint path instead of setting the human-clear quota flag.
+      if (engineResult.status === "stuck" && isQuotaText(engineResult.message)) {
+        if (opts.home) {
+          await markQuotaStuck(
+            reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
+            QUOTA_STUCK_TEXT
+          ).catch(() => undefined);
+        }
+        throw new Error(QUOTA_STUCK_TEXT);
+      }
       throwIfEngineFailed(engineResult);
 
       await logParentDiag(log, "post_opencode", {
@@ -1087,9 +1118,12 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           const markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
           await persistOutcome({ kind: "markdown", markdown });
           if (opts.home) {
+            const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
+            // A successful run clears any stale (TTL-expired) quota flag.
+            await clearQuotaStuck(stuckPath).catch(() => undefined);
             const actionHash = fingerprintReviewArtifact(markdown);
             if (actionHash) {
-              await appendStuckFingerprint(reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber), {
+              await appendStuckFingerprint(stuckPath, {
                 kind: "action",
                 hash: actionHash,
               });
@@ -1128,6 +1162,23 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
     if (isInfraFailure(err)) throw err;
+    if (isQuotaError(err)) {
+      if (opts.home) {
+        await markQuotaStuck(
+          reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
+          QUOTA_STUCK_TEXT
+        ).catch(() => undefined);
+      }
+      if (!persisted && !persistFailed) {
+        await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
+        await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+        const skipped: ReviewResult = { status: "skipped", reason: QUOTA_STUCK_TEXT };
+        const { state, description } = statusForResult(skipped);
+        await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, state, description, pr.html_url);
+        return skipped;
+      }
+      throw err;
+    }
     if (!persisted && !persistFailed) {
       const message = `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`;
       await opts.persistResult?.({ kind: "error", error: message });

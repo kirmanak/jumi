@@ -1,4 +1,5 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   byteLength,
@@ -14,6 +15,7 @@ import {
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
+import { hasQuotaInLogDir, hasQuotaRetryInDb, QUOTA_MESSAGE, QUOTA_POLL_INTERVAL_MS } from "./quota.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -126,6 +128,35 @@ function overlayReviewWebfetch(
   }
 }
 
+function openCodeXdgDataHome(tempRoot: string): string {
+  return join(tempRoot, "xdg-data");
+}
+
+function openCodeLogDir(tempRoot: string): string {
+  return join(openCodeXdgDataHome(tempRoot), "opencode", "log");
+}
+
+/**
+ * Best-effort copy of the shared auth file into the per-run isolated data
+ * dir so `XDG_DATA_HOME` isolation does not break provider auth. The file
+ * holds well-known/Zen credentials seeded at server startup; `OPENCODE_API_KEY`
+ * still flows via env. Never throws; missing source is fine (env-only auth).
+ */
+async function seedIsolatedAuth(home: string, tempRoot: string): Promise<void> {
+  const src = join(home, ".local", "share", "opencode", "auth.json");
+  const dst = join(openCodeXdgDataHome(tempRoot), "opencode", "auth.json");
+  try {
+    if (!existsSync(src)) return;
+    if (existsSync(dst)) return;
+    const raw = await readFile(src);
+    await mkdir(join(openCodeXdgDataHome(tempRoot), "opencode"), { recursive: true });
+    await writeFile(dst, raw, { mode: 0o600 });
+    await chmod(dst, 0o600).catch(() => undefined);
+  } catch {
+    return;
+  }
+}
+
 function buildEnv(
   opts: OpenCodeRunOptions,
   tempRoot: string,
@@ -133,9 +164,19 @@ function buildEnv(
 ): Record<string, string> | undefined {
   // Per-review SQLite path under the workspace temp dir so session DB does not
   // accumulate on HOME across runs (OOM trail: 1.5GiB shared opencode.db).
+  // Per-run XDG_DATA_HOME for the same reason for the OpenCode log dir: the
+  // live quota signal is the isolated log file (`stream error` with a Free/Go
+  // quota string), so a fresh dir means any hit belongs to this child and no
+  // offset tracking against the shared `$HOME/.local/share` log is needed.
   const configPath = resolveOpenCodeConfigPath(opts);
+  const xdgDataHome = openCodeXdgDataHome(tempRoot);
   if (!opts.sanitizeEnv) {
-    const env = { ...process.env, TMPDIR: tempRoot, OPENCODE_DB: openCodeDbPath } as Record<string, string>;
+    const env = {
+      ...process.env,
+      TMPDIR: tempRoot,
+      OPENCODE_DB: openCodeDbPath,
+      XDG_DATA_HOME: xdgDataHome,
+    } as Record<string, string>;
     if (configPath) env.OPENCODE_CONFIG = configPath;
     overlayReviewWebfetch(env, opts, configPath);
     return env;
@@ -146,6 +187,7 @@ function buildEnv(
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     TMPDIR: tempRoot,
     XDG_CONFIG_HOME: join(tempRoot, "xdg-config"),
+    XDG_DATA_HOME: xdgDataHome,
     OPENCODE_MODEL: opts.model,
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DB: openCodeDbPath,
@@ -276,6 +318,10 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   const home = opts.home ?? process.env.HOME ?? opts.workdir;
   // Always isolate session DB under the review temp dir (deleted with workspace).
   const dbPath = join(tempRoot, "opencode-session.db");
+  const logDir = openCodeLogDir(tempRoot);
+  // Isolate the OpenCode log dir (XDG_DATA_HOME) so the live quota poll sees
+  // only this child. Seed auth so isolation does not break provider auth.
+  await seedIsolatedAuth(home, tempRoot);
   const promptBytes = byteLength(prompt);
   const dbBefore = await pathSizeBytes(dbPath);
   const parentBefore = await sampleMemory(process.pid);
@@ -361,6 +407,48 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           }, opts.timeoutMs)
         : undefined;
 
+    // Quota abort: while OpenCode sleeps on a Free/Go usage-limit retry-after
+    // (often hours), the child PID stays alive and RSS goes flat. The pinned
+    // OpenCode keeps retry status in memory (SessionStatus) and never writes
+    // a per-attempt row to the session DB while sleeping, and `opencode run`
+    // without `--print-logs` emits only the banner to stderr, so neither the
+    // stderr stream nor DB polling can fire during the hang. Instead poll the
+    // per-run isolated log file for the `llm` `stream error` line carrying a
+    // Free/Go quota string (~170ms after stream start, before the sleep).
+    // Match the Free/Go quota class only (narrow live pattern, retry context
+    // required); ordinary short-window 429s that OpenCode retries in seconds
+    // do not contain these strings and stay retries. No --print-logs, no
+    // transcript dump to Loki, no Phoenix. The isolated dir means any hit
+    // belongs to this child; no ANSI concerns (log has no color codes).
+    let quotaHit = false;
+    const quotaIntervalMs = opts.quotaPollIntervalMs ?? QUOTA_POLL_INTERVAL_MS;
+    const quotaTimer =
+      quotaIntervalMs > 0
+        ? setInterval(() => {
+            if (quotaHit || timedOut || opts.abortSignal?.aborted) return;
+            let hit = false;
+            try {
+              hit = hasQuotaInLogDir(logDir);
+            } catch {
+              hit = false;
+            }
+            if (!hit) return;
+            quotaHit = true;
+            logDiagnostic(log, "opencode_quota", {
+              review: opts.reviewLabel,
+              elapsed_ms: Date.now() - trackerStartedAt,
+            });
+            try {
+              proc.kill();
+            } catch {
+              return;
+            }
+          }, quotaIntervalMs)
+        : undefined;
+    if (quotaTimer && typeof quotaTimer === "object" && "unref" in quotaTimer) {
+      (quotaTimer as { unref: () => void }).unref();
+    }
+
     // Consume stdout, stderr, and the exit code concurrently.
     // Reading stderr in parallel is required to prevent a deadlock when the
     // child writes more than the OS pipe buffer (~64KB) to stderr. Keep only a
@@ -381,6 +469,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     } finally {
       opts.abortSignal?.removeEventListener("abort", onAbort);
       if (timeout) clearTimeout(timeout);
+      if (quotaTimer) clearInterval(quotaTimer);
       finalSample = await finalizeMemoryTracker(tracker, childPid);
     }
 
@@ -399,6 +488,35 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       dbAfter,
       tokensExist,
     });
+    // Post-hoc quota classifier: the live log poll above drove the abort while
+    // running. The checks below only classify outcomes where the poll missed
+    // (child exited before the first 5s tick) or the error record landed in
+    // the session DB (e.g. halt persisted assistantMessage.error).
+    // Best-effort, never throws. No transcript is logged; only the regex is
+    // tested. stderr is intentionally not scanned: the real binary never
+    // emits quota strings there, so any match would be a tool trace echoing
+    // the literals, not a quota retry.
+    let quota = quotaHit;
+    if (!quota) {
+      try {
+        quota = hasQuotaInLogDir(logDir);
+      } catch {
+        quota = false;
+      }
+    }
+    if (!quota) {
+      try {
+        quota = hasQuotaRetryInDb(dbPath);
+      } catch {
+        quota = false;
+      }
+    }
+    if (quota && !quotaHit) {
+      logDiagnostic(log, "opencode_quota", {
+        review: opts.reviewLabel,
+        elapsed_ms: durationMs,
+      });
+    }
 
     logDiagnostic(log, "opencode_end", {
       review: opts.reviewLabel,
@@ -429,6 +547,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
       infra,
+      quota,
     });
     await exportOpenCodeTrace({ dbPath, trace: opts.trace });
 
@@ -436,6 +555,10 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       const err = new Error("cancelled");
       err.name = "AbortError";
       throw err;
+    }
+
+    if (quota) {
+      return { status: "stuck", exitCode, stdout, message: QUOTA_MESSAGE, infra: false, durationMs };
     }
 
     if (runError) {
