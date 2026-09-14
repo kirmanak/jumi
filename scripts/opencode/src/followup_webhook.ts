@@ -324,12 +324,6 @@ export function shouldEnqueuePullRejectedFollowUp(
   };
 }
 
-function repositoryOwnerRepo(repository: { full_name: string }): { owner: string; repo: string } | undefined {
-  const [owner, repo] = repository.full_name.split("/");
-  if (!owner || !repo) return undefined;
-  return { owner, repo };
-}
-
 /**
  * Write-gated wake for issue/PR comments. Fail-closed: without a positive
  * write (or maintain/admin/owner) collaborator permission for the sender,
@@ -342,6 +336,7 @@ export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   closingIssue?: GiteaIssue,
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
+  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   if (loginEquals(payload.sender?.login, policy.botUsername)) {
     return { type: "skip", reason: "sender is bot" };
   }
@@ -351,8 +346,7 @@ export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   const body = payload.comment.body ?? "";
   if (!body.trim()) return { type: "skip", reason: "empty comment body" };
   if (isJumiInternalBody(body)) return { type: "skip", reason: "jumi internal comment" };
-  const ownerRepo = repositoryOwnerRepo(payload.repository);
-  if (!ownerRepo || !(await hasWriteAccess(api, ownerRepo.owner, ownerRepo.repo, payload.sender?.login))) {
+  if (!(await hasWriteAccess(api, owner, repo, payload.sender?.login))) {
     return { type: "skip", reason: "sender lacks write access" };
   }
   return shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
@@ -369,14 +363,14 @@ export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   closingIssue?: GiteaIssue,
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
+  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   if (loginEquals(payload.sender?.login, policy.botUsername)) {
     return { type: "skip", reason: "sender is bot" };
   }
   if (loginInList(payload.sender?.login, policy.followupIgnoreLogins)) {
     return { type: "skip", reason: "sender ignored" };
   }
-  const ownerRepo = repositoryOwnerRepo(payload.repository);
-  if (!ownerRepo || !(await hasWriteAccess(api, ownerRepo.owner, ownerRepo.repo, payload.sender?.login))) {
+  if (!(await hasWriteAccess(api, owner, repo, payload.sender?.login))) {
     return { type: "skip", reason: "sender lacks write access" };
   }
   return shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);

@@ -460,8 +460,9 @@ export async function collectFollowUpItems(
   );
   const isTrusted = (login: string | undefined): boolean =>
     typeof login === "string" && trusted.has(login.toLowerCase());
+  const isBot = (login: string | undefined): boolean => loginEquals(login, botUsername);
   return {
-    comments: candidateComments.filter((comment) => isTrusted(comment.user?.login)),
+    comments: candidateComments.filter((comment) => isBot(comment.user?.login) || isTrusted(comment.user?.login)),
     inlines: candidateInlines.filter((comment) => isTrusted(comment.user?.login)),
     reviews: candidateReviews.filter((review) => isTrusted(review.user?.login)),
     jumiStickies: rawComments.filter(isJumiReviewSticky),

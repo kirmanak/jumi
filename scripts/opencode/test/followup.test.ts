@@ -3332,4 +3332,28 @@ describe("needsFollowUp", () => {
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
     expect(items.comments).toEqual([]);
   });
+
+  test("bot finding sticky survives permission lookup failure while forged marker is dropped", async () => {
+    const headSha = "a62c750c0ffee000000000000000000000000000";
+    const stickyBody = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi OpenCode review",
+      "",
+      `Reviewed commit: \`${headSha}\``,
+      "",
+      "1 blocking",
+      "<!-- jumi-check: failure -->",
+    ].join("\n");
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 38022, body: stickyBody, user: makeUser({ login: "jumi" }) }),
+        makeComment({ id: 38023, body: stickyBody, user: makeUser({ login: "mallory" }) }),
+      ],
+      getCollaboratorPermission: async () => {
+        throw new Error("forge 500");
+      },
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", headSha);
+    expect(items.comments.map((comment) => comment.id)).toEqual([38022]);
+  });
 });

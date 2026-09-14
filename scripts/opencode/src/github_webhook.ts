@@ -1,6 +1,5 @@
 import { hasLabel, type IssueAssignees, type PickupPolicy } from "./assignee.ts";
 import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_webhook.ts";
-import { hasWriteAccess } from "./permissions.ts";
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
@@ -417,13 +416,6 @@ export async function handleGithubWebhookEvent(
       }
       if (isIgnoredFollowupSender(githubSender, policy.followupIgnoreLogins)) {
         return skipped("sender ignored", logger);
-      }
-      if (isObject(parsed) && isObject(parsed.repository) && typeof parsed.repository.full_name === "string") {
-        const [permOwner, permRepo] = (parsed.repository.full_name as string).split("/");
-        if (permOwner && permRepo) {
-          const trusted = await hasWriteAccess(deps.worker.api, permOwner, permRepo, githubSender?.login);
-          if (!trusted) return skipped("sender lacks write access", logger);
-        }
       }
       const eventName = event ?? "issue_comment";
       let commentBody = rawBody;
