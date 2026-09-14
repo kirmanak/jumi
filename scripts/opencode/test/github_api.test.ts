@@ -684,7 +684,7 @@ describe("GithubAPI", () => {
       const href = String(url);
       urls.push(href);
       authed.push(Boolean((init?.headers as Record<string, string> | undefined)?.Authorization));
-      if (href.includes("pipelines.actions.githubusercontent.com")) {
+      if (new URL(href).hostname === "pipelines.actions.githubusercontent.com") {
         return new Response("##[error]boom\n", { status: 200 });
       }
       if (href.includes("/actions/jobs/9/logs")) {
