@@ -68,6 +68,10 @@ describe("createWorkerFetchHandler", () => {
     expect(response.headers.get("content-type")).toContain("text/plain");
     const body = await response.text();
     expect(body).toContain("ai_token_exporter_up");
+    expect(body).toContain("jumi_jobs_completed_total");
+    expect(body).toContain("jumi_opencode_exits_total");
+    expect(body).not.toContain("jumi_review_jobs");
+    expect(body).not.toContain("jumi_webhooks_total");
     expect((await handler(new Request("https://worker.test/metrics", { method: "POST" }))).status).toBe(405);
   });
 

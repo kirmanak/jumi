@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { renderWebhookMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import {
   MemoryReviewJobStore,
   QueueUnavailableError,
@@ -60,6 +61,10 @@ async function signedRequest(
   });
 }
 
+afterEach(() => {
+  resetControlMetricsForTests();
+});
+
 describe("createFetchHandler", () => {
   test("serves health and basic HTTP errors", async () => {
     const handler = createFetchHandler(makeConfig(), { queue: makeQueue() });
@@ -77,6 +82,10 @@ describe("createFetchHandler", () => {
     expect(response.headers.get("content-type")).toContain("text/plain");
     const body = await response.text();
     expect(body).toContain('ai_token_exporter_up{agent_instance="jumi"} 1');
+    expect(body).toContain("jumi_jobs_completed_total");
+    expect(body).toContain("jumi_opencode_exits_total");
+    expect(body).not.toContain("jumi_review_jobs");
+    expect(body).not.toContain("jumi_webhooks_total");
     expect((await handler(new Request("https://reviewer.test/metrics", { method: "POST" }))).status).toBe(405);
   });
 
@@ -101,6 +110,9 @@ describe("createFetchHandler", () => {
         )
       ).status
     ).toBe(401);
+    expect(renderWebhookMetrics()).toContain('jumi_webhooks_total{event="pull_request",result="too large"} 1');
+    expect(renderWebhookMetrics()).toContain('jumi_webhooks_total{event="pull_request",result="hmac"} 1');
+    expect(renderWebhookMetrics()).not.toContain("invalid authorization header");
   });
 
   test("skips unsupported events", async () => {
@@ -109,6 +121,7 @@ describe("createFetchHandler", () => {
 
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event push" });
+    expect(renderWebhookMetrics()).toContain('jumi_webhooks_total{event="push",result="skipped"} 1');
   });
 
   test("returns ok for ping events", async () => {
@@ -116,6 +129,7 @@ describe("createFetchHandler", () => {
     const response = await handler(await signedRequest({ zen: "pong" }, { event: "ping" }));
     expect(response.status).toBe(200);
     expect(await responseJson(response)).toEqual({ ok: true });
+    expect(renderWebhookMetrics()).toContain('jumi_webhooks_total{event="ping",result="ping"} 1');
   });
 
   test("enqueues valid pull request events", async () => {
@@ -201,13 +215,14 @@ describe("createFetchHandler", () => {
     const response = await handler(await signedRequest(makePayload()));
     expect(response.status).toBe(503);
     expect(await responseJson(response)).toEqual({ error: "queue unavailable" });
+    expect(renderWebhookMetrics()).toContain('jumi_webhooks_total{event="pull_request",result="unavailable"} 1');
   });
 
   test("router webhook persists a job and serves queue metrics", async () => {
     const store = new MemoryReviewJobStore();
     const handler = createFetchHandler(makeConfig({ role: "router" }), {
       queue: store,
-      renderMetrics: () => renderQueueMetrics(store),
+      renderMetrics: async () => `${await renderQueueMetrics(store)}${renderWebhookMetrics()}`,
     });
     const response = await handler(await signedRequest(makePayload()));
     expect(response.status).toBe(202);
@@ -216,7 +231,12 @@ describe("createFetchHandler", () => {
     expect(store.rows[0]?.state).toBe("queued");
 
     const metrics = await handler(new Request("https://reviewer.test/metrics"));
-    expect(await metrics.text()).toContain('jumi_review_jobs{state="queued"} 1');
+    const text = await metrics.text();
+    expect(text).toContain('jumi_review_jobs{state="queued",kind="review"} 1');
+    expect(text).toContain('jumi_review_jobs_oldest_queued_age_seconds{kind="review"}');
+    expect(text).toContain('jumi_webhooks_total{event="pull_request",result="accepted"} 1');
+    expect(text).not.toContain("ai_token_exporter_up");
+    expect(text).not.toContain("jumi_jobs_completed_total");
   });
 
   test("engine does not expose the webhook", async () => {

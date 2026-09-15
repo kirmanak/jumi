@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
 import { INCOMPLETE_REVIEW_STUCK, MAX_INCOMPLETE_RETRIES, type ReviewApi } from "../src/review.ts";
@@ -84,6 +85,10 @@ async function withWorkspace<T>(run: (workspace: string) => Promise<T>): Promise
   }
 }
 
+afterEach(() => {
+  resetControlMetricsForTests();
+});
+
 describe("processEngineTick", () => {
   test("leases a job, persists JUMI_REVIEW.md, and posts sticky via fake API", async () => {
     await withWorkspace(async (workspace) => {
@@ -110,6 +115,7 @@ describe("processEngineTick", () => {
       expect((api.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
       expect(api.comments).toHaveLength(0);
       expect(api.statuses.map((status) => status.state)).toEqual(["pending", "success"]);
+      expect(renderRunMetrics()).toContain('jumi_jobs_completed_total{kind="review",result="succeeded"} 1');
     });
   });
 

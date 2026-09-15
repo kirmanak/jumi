@@ -10,6 +10,7 @@ import {
   syncHomeSkipLatch,
 } from "./claim.ts";
 import { implementConflict } from "./conflict.ts";
+import { recordJobCompleted } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
@@ -338,6 +339,7 @@ export async function processWorkerTick(
     await syncHomeSkipLatch(config.home, job.owner, job.repo, job.issueNumber, latch.generation);
     if (isSkipLatchReason(latch.skipReason)) {
       await store.markPublished(row.id, leasedBy, { state: "skipped", reason: latch.skipReason ?? undefined });
+      recordJobCompleted(row.kind, "skipped");
       logger(`${issueJobKey(job)} skipped: ${latch.skipReason}`);
       return "processed";
     }
@@ -426,7 +428,9 @@ export async function processWorkerTick(
         logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} after PR head changed`);
       }
     }
-    await store.markPublished(row.id, leasedBy, { state: workerPublishedState(result.status), reason });
+    const state = workerPublishedState(result.status);
+    await store.markPublished(row.id, leasedBy, { state, reason });
+    recordJobCompleted(row.kind, state);
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
     breaker.recordModelReached();
     const prNumber = pushedPrNumber(result);
@@ -488,6 +492,7 @@ export async function processWorkerTick(
         if (decision.action === "exhaust") {
           await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
           await store.markPublished(row.id, leasedBy, { state: "failed", reason: decision.reason });
+          recordJobCompleted(row.kind, "failed");
           logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
         } else {
           await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
