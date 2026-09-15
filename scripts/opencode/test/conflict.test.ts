@@ -48,6 +48,7 @@ function makeApi(
   const commentIndexes: number[] = [];
   const defaults: IssueApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getIssue: async () => makeIssue(),
     getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [jumiPr()],

@@ -16,9 +16,16 @@ export interface StuckFingerprint {
   hash: string;
 }
 
+export interface QuotaStuck {
+  reason: string;
+  updatedAt: string;
+}
+
 export interface StuckState {
   fingerprints: StuckFingerprint[];
   updatedAt: string;
+  /** Set when OpenCode hit a Free/Go usage-limit retry. Cleared with the file on kill-switch cancel. */
+  quota?: QuotaStuck;
 }
 
 export { reviewStuckStatePath, stuckStatePath };
@@ -139,7 +146,7 @@ function emptyStuckState(): StuckState {
 
 function parseStuckState(parsed: unknown): StuckState {
   if (!parsed || typeof parsed !== "object") return emptyStuckState();
-  const rec = parsed as { fingerprints?: unknown; updatedAt?: unknown };
+  const rec = parsed as { fingerprints?: unknown; updatedAt?: unknown; quota?: unknown };
   const fingerprints: StuckFingerprint[] = [];
   if (Array.isArray(rec.fingerprints)) {
     for (const entry of rec.fingerprints) {
@@ -150,10 +157,22 @@ function parseStuckState(parsed: unknown): StuckState {
       }
     }
   }
-  return {
+  let quota: QuotaStuck | undefined;
+  if (rec.quota && typeof rec.quota === "object") {
+    const q = rec.quota as { reason?: unknown; updatedAt?: unknown };
+    if (typeof q.reason === "string" && q.reason.trim()) {
+      quota = {
+        reason: q.reason,
+        updatedAt: typeof q.updatedAt === "string" ? q.updatedAt : "",
+      };
+    }
+  }
+  const state: StuckState = {
     fingerprints,
     updatedAt: typeof rec.updatedAt === "string" ? rec.updatedAt : "",
   };
+  if (quota) state.quota = quota;
+  return state;
 }
 
 export async function readStuckState(path: string): Promise<StuckState> {
@@ -177,11 +196,86 @@ export async function appendStuckFingerprint(
 ): Promise<void> {
   const state = await readStuckState(path);
   const fingerprints = [...state.fingerprints, fingerprint].slice(-STUCK_HISTORY_LIMIT);
-  await writeStuckState(path, { fingerprints, updatedAt: now().toISOString() });
+  const next: StuckState = { fingerprints, updatedAt: now().toISOString() };
+  if (state.quota) next.quota = state.quota;
+  await writeStuckState(path, next);
+}
+
+export function isQuotaStuck(state: StuckState | undefined | null): boolean {
+  return Boolean(state?.quota?.reason?.trim());
+}
+
+/**
+ * Reviewer quota gate with a TTL. Worker quota (`isQuotaStuck`) is permanent
+ * until the human kill-switch cycle deletes the file, but the reviewer flag
+ * lives at `reviewer/jobs/.../*.stuck.json` per PR number with no
+ * reviewer-side cancel entry point, so one transient quota event (quota
+ * resets in hours/days) would otherwise disable reviews for that PR forever.
+ * After the TTL the next run re-checks instead of reusing permanent
+ * fingerprint-file semantics.
+ */
+export const REVIEW_QUOTA_TTL_MS = 24 * 60 * 60 * 1000;
+
+export function isReviewQuotaStuck(state: StuckState | undefined | null, nowMs: number = Date.now()): boolean {
+  const reason = state?.quota?.reason?.trim();
+  if (!reason) return false;
+  const updatedAt = state?.quota?.updatedAt;
+  const updatedMs = typeof updatedAt === "string" && updatedAt ? Date.parse(updatedAt) : NaN;
+  if (!Number.isFinite(updatedMs)) return true;
+  return nowMs - updatedMs < REVIEW_QUOTA_TTL_MS;
+}
+
+export function quotaStuckReason(state: StuckState | undefined | null): string | undefined {
+  const reason = state?.quota?.reason?.trim();
+  return reason ? reason : undefined;
+}
+
+export async function markQuotaStuck(path: string, reason: string, now = () => new Date()): Promise<void> {
+  const state = await readStuckState(path);
+  await writeStuckState(path, {
+    fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
+    updatedAt: now().toISOString(),
+    quota: { reason, updatedAt: now().toISOString() },
+  });
+}
+
+/** Clear only the quota flag, keeping fingerprint history. Used after a
+ * successful run following a TTL-expired reviewer quota. */
+export async function clearQuotaStuck(path: string, now = () => new Date()): Promise<void> {
+  const state = await readStuckState(path);
+  if (!state.quota) return;
+  await writeStuckState(path, {
+    fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
+    updatedAt: now().toISOString(),
+  });
 }
 
 export async function deleteStuckState(home: string, owner: string, repo: string, issueNumber: number): Promise<void> {
   await deleteClaim(stuckStatePath(home, owner, repo, issueNumber));
+}
+
+/** Reviewer-side kill-switch: delete the per-PR quota/fingerprint file so the
+ * next run re-checks instead of skipping forever. Human equivalent of the
+ * worker `cancelIssueWork` clear path. */
+export async function deleteReviewStuckState(
+  home: string,
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<void> {
+  await deleteClaim(reviewStuckStatePath(home, owner, repo, prNumber));
+}
+
+/** Reviewer cancel entry point: post `stopped` is left to the caller; here we
+ * clear persisted reviewer state so a retry does not inherit a stale quota
+ * flag. Mirrors the worker `handleIssueCancel` stuck-file deletion. */
+export async function cancelReviewWork(opts: {
+  home: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+}): Promise<void> {
+  await deleteReviewStuckState(opts.home, opts.owner, opts.repo, opts.prNumber);
 }
 
 type StuckCommentApi = {

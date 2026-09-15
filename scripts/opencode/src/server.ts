@@ -79,6 +79,8 @@ export interface RunReviewJobExtras {
   heartbeatMs?: number;
   jobId?: string;
   breaker?: InfraCircuitBreaker;
+  remainingLeaseMs?: () => number | Promise<number>;
+  extendLease?: () => Promise<boolean>;
 }
 
 export async function runReviewJob(
@@ -98,6 +100,10 @@ export async function runReviewJob(
       expectedHeadSha: job.headSha,
       model: config.model,
       variant: config.variant,
+      fallbackModel: config.fallbackModel,
+      fallbackVariant: config.fallbackVariant,
+      remainingLeaseMs: extras.remainingLeaseMs,
+      extendLease: extras.extendLease,
       workspace,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
@@ -240,7 +246,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           logger(`queue unavailable: ${err.message}`);
           return json(503, { error: "queue unavailable" });
         }
-        return json(400, { error: err instanceof Error ? err.message : String(err) });
+        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+        return json(400, { error: "invalid webhook payload" });
       }
     }
 
@@ -429,6 +436,12 @@ export async function processEngineTick(
       ...extras,
       abortSignal: abort.signal,
       jobId: String(row.id),
+      remainingLeaseMs: async () => {
+        const current = await store.get(row.id);
+        if (current?.leasedUntil == null) return 0;
+        return Math.max(0, current.leasedUntil - Date.now());
+      },
+      extendLease: () => store.heartbeat(row.id, leasedBy, config.leaseMs),
       persistResult: async (persisted) => {
         await store.saveResult(row.id, leasedBy, persisted);
       },
@@ -532,6 +545,7 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
     getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
     getRepo: (owner, repo) => api.getRepo(owner, repo),
     getPR: (owner, repo, index) => api.getPR(owner, repo, index),
+    getCollaboratorPermission: (owner, repo, username) => api.getCollaboratorPermission(owner, repo, username),
     listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)

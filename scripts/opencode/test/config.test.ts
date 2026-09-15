@@ -73,6 +73,17 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...required, OPENCODE_VARIANT: "xhigh" }).variant).toBe("xhigh");
   });
 
+  test("OPENCODE_FALLBACK_MODEL and VARIANT are omitted unless set", () => {
+    expect(loadConfig(required).fallbackModel).toBeUndefined();
+    expect(loadConfig(required).fallbackVariant).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_FALLBACK_MODEL: "" }).fallbackModel).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_FALLBACK_VARIANT: "" }).fallbackVariant).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_FALLBACK_MODEL: "anthropic/claude-sonnet-4-6" }).fallbackModel).toBe(
+      "anthropic/claude-sonnet-4-6"
+    );
+    expect(loadConfig({ ...required, OPENCODE_FALLBACK_VARIANT: "high" }).fallbackVariant).toBe("high");
+  });
+
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {
     const config = loadConfig({
       ...required,

@@ -41,6 +41,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
   const pulls: unknown[] = [];
   const defaults: IssueApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getIssue: async () => makeIssue(),
     getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [],
