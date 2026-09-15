@@ -499,7 +499,7 @@ describe("pullWaitClearJobsToEnqueue", () => {
     expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
   });
 
-  test("Gitea unassigned foreign PR does not wake when payload has no assignee", async () => {
+  test("Gitea unassigned foreign PR wakes when payload has no assignee and the bot is gone", async () => {
     const jobs = await pullWaitClearJobsToEnqueue(
       makePayload({
         action: "unassigned",
@@ -523,13 +523,15 @@ describe("pullWaitClearJobsToEnqueue", () => {
       policy,
       {
         listOpenPulls: async () => [],
-        listRepoIssues: async () => {
-          throw new Error("should not list assigned issues");
-        },
-        getIssue: async () => makeIssue({ number: 4386 }),
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
       }
     );
-    expect(jobs).toEqual([]);
+    expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
   });
 
   test("Gitea unassigned foreign PR does not wake when the bot remains assigned", async () => {
