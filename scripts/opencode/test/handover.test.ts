@@ -10,6 +10,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: st
   const comments: string[] = [];
   const defaults: ReviewApi = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getPR: async () =>
       makePR({
         body: "Fixes #12",
