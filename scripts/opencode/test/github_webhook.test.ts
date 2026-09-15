@@ -416,6 +416,53 @@ describe("POST /webhooks/github", () => {
     expect(store.rows[0]?.kind).toBe("implement");
   });
 
+  test("closed pull_request for a disallowed org is 400 not 503", async () => {
+    const logs: string[] = [];
+    const store = new MemoryReviewJobStore();
+    const other = makeRepo({
+      owner: makeUser({ login: "other" }),
+      full_name: "other/demo",
+      html_url: "https://github.com/other/demo",
+      clone_url: "https://github.com/other/demo.git",
+    });
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      logger: (message) => logs.push(message),
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () => githubIssue(),
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "closed",
+          repository: other,
+          pull_request: makePR({
+            state: "closed",
+            merged: true,
+            html_url: "https://github.com/other/demo/pulls/7",
+            head: {
+              label: "other:feature",
+              ref: "feature",
+              sha: "headsha",
+              repo: other,
+              repo_id: other.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(400);
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
+    expect(logs.some((line) => line.includes("not allowed"))).toBe(true);
+    expect(store.rows).toHaveLength(0);
+  });
+
   test("enqueues review on synchronize and skips draft / WIP", async () => {
     const queue = makeReviewQueue();
     const handler = createFetchHandler(githubConfig(), { queue });

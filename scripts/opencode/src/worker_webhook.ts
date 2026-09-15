@@ -19,7 +19,7 @@ import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts"
 import type { EnqueueResult } from "./queue.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import type { IssueJob } from "./types.ts";
-import { parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
+import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
 export type WorkerWebhookPolicy = WebhookPolicy & {
   botUsername: string;
@@ -147,14 +147,14 @@ async function enqueueJobList(
 }
 
 async function wakeJobsFromPull(
-  rawBody: Uint8Array,
+  payload: ReturnType<typeof parsePullRequestPayload>,
   delivery: string,
   policy: WorkerWebhookPolicy,
-  deps: HandleWorkerWebhookDeps
+  deps: HandleWorkerWebhookDeps,
+  logger?: (message: string) => void
 ): Promise<IssueJob[]> {
   if (!deps.api) return [];
-  const payload = parsePullRequestPayload(rawBody);
-  const partials = await pullWaitClearJobsToEnqueue(payload, policy, deps.api);
+  const partials = await pullWaitClearJobsToEnqueue(payload, policy, deps.api, logger);
   const receivedAt = new Date().toISOString();
   return partials.map((partial) => ({ ...partial, delivery, receivedAt }));
 }
@@ -200,19 +200,21 @@ export async function handleWorkerWebhookEvent(
         logger
       );
     }
-    if (action === "closed" || action === "merged") {
-      try {
-        const jobs = await wakeJobsFromPull(rawBody, delivery, policy, deps);
-        if (jobs.length === 0) {
-          return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
-        }
-        return enqueueJobList(jobs, deps.queue, delivery, logger);
-      } catch (err) {
-        return wakeFailedResponse(err, logger);
-      }
-    }
     try {
-      const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api, logger);
+      const payload = parsePullRequestPayload(rawBody);
+      if (action === "closed" || action === "merged") {
+        assertRepositoryPolicy(payload.repository, policy);
+        try {
+          const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
+          if (jobs.length === 0) {
+            return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
+          }
+          return enqueueJobList(jobs, deps.queue, delivery, logger);
+        } catch (err) {
+          return wakeFailedResponse(err, logger);
+        }
+      }
+      const decision = await shouldEnqueuePullAssign(payload, policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       if (decision.type === "cancel") {
         const result = deps.cancel
@@ -220,7 +222,7 @@ export async function handleWorkerWebhookEvent(
           : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
         logger(`cancelled ${result.key}`);
         try {
-          const jobs = await wakeJobsFromPull(rawBody, delivery, policy, deps);
+          const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
           if (jobs.length > 0) return enqueueJobList(jobs, deps.queue, delivery, logger);
         } catch (err) {
           return wakeFailedResponse(err, logger);

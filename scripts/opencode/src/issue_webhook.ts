@@ -271,7 +271,8 @@ export async function pullWaitClearJobsToEnqueue(
       opts?: { state?: "open" | "closed" | "all"; type?: "issues" | "pulls"; assignedBy?: string }
     ): Promise<LinkedIssue[]>;
     getRepo?(owner: string, repo: string): Promise<Repo>;
-  }
+  },
+  logger?: (message: string) => void
 ): Promise<Omit<IssueJob, "delivery" | "receivedAt">[]> {
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   const pr = payload.pull_request;
@@ -298,19 +299,15 @@ export async function pullWaitClearJobsToEnqueue(
       }
     } catch (err) {
       blocksError = err;
+      logger?.(`failed to list issue blocks: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   if (api.listRepoIssues && shouldWakeAssignedIssues(payload, owner, repo, policy.botUsername)) {
-    let remainingLock = false;
-    try {
-      const pulls = await api.listOpenPulls(owner, repo);
-      remainingLock = pulls.some(
-        (open) => open.number !== pr.number && isAssignedForeignPR(open, owner, repo, policy.botUsername)
-      );
-    } catch {
-      remainingLock = true;
-    }
+    const pulls = await api.listOpenPulls(owner, repo);
+    const remainingLock = pulls.some(
+      (open) => open.number !== pr.number && isAssignedForeignPR(open, owner, repo, policy.botUsername)
+    );
     if (!remainingLock) {
       const assigned = await assignedIssueJobsToEnqueue(
         owner,

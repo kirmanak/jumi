@@ -505,6 +505,61 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs[0]?.mode).toBeUndefined();
   });
 
+  test("closed assigned foreign PR still wakes when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386, title: "stale" })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            title: "Configure",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 4373,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#4386", queued: true });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
   test("unassigned foreign PR cancels then wakes other assigned issues", async () => {
     const queue = makeQueue();
     const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
@@ -760,6 +815,115 @@ describe("createWorkerFetchHandler", () => {
     expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
     expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
     expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed assigned foreign PR returns 503 when listing open pulls fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => {
+          throw new Error("pulls down");
+        },
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () => makeIssue({ number: 4386 }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 4373,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("pulls down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed pull_request with a missing pull_request is 400 not 503", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        getIssue: async () => makeIssue({ number: 4386 }),
+      },
+    });
+    const response = await handler(
+      await signedRequest({ action: "closed", repository: makeRepo() }, { event: "pull_request" })
+    );
+    expect(response.status).toBe(400);
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
+    expect(logs.some((line) => line.includes("missing pull_request"))).toBe(true);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed pull_request for a disallowed org is 400 not 503", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const other = makeRepo({ owner: makeUser({ login: "other" }), full_name: "other/demo" });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        getIssue: async () => makeIssue({ number: 4386 }),
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          repository: other,
+          pull_request: makePR({
+            state: "closed",
+            merged: true,
+            html_url: "https://gitea.kirmanak.stream/other/demo/pulls/7",
+            head: {
+              label: "other:feature",
+              ref: "feature",
+              sha: "headsha",
+              repo: other,
+              repo_id: other.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(400);
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
+    expect(logs.some((line) => line.includes("not allowed"))).toBe(true);
     expect(queue.jobs).toHaveLength(0);
   });
 

@@ -602,6 +602,7 @@ describe("pullWaitClearJobsToEnqueue", () => {
   });
 
   test("listIssueBlocks failure still wakes assigned issues", async () => {
+    const logs: string[] = [];
     const jobs = await pullWaitClearJobsToEnqueue(
       makePayload({ action: "closed", pull_request: foreign, repository: repo }),
       policy,
@@ -617,9 +618,23 @@ describe("pullWaitClearJobsToEnqueue", () => {
             title: "Slice",
             html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
           }),
-      }
+      },
+      (message) => logs.push(message)
     );
     expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+  });
+
+  test("listOpenPulls failure throws so the webhook can retry", async () => {
+    await expect(
+      pullWaitClearJobsToEnqueue(makePayload({ action: "closed", pull_request: foreign, repository: repo }), policy, {
+        listOpenPulls: async () => {
+          throw new Error("pulls down");
+        },
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () => makeIssue({ number: 4386 }),
+      })
+    ).rejects.toThrow("pulls down");
   });
 
   test("listIssueBlocks failure throws when assigned wake does not apply", async () => {
