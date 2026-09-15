@@ -2,13 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, readClaim } from "../src/claim.ts";
+import { claimFilePath, readClaim, stuckStatePath } from "../src/claim.ts";
 import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
+import { isQuotaWaitError, QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
+import { isQuotaStuck, readStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
   emptyCiMethods,
@@ -1808,6 +1810,69 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
+    });
+  });
+
+  test("Free/Zen quota without fallback throws wait and does not set the skip flag", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        return "";
+      };
+      let err: unknown;
+      try {
+        await implementIssue({
+          api,
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "opencode/big-pickle",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" }),
+          logger: () => undefined,
+        });
+      } catch (caught) {
+        err = caught;
+      }
+      expect(isQuotaWaitError(err)).toBe(true);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
+      expect(isQuotaStuck(await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12)))).toBe(false);
+    });
+  });
+
+  test("Insufficient balance stays immediate stuck", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "opencode/big-pickle",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "hard" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: QUOTA_STUCK_TEXT });
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(true);
+      expect(isQuotaStuck(await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12)))).toBe(true);
     });
   });
 });

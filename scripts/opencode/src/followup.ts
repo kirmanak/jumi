@@ -46,6 +46,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { trustedWriteLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { throwIfQuotaWait } from "./quota_wait.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -1042,6 +1043,12 @@ export async function implementFollowUp(
         });
       } catch (err: unknown) {
         if (isQuotaError(err)) {
+          throwIfQuotaWait({
+            err,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            previousError: opts.previousError,
+          });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
@@ -1166,6 +1173,12 @@ export async function implementFollowUp(
         // Gate on the message so a future non-quota `stuck` producer uses the
         // fingerprint path instead of the human-clear quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
+          throwIfQuotaWait({
+            result,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            previousError: opts.previousError,
+          });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
@@ -1199,6 +1212,12 @@ export async function implementFollowUp(
         });
       } catch (err) {
         if (isQuotaError(err)) {
+          throwIfQuotaWait({
+            err,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            previousError: opts.previousError,
+          });
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
         }
         throw err;
@@ -1243,6 +1262,12 @@ export async function implementFollowUp(
     },
     async (err) => {
       if (isQuotaError(err)) {
+        throwIfQuotaWait({
+          err,
+          model: opts.model,
+          fallbackModel: opts.fallbackModel,
+          previousError: opts.previousError,
+        });
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
         await loop.stopHeartbeat();

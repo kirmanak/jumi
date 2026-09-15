@@ -26,6 +26,7 @@ import { buildTaskMarkdown, type HelmRunner, type ImplementOptions, type OpenCod
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { throwIfQuotaWait } from "./quota_wait.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -634,6 +635,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         });
       } catch (err: unknown) {
         if (isQuotaError(err)) {
+          throwIfQuotaWait({
+            err,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            previousError: opts.previousError,
+          });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           await loop.stopHeartbeat();
@@ -699,6 +706,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             // Gate on the message so a future non-quota `stuck` producer does
             // not set the human-clear quota flag.
             if (continued.status === "stuck" && isQuotaText(continued.message)) {
+              throwIfQuotaWait({
+                result: continued,
+                model: opts.model,
+                fallbackModel: opts.fallbackModel,
+                previousError: opts.previousError,
+              });
               await sticky(QUOTA_STUCK_TEXT, pr.number);
               await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
               throw new Error(QUOTA_STUCK_TEXT);
@@ -709,6 +722,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         });
       } catch (err) {
         if (isQuotaError(err)) {
+          throwIfQuotaWait({
+            err,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            previousError: opts.previousError,
+          });
           await loop.stopHeartbeat();
           await loop.forgetSerialized().catch(() => undefined);
           await loop.detachWorktree();
@@ -743,6 +762,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     },
     async (err) => {
       if (isQuotaError(err)) {
+        throwIfQuotaWait({
+          err,
+          model: opts.model,
+          fallbackModel: opts.fallbackModel,
+          previousError: opts.previousError,
+        });
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
         await loop.stopHeartbeat();

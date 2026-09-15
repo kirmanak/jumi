@@ -39,6 +39,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { throwIfQuotaWait } from "./quota_wait.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -104,6 +105,7 @@ export interface ImplementOptions extends PickupPolicy {
   onPid?: (pid: number) => void | Promise<void>;
   jobId?: string;
   skipLatches?: SkipLatchStore;
+  previousError?: string | null;
 }
 
 function logDefault(message: string) {
@@ -303,6 +305,12 @@ export async function implementIssue(
         // Gate on the message: only the quota path returns engine `stuck`
         // today, but a future non-quota producer must not set the quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
+          throwIfQuotaWait({
+            result,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            previousError: opts.previousError,
+          });
           await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
@@ -437,6 +445,12 @@ export async function implementIssue(
         });
       } catch (err) {
         if (isQuotaError(err)) {
+          throwIfQuotaWait({
+            err,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            previousError: opts.previousError,
+          });
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
         }
         throw err;
@@ -481,6 +495,12 @@ export async function implementIssue(
     },
     async (err) => {
       if (isQuotaError(err)) {
+        throwIfQuotaWait({
+          err,
+          model: opts.model,
+          fallbackModel: opts.fallbackModel,
+          previousError: opts.previousError,
+        });
         await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT).catch(
           () => undefined
         );
