@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { ciStatePath } from "./claim.ts";
 import type { ActionJob, Check, CheckState, Forge } from "./ports.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 
@@ -252,14 +251,6 @@ export async function writeCiState(path: string, state: CiFollowUpState): Promis
   const latch = skipLatchStoreFromPath(path);
   if (!latch) return;
   await writeCiLatch(latch.store, latch.key, state);
-}
-
-export async function deleteCiState(home: string, owner: string, repo: string, issueNumber: number): Promise<void> {
-  await skipLatchStoreFromPath(ciStatePath(home, owner, repo, issueNumber))?.store.delete({
-    owner,
-    repo,
-    issueNumber,
-  });
 }
 
 function handledKey(sha: string, checkName: string): string {

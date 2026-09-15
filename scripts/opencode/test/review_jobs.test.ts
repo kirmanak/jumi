@@ -10,6 +10,7 @@ import {
   REVIEW_JOBS_SCHEMA_SQL,
   WORKER_JOB_KINDS,
 } from "../src/review_jobs.ts";
+import { ISSUE_SKIP_LATCHES_SCHEMA_SQL } from "../src/skip_latches.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
 
 describe("MemoryReviewJobStore", () => {
@@ -618,7 +619,8 @@ describe("PgReviewJobStore.migrate", () => {
     expect(indexAt).toBeGreaterThan(requeueAt);
     expect(REVIEW_JOBS_SCHEMA_SQL).toContain("WHERE rn > 1");
     expect(REVIEW_JOBS_SCHEMA_SQL).toContain("state = 'queued'");
-    expect(REVIEW_JOBS_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS issue_skip_latches");
+    expect(ISSUE_SKIP_LATCHES_SCHEMA_SQL).toContain("generation INTEGER NOT NULL DEFAULT 0");
+    expect(ISSUE_SKIP_LATCHES_SCHEMA_SQL).toContain("skip_reason TEXT");
   });
 });
 

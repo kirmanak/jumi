@@ -197,7 +197,6 @@ export async function handleIssueCancel(
         issueNumber,
         botUsername: config.botUsername,
         home: config.home,
-        skipLatches: latches,
         ...skipClaimKill,
       });
     }
@@ -210,7 +209,6 @@ export async function handleIssueCancel(
     issueNumber,
     botUsername: config.botUsername,
     home: config.home,
-    skipLatches: latches,
     ...skipClaimKill,
   });
   return { key, cancelled: true };

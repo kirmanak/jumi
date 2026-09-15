@@ -307,14 +307,6 @@ export async function clearQuotaStuck(path: string, now = () => new Date()): Pro
   });
 }
 
-export async function deleteStuckState(home: string, owner: string, repo: string, issueNumber: number): Promise<void> {
-  await skipLatchStoreFromPath(stuckStatePath(home, owner, repo, issueNumber))?.store.delete({
-    owner,
-    repo,
-    issueNumber,
-  });
-}
-
 /** Reviewer-side kill-switch: delete the per-PR quota/fingerprint file so the
  * next run re-checks instead of skipping forever. Human equivalent of the
  * worker `cancelIssueWork` clear path. */

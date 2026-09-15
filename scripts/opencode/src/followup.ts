@@ -187,19 +187,6 @@ export async function writeFollowUpState(path: string, state: FollowUpState): Pr
   await writeFollowUpLatch(latch.store, latch.key, state);
 }
 
-export async function deleteFollowUpState(
-  home: string,
-  owner: string,
-  repo: string,
-  issueNumber: number
-): Promise<void> {
-  await skipLatchStoreFromPath(followUpStatePath(home, owner, repo, issueNumber))?.store.delete({
-    owner,
-    repo,
-    issueNumber,
-  });
-}
-
 export function isInScopeHumanComment(
   comment: { body?: string | null; user?: { login?: string } },
   botUsername: string,

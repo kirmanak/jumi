@@ -182,27 +182,6 @@ WHERE id IN (
 CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
   ON review_jobs (owner, repo, issue_number)
   WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS issue_skip_latches (
-  owner TEXT NOT NULL,
-  repo TEXT NOT NULL,
-  issue_number INTEGER NOT NULL,
-  generation INTEGER NOT NULL DEFAULT 0,
-  skip_reason TEXT,
-  followup JSONB NOT NULL DEFAULT '{}'::jsonb,
-  conflict JSONB NOT NULL DEFAULT '{}'::jsonb,
-  ci JSONB NOT NULL DEFAULT '{}'::jsonb,
-  stuck JSONB NOT NULL DEFAULT '{}'::jsonb,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (owner, repo, issue_number)
-);
-
-ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS generation INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS skip_reason TEXT;
-ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS followup JSONB NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS conflict JSONB NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS ci JSONB NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS stuck JSONB NOT NULL DEFAULT '{}'::jsonb;
 `;
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {

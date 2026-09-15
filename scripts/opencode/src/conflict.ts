@@ -151,19 +151,6 @@ export async function writeConflictState(path: string, state: ConflictState): Pr
   await writeConflictLatch(latch.store, latch.key, state);
 }
 
-export async function deleteConflictState(
-  home: string,
-  owner: string,
-  repo: string,
-  issueNumber: number
-): Promise<void> {
-  await skipLatchStoreFromPath(conflictStatePath(home, owner, repo, issueNumber))?.store.delete({
-    owner,
-    repo,
-    issueNumber,
-  });
-}
-
 export async function needsConflict(opts: {
   pr: Pull;
   owner: string;

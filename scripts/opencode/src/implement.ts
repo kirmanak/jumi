@@ -520,7 +520,6 @@ export async function cancelIssueWork(opts: {
   home: string;
   pidAlive?: (pid: number) => boolean;
   killPid?: (pid: number) => void;
-  skipLatches?: SkipLatchStore;
 }): Promise<void> {
   const claimPath = claimFilePath(opts.home, opts.owner, opts.repo, opts.issueNumber);
   const claim = await readClaim(claimPath);
@@ -535,9 +534,4 @@ export async function cancelIssueWork(opts: {
   }
   await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");
   await deleteClaim(claimPath);
-  await skipLatchesFor(opts).delete({
-    owner: opts.owner,
-    repo: opts.repo,
-    issueNumber: opts.issueNumber,
-  });
 }
