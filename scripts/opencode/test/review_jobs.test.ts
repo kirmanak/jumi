@@ -338,6 +338,24 @@ describe("MemoryReviewJobStore", () => {
     expect(retry.publish).toHaveLength(1);
     expect(retry.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
   });
+
+  test("skip latch is shared and kill-switch clear bumps generation", async () => {
+    const store = new MemoryReviewJobStore();
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 0, skipReason: null });
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({
+      generation: 0,
+      skipReason: "stuck: cannot resolve conflicts",
+    });
+    expect(await store.clearIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: repeated error");
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({
+      generation: 1,
+      skipReason: "stuck: repeated error",
+    });
+    expect(await store.clearIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 2, skipReason: null });
+  });
 });
 
 type FakeSql = {
@@ -600,6 +618,7 @@ describe("PgReviewJobStore.migrate", () => {
     expect(indexAt).toBeGreaterThan(requeueAt);
     expect(REVIEW_JOBS_SCHEMA_SQL).toContain("WHERE rn > 1");
     expect(REVIEW_JOBS_SCHEMA_SQL).toContain("state = 'queued'");
+    expect(REVIEW_JOBS_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS issue_skip_latches");
   });
 });
 
@@ -782,5 +801,12 @@ describe("PgReviewJobStore kind ANY() bind", () => {
     await store.cancelQueuedForIssue("personal", "jumi", 149);
     const cancel = captured.find((row) => row.query.includes("kind = ANY($4::text[])"));
     expect(cancel?.params?.[3]).toBe("{implement,follow-up,conflict}");
+
+    captured.length = 0;
+    await store.clearIssueSkipLatch("kirmanak", "demo", 12);
+    const clearLatch = captured.find((row) => row.query.includes("issue_skip_latches") && row.query.includes("INSERT"));
+    expect(clearLatch?.query).toContain("generation = issue_skip_latches.generation + 1");
+    expect(clearLatch?.query).toContain("skip_reason = NULL");
+    expect(clearLatch?.params).toEqual(["kirmanak", "demo", 12]);
   });
 });

@@ -7,7 +7,7 @@ import {
   shouldEnqueueGithubIssue,
   verifyGithubSignature,
 } from "../src/github_webhook.ts";
-import { MemoryReviewJobStore } from "../src/review_jobs.ts";
+import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { createFetchHandler } from "../src/server.ts";
 import type { IssueJob, ReviewJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
@@ -274,6 +274,35 @@ describe("POST /webhooks/github", () => {
       ci: {},
       stuck: {},
     });
+  });
+
+  test("unlabel jumi clears the skip latch even with no queued jobs", async () => {
+    const { handler, store } = mailbox();
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+    const response = await handler(
+      await signedGithubRequest(labeledPayload({ action: "unlabeled", issue: githubIssue({ labels: [] }) }), {
+        event: "issues",
+      })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", cancelled: true });
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+  });
+
+  test("relabel after succeeded implement stays the same closer", async () => {
+    const { handler, store } = mailbox();
+    expect((await handler(await signedGithubRequest(labeledPayload(), { event: "issues" }))).status).toBe(202);
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    await store.markPublished(leased!.id, "worker-1", { state: "succeeded" });
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+    await handler(
+      await signedGithubRequest(labeledPayload({ action: "unlabeled", issue: githubIssue({ labels: [] }) }), {
+        event: "issues",
+      })
+    );
+    const relabel = await handler(await signedGithubRequest(labeledPayload(), { event: "issues" }));
+    expect(await responseJson(relabel)).toEqual({ key: "implement:kirmanak/demo#12", queued: false });
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
   });
 
   test("bad HMAC is 401 and ping is 200", async () => {

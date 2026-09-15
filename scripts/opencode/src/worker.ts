@@ -1,4 +1,14 @@
-import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
+import {
+  ciStatePath,
+  claimFilePath,
+  conflictStatePath,
+  deleteClaim,
+  followUpStatePath,
+  isPidAlive,
+  readClaim,
+  stuckStatePath,
+  syncHomeSkipLatch,
+} from "./claim.ts";
 import { implementConflict } from "./conflict.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
@@ -10,6 +20,7 @@ import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
+import { isSkipLatchReason } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
@@ -158,11 +169,20 @@ export async function handleIssueCancel(
     abortIssueJob(queue, key);
   }
   abortLocalJob(aborts, pids, key);
-  const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
   await latches.delete({ owner, repo, issueNumber });
+  const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
+  const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
   const claim = await readClaim(claimPath);
+  if (latch) {
+    await syncHomeSkipLatch(config.home, owner, repo, issueNumber, latch.generation);
+  } else {
+    await deleteClaim(followUpStatePath(config.home, owner, repo, issueNumber));
+    await deleteClaim(conflictStatePath(config.home, owner, repo, issueNumber));
+    await deleteClaim(ciStatePath(config.home, owner, repo, issueNumber));
+    await deleteClaim(stuckStatePath(config.home, owner, repo, issueNumber));
+  }
   if (claim?.terminal) {
     await deleteClaim(claimPath);
     return { key, cancelled: true };
@@ -200,6 +220,12 @@ function workerPublishedState(status: string): "succeeded" | "skipped" | "failed
   if (status === "skipped" || status === "cancelled" || status === "no-changes") return "skipped";
   if (status === "failed") return "failed";
   return "succeeded";
+}
+
+function skipLatchReasonFromResult(result: { status: string; reason?: string }): string | undefined {
+  if (result.status === "skipped" && isSkipLatchReason(result.reason)) return result.reason;
+  if (result.status === "stuck") return result.reason ?? "stuck: cannot resolve conflicts";
+  return undefined;
 }
 
 export async function reclaimExpiredWorkerJobs(
@@ -308,6 +334,13 @@ export async function processWorkerTick(
 
   try {
     const job = issueJobFromRecord(row);
+    const latch = await store.readIssueSkipLatch(job.owner, job.repo, job.issueNumber);
+    await syncHomeSkipLatch(config.home, job.owner, job.repo, job.issueNumber, latch.generation);
+    if (isSkipLatchReason(latch.skipReason)) {
+      await store.markPublished(row.id, leasedBy, { state: "skipped", reason: latch.skipReason ?? undefined });
+      logger(`${issueJobKey(job)} skipped: ${latch.skipReason}`);
+      return "processed";
+    }
     const shared = {
       api,
       job,
@@ -377,6 +410,10 @@ export async function processWorkerTick(
     }
     const reason =
       result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
+    const latchReason = skipLatchReasonFromResult(result);
+    if (latchReason) {
+      await store.setIssueSkipReason(job.owner, job.repo, job.issueNumber, latchReason);
+    }
     if (result.status === "skipped" && job.mode === "follow-up" && reason) {
       const moved = parsePrHeadChangedReason(reason);
       if (moved?.to && moved.to !== job.headSha) {

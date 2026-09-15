@@ -37,6 +37,10 @@ export function stuckComment(reason: StuckReason): string {
   return "stuck: ping-pong";
 }
 
+export function isSkipLatchReason(reason: string | null | undefined): boolean {
+  return Boolean(reason?.startsWith("stuck:"));
+}
+
 export function stuckMarker(owner: string, repo: string, index: number): string {
   return `<!-- jumi-stuck:${owner}/${repo}#${index} -->`;
 }
