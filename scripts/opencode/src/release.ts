@@ -783,6 +783,110 @@ export async function publishGitHubRelease(opts: {
   return { tagCreated, releaseCreated: true };
 }
 
+export async function runPublishGitHub(opts: {
+  repoDir: string;
+  apiUrl: string;
+  token: string;
+  owner: string;
+  repo: string;
+  sha: string;
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
+}): Promise<void> {
+  const { repoDir: root, apiUrl, token, owner, repo, sha, fetchImpl } = opts;
+  const plan = computeRelease(root);
+  const latest = latestSemverTag(root);
+  if (plan.bump === "reuse") {
+    const result = await publishGitHubRelease({
+      apiUrl,
+      token,
+      owner,
+      repo,
+      sha,
+      version: plan.version,
+      body: plan.body,
+      fetchImpl,
+    });
+    console.log(
+      `Published ${plan.version} bump=reuse tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
+    );
+    const older = listSemverTags(root).filter((tag) => tag !== plan.version);
+    const previousLatest = older.at(-1) ?? null;
+    if (previousLatest && previousLatest !== plan.version) {
+      const tagCommit = peeledCommitForTag(root, previousLatest);
+      if (tagCommit) {
+        const backfill = await publishGitHubRelease({
+          apiUrl,
+          token,
+          owner,
+          repo,
+          sha: tagCommit,
+          version: previousLatest,
+          body: releaseBodyForTag(root, previousLatest),
+          makeLatest: false,
+          skipMissingRelease: true,
+          fetchImpl,
+        });
+        console.log(
+          `Backfilled ${previousLatest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`
+        );
+      }
+    }
+    return;
+  }
+  if (touchesGitHubWorkflows(root, sha)) {
+    console.log(
+      `Skipping new version ${plan.version} on ${sha} because it touches .github/workflows; backfilling latest tag if needed`
+    );
+    if (latest) {
+      const tagCommit = peeledCommitForTag(root, latest);
+      if (tagCommit) {
+        const backfill = await publishGitHubRelease({
+          apiUrl,
+          token,
+          owner,
+          repo,
+          sha: tagCommit,
+          version: latest,
+          body: releaseBodyForTag(root, latest),
+          fetchImpl,
+        });
+        console.log(`Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`);
+      }
+    }
+    return;
+  }
+  const result = await publishGitHubRelease({
+    apiUrl,
+    token,
+    owner,
+    repo,
+    sha,
+    version: plan.version,
+    body: plan.body,
+    fetchImpl,
+  });
+  console.log(
+    `Published ${plan.version} bump=${plan.bump} tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
+  );
+  if (latest && latest !== plan.version) {
+    const tagCommit = peeledCommitForTag(root, latest);
+    if (tagCommit) {
+      const backfill = await publishGitHubRelease({
+        apiUrl,
+        token,
+        owner,
+        repo,
+        sha: tagCommit,
+        version: latest,
+        body: releaseBodyForTag(root, latest),
+        makeLatest: false,
+        fetchImpl,
+      });
+      console.log(`Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`);
+    }
+  }
+}
+
 async function main(args: string[]): Promise<void> {
   const command = args[0] ?? "next-version";
   const root = repoRoot();
@@ -835,77 +939,7 @@ async function main(args: string[]): Promise<void> {
     if (!repository?.includes("/")) throw new Error("GITHUB_REPOSITORY is required");
     if (!sha) throw new Error("GITHUB_SHA is required");
     const [owner, repo] = repository.split("/");
-    const latest = latestSemverTag(root);
-    if (plan.bump === "reuse") {
-      const result = await publishGitHubRelease({
-        apiUrl,
-        token,
-        owner,
-        repo,
-        sha,
-        version: plan.version,
-        body: plan.body,
-      });
-      console.log(
-        `Published ${plan.version} bump=reuse tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
-      );
-      const older = listSemverTags(root).filter((tag) => tag !== plan.version);
-      const previousLatest = older.at(-1) ?? null;
-      if (previousLatest && previousLatest !== plan.version) {
-        const tagCommit = peeledCommitForTag(root, previousLatest);
-        if (tagCommit) {
-          const backfill = await publishGitHubRelease({
-            apiUrl,
-            token,
-            owner,
-            repo,
-            sha: tagCommit,
-            version: previousLatest,
-            body: releaseBodyForTag(root, previousLatest),
-            makeLatest: false,
-            skipMissingRelease: true,
-          });
-          console.log(
-            `Backfilled ${previousLatest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`
-          );
-        }
-      }
-      return;
-    }
-    if (touchesGitHubWorkflows(root, sha)) {
-      console.log(
-        `Skipping new version ${plan.version} on ${sha} because it touches .github/workflows; not backfilling ${latest ?? "latest"} this run so the next non-workflow main push can create that Release`
-      );
-      return;
-    }
-    const result = await publishGitHubRelease({
-      apiUrl,
-      token,
-      owner,
-      repo,
-      sha,
-      version: plan.version,
-      body: plan.body,
-    });
-    console.log(
-      `Published ${plan.version} bump=${plan.bump} tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
-    );
-    if (latest && latest !== plan.version) {
-      const tagCommit = peeledCommitForTag(root, latest);
-      if (tagCommit) {
-        const backfill = await publishGitHubRelease({
-          apiUrl,
-          token,
-          owner,
-          repo,
-          sha: tagCommit,
-          version: latest,
-          body: releaseBodyForTag(root, latest),
-          makeLatest: false,
-        });
-        console.log(`Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`);
-      }
-    }
+    await runPublishGitHub({ repoDir: root, apiUrl, token, owner, repo, sha });
     return;
   }
   throw new Error(`Unknown command: ${command}`);

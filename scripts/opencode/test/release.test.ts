@@ -14,8 +14,10 @@ import {
   nextVersionFrom,
   parseContract,
   parseSemVerTag,
+  peeledCommitForTag,
   publishGitHubRelease,
   publishRelease,
+  runPublishGitHub,
   shouldSkipImageBuild,
   touchesGitHubWorkflows,
   workflowRebuildsOnTag,
@@ -773,6 +775,64 @@ describe("publishGitHubRelease", () => {
       make_latest: "false",
     });
     expect(created?.body).not.toHaveProperty("target_commitish");
+  });
+
+  test("workflow-only HEAD backfills existing latest without target_commitish and does not mint", async () => {
+    await withRepo(
+      async (dir) => {
+        await mkdir(join(dir, "deploy"));
+        await writeFile(join(dir, "deploy/contract.md"), BASE_CONTRACT);
+        git(["add", "deploy/contract.md"], dir);
+        git(["commit", "-m", "baseline"], dir);
+        git(["tag", "-a", "v1.0.0", "-m", "v1.0.0"], dir);
+        await mkdir(join(dir, ".github/workflows"), { recursive: true });
+        await writeFile(join(dir, ".github/workflows/ci.yml"), "name: ci\non: push\n");
+        git(["add", ".github/workflows/ci.yml"], dir);
+        git(["commit", "-m", "workflow only"], dir);
+      },
+      async (dir) => {
+        const tagSha = peeledCommitForTag(dir, "v1.0.0");
+        const headSha = peeledCommitForTag(dir, "HEAD");
+        expect(tagSha).toBeTruthy();
+        expect(headSha).toBeTruthy();
+        const calls: { method: string; url: string; body?: unknown }[] = [];
+        const fetchImpl = async (input: string, init?: RequestInit) => {
+          const url = String(input);
+          const method = init?.method ?? "GET";
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+          calls.push({ method, url, body });
+          if (url.endsWith("/git/ref/tags/v1.0.0") && method === "GET") {
+            return new Response(JSON.stringify({ object: { sha: tagSha, type: "commit" } }), { status: 200 });
+          }
+          if (url.endsWith("/releases/tags/v1.0.0") && method === "GET") {
+            return new Response("Not Found", { status: 404 });
+          }
+          if (url.endsWith("/releases") && method === "POST") {
+            return new Response("Not Found", { status: 404 });
+          }
+          return new Response("unexpected", { status: 500 });
+        };
+        await expect(
+          runPublishGitHub({
+            repoDir: dir,
+            apiUrl: "https://api.github.com",
+            token: "t",
+            owner: "kirmanak",
+            repo: "jumi",
+            sha: headSha!,
+            fetchImpl,
+          })
+        ).rejects.toThrow("GitHub API POST /releases → 404");
+        expect(calls.some((call) => call.url.includes("v1.0.1"))).toBe(false);
+        const created = calls.find((call) => call.method === "POST" && call.url.endsWith("/releases"));
+        expect(created?.body).toMatchObject({
+          tag_name: "v1.0.0",
+          generate_release_notes: false,
+          make_latest: "true",
+        });
+        expect(created?.body).not.toHaveProperty("target_commitish");
+      }
+    );
   });
 });
 
