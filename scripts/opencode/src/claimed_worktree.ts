@@ -7,6 +7,7 @@ import { type Engine, resolveEngine } from "./engine.ts";
 import { withModelHop } from "./fallback.ts";
 import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
+import { isQuotaWaitError } from "./quota.ts";
 import {
   type GitAuth,
   type GitAuthResolver,
@@ -552,12 +553,21 @@ export async function runClaimedLoop<T>(
       await loop.detachWorktree();
       return { status: "cancelled" };
     }
-    if (isInfraFailure(err)) {
+    if (isInfraFailure(err) || isQuotaWaitError(err)) {
       await loop.stopHeartbeat();
       await loop.detachWorktree();
       throw err;
     }
-    if (onFailure) await onFailure(err);
+    try {
+      if (onFailure) await onFailure(err);
+    } catch (next) {
+      if (isInfraFailure(next) || isQuotaWaitError(next)) {
+        await loop.stopHeartbeat();
+        await loop.detachWorktree();
+        throw next;
+      }
+      throw next;
+    }
     throw err;
   } finally {
     await loop.stopHeartbeat();

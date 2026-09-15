@@ -7,8 +7,18 @@ import { EngineFailedError } from "../src/engine.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { implementIssue } from "../src/implement.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
+import {
+  decideQuotaRetry,
+  encodeQuotaWaitMarker,
+  isQuotaWaitMarker,
+  QUOTA_MESSAGE,
+  QUOTA_STUCK_TEXT,
+  QUOTA_WAIT_BUDGET_MS,
+  QuotaCooldown,
+  QuotaWaitError,
+} from "../src/quota.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
-import { readStuckState } from "../src/stuck.ts";
+import { isQuotaStuck, readStuckState } from "../src/stuck.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
@@ -983,5 +993,229 @@ describe("processWorkerTick", () => {
     expect(store.rows[0]?.attempt).toBe(0);
     expect(logs.some((line) => line.includes("infra-published") && line.includes("infra/spawn"))).toBe(true);
     expect(logs.some((line) => line.includes("reclaim-published"))).toBe(false);
+  });
+
+  test("fake engine quota abort requeues then succeeds after the delay", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-quota-ok-home-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-quota-ok-work-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const cooldown = new QuotaCooldown();
+      const api = makeApi();
+      let calls = 0;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") throw new Error("missing");
+        return "";
+      };
+      const extras = {
+        breaker: new InfraCircuitBreaker(),
+        quotaCooldown: cooldown,
+        implement: async (opts: Parameters<typeof implementIssue>[0]) =>
+          implementIssue({
+            ...opts,
+            heartbeatIntervalMs: 0,
+            gitRunner,
+            openCodeRunner: async () => {
+              calls += 1;
+              if (calls === 1) return { status: "stuck" as const, message: QUOTA_MESSAGE, quota: "resetting" as const };
+              return { status: "ok" as const };
+            },
+          }),
+      };
+      await processWorkerTick(store, makeWorkerConfig({ home, workdir }), api, "worker-1", extras);
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(isQuotaWaitMarker(store.rows[0]?.error)).toBe(true);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
+      expect(isQuotaStuck(await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12)))).toBe(false);
+      store.rows[0]!.leasedUntil = Date.now() - 1;
+      cooldown.reset();
+      await processWorkerTick(store, makeWorkerConfig({ home, workdir }), api, "worker-1", extras);
+      expect(store.rows[0]?.state).toBe("succeeded");
+      expect(calls).toBe(2);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("quota abort requeues until the delay then succeeds on a later attempt", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const cooldown = new QuotaCooldown();
+    const logs: string[] = [];
+    let calls = 0;
+    const extras = {
+      breaker: new InfraCircuitBreaker(),
+      quotaCooldown: cooldown,
+      implement: async () => {
+        calls += 1;
+        if (calls === 1) {
+          const decision = decideQuotaRetry(null, Date.now(), undefined, () => 0);
+          if (decision.action !== "requeue") throw new Error("expected requeue");
+          throw new QuotaWaitError(decision);
+        }
+        return {
+          status: "pr" as const,
+          prNumber: 3,
+          htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/3",
+        };
+      },
+    };
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message));
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.attempt).toBe(0);
+    expect(store.rows[0]?.leasedUntil).toBeGreaterThan(Date.now());
+    expect(logs.some((line) => line.includes("quota-wait") && line.includes("n=1"))).toBe(true);
+    expect(logs.some((line) => line.includes("event=opencode_quota_wait"))).toBe(true);
+    expect(await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras)).toBe("idle");
+    store.rows[0]!.leasedUntil = Date.now() - 1;
+    cooldown.reset();
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    expect(store.rows[0]?.state).toBe("succeeded");
+    expect(calls).toBe(2);
+  });
+
+  test("quota wait exhaust at 30h posts stuck and does not retry", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-quota-home-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-quota-work-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      store.rows[0]!.error = encodeQuotaWaitMarker(1, Date.now() - QUOTA_WAIT_BUDGET_MS - 1);
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        if (gitArgs[0] === "show-ref") throw new Error("missing");
+        return "";
+      };
+      await processWorkerTick(
+        store,
+        makeWorkerConfig({ home, workdir }),
+        api,
+        "worker-1",
+        {
+          breaker: new InfraCircuitBreaker(),
+          quotaCooldown: new QuotaCooldown(),
+          implement: async (opts) =>
+            implementIssue({
+              ...opts,
+              heartbeatIntervalMs: 0,
+              gitRunner,
+              openCodeRunner: async () => ({
+                status: "stuck",
+                message: QUOTA_MESSAGE,
+                quota: "resetting",
+              }),
+            }),
+        },
+        () => undefined
+      );
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe(QUOTA_STUCK_TEXT);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(true);
+      expect(isQuotaStuck(await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12)))).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("hop-configured different provider never enters the quota wait", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-hop-home-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-hop-work-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") throw new Error("missing");
+        return "";
+      };
+      await processWorkerTick(
+        store,
+        makeWorkerConfig({ home, workdir, fallbackModel: "anthropic/claude-sonnet-4-6" }),
+        makeApi(),
+        "worker-1",
+        {
+          breaker: new InfraCircuitBreaker(),
+          quotaCooldown: new QuotaCooldown(),
+          implement: async (opts) =>
+            implementIssue({
+              ...opts,
+              heartbeatIntervalMs: 0,
+              gitRunner,
+              openCodeRunner: async (engineOpts) => {
+                models.push(engineOpts.model);
+                if (engineOpts.model === "openai/gpt-5.5") {
+                  return { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+                }
+                return { status: "ok" };
+              },
+            }),
+        }
+      );
+      expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
+      expect(store.rows[0]?.state).toBe("succeeded");
+      expect(store.rows[0]?.error).toBeNull();
+      expect(isQuotaWaitMarker(store.rows[0]?.error)).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("quota hit cools the instance so another job does not spawn OpenCode", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await store.enqueueIssue(makeIssueJob({ issueNumber: 13, delivery: "d-13" }));
+    const cooldown = new QuotaCooldown();
+    const extras = {
+      breaker: new InfraCircuitBreaker(),
+      quotaCooldown: cooldown,
+      implement: async () => {
+        const decision = decideQuotaRetry(null, Date.now(), undefined, () => 0);
+        if (decision.action !== "requeue") throw new Error("expected requeue");
+        throw new QuotaWaitError(decision);
+      },
+    };
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    const logs: string[] = [];
+    expect(
+      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message))
+    ).toBe("idle");
+    expect(logs.some((line) => line === "quota cooldown")).toBe(true);
+  });
+
+  test("unlabel cancel drops a job sitting in the quota wait", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-quota-cancel-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const decision = decideQuotaRetry(null, Date.now(), undefined, () => 0);
+      if (decision.action !== "requeue") throw new Error("expected requeue");
+      await processWorkerTick(store, makeWorkerConfig({ home }), makeApi(), "worker-1", {
+        breaker: new InfraCircuitBreaker(),
+        quotaCooldown: new QuotaCooldown(),
+        implement: async () => {
+          throw new QuotaWaitError(decision);
+        },
+      });
+      expect(store.rows[0]?.state).toBe("queued");
+      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      expect(store.rows[0]?.state).toBe("cancelled");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });

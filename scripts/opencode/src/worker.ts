@@ -9,6 +9,7 @@ import {
   stuckStatePath,
 } from "./claim.ts";
 import { implementConflict } from "./conflict.ts";
+import { logDiagnostic } from "./diagnostics.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -17,6 +18,7 @@ import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure, workerInfraBreaker } from "./infra.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
+import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -35,6 +37,7 @@ export interface RunWorkerJobExtras {
   heartbeatMs?: number;
   abortSignal?: AbortSignal;
   breaker?: InfraCircuitBreaker;
+  quotaCooldown?: QuotaCooldown;
 }
 
 function log(message: string) {
@@ -276,6 +279,11 @@ export async function processWorkerTick(
     logger("breaker open");
     return "idle";
   }
+  const quotaCooldown = extras.quotaCooldown ?? workerQuotaCooldown;
+  if (!quotaCooldown.canLease()) {
+    logger("quota cooldown");
+    return "idle";
+  }
   const row = await store.lease(leasedBy, config.leaseMs, undefined, WORKER_JOB_KINDS);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
@@ -342,6 +350,7 @@ export async function processWorkerTick(
       },
       logger: (message: string) => logger(message),
       jobId: String(row.id),
+      previousError: row.error,
     };
     const runImplement = extras.implement ?? implementIssue;
     const runFollowUp = extras.followUp ?? implementFollowUp;
@@ -423,6 +432,31 @@ export async function processWorkerTick(
       return "processed";
     }
     logger(`worker job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (isQuotaWaitError(err)) {
+      try {
+        const now = Date.now();
+        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        quotaCooldown.recordWaitUntil(now + err.backoffMs);
+        logDiagnostic(logger, "opencode_quota_wait", {
+          count: err.count,
+          next_at: new Date(now + err.backoffMs).toISOString(),
+          budget_remaining_ms: err.budgetRemainingMs,
+        });
+        logger(`quota-wait ${row.jobKey} backoff=${err.backoffMs} n=${err.count}`);
+      } catch (quotaErr) {
+        logger(
+          `worker quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
+        );
+        try {
+          await store.expireLease(row.id, leasedBy);
+        } catch (expireErr) {
+          logger(
+            `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+          );
+        }
+      }
+      return "processed";
+    }
     if (isInfraFailure(err)) {
       breaker.recordInfra();
       try {

@@ -514,6 +514,7 @@ exec sleep 30
         expect(result.status).toBe("stuck");
         expect(result.message).toContain("usage limit exceeded");
         expect(result.infra).toBe(false);
+        expect(result.quota).toBe("resetting");
         // Live abort: must not wait out the 30s sleep.
         expect(Date.now() - startedAt).toBeLessThan(20_000);
       }
