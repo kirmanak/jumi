@@ -499,6 +499,74 @@ describe("pullWaitClearJobsToEnqueue", () => {
     expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
   });
 
+  test("Gitea unassigned foreign PR wakes assigned issues when the bot is gone from the PR", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "alice" }),
+          assignees: [makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+      }
+    );
+    expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
+  test("Gitea unassigned foreign PR does not wake when the bot remains assigned", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" }), makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+      }
+    );
+    expect(jobs).toEqual([]);
+  });
+
   test("does not wake assigned issues when a human is unassigned from a foreign PR", async () => {
     const jobs = await pullWaitClearJobsToEnqueue(
       makePayload({

@@ -249,7 +249,10 @@ function shouldWakeAssignedIssues(payload: GiteaPRPayload, owner: string, repo: 
   const action = payload.action;
   if (!isForeignPrIdentity(pr, owner, repo, botUsername)) return false;
   if (action === "unassigned") {
-    return isAssignedToBot({ assignee: payload.assignee }, botUsername);
+    if (payload.assignee != null) {
+      return isAssignedToBot({ assignee: payload.assignee }, botUsername);
+    }
+    return !isAssignedToBot(pr, botUsername);
   }
   if (action !== "closed" && action !== "merged") return false;
   return isAssignedToBot(pr, botUsername);
