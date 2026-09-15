@@ -10,7 +10,9 @@ import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   blockedIssueJobsToEnqueue,
   isDependencyWakeAction,
+  isPullWaitClearAction,
   parseIssuesPayload,
+  pullWaitClearJobsToEnqueue,
   shouldEnqueueIssue,
 } from "./issue_webhook.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
@@ -29,7 +31,7 @@ export interface WorkerWebhookQueue {
 }
 
 export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "getPR" | "getCollaboratorPermission">> & {
+  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission">> & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -113,6 +115,41 @@ function cancelKey(owner: string, repo: string, issueNumber: number): string {
   return `${owner}/${repo}#${issueNumber}`;
 }
 
+async function enqueueJobList(
+  jobs: IssueJob[],
+  queue: WorkerWebhookQueue,
+  delivery: string,
+  logger: (message: string) => void
+): Promise<Response> {
+  if (jobs.length === 1) {
+    const job = jobs[0];
+    if (!job) return skipped("no waiting issues to wake", logger);
+    const result: EnqueueResult = await queue.enqueue(job);
+    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    return json(202, result);
+  }
+  const keys: string[] = [];
+  for (const job of jobs) {
+    const result: EnqueueResult = await queue.enqueue(job);
+    keys.push(result.key);
+    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+  }
+  return json(202, { queued: true, keys });
+}
+
+async function wakeJobsFromPull(
+  rawBody: Uint8Array,
+  delivery: string,
+  policy: WorkerWebhookPolicy,
+  deps: HandleWorkerWebhookDeps
+): Promise<IssueJob[]> {
+  if (!deps.api) return [];
+  const payload = parsePullRequestPayload(rawBody);
+  const partials = await pullWaitClearJobsToEnqueue(payload, policy, deps.api);
+  const receivedAt = new Date().toISOString();
+  return partials.map((partial) => ({ ...partial, delivery, receivedAt }));
+}
+
 export async function cancelLedgerWorkerJobs(opts: {
   store: Pick<ReviewJobStore, "cancelQueuedForIssue">;
   api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">;
@@ -148,11 +185,29 @@ export async function handleWorkerWebhookEvent(
   // Handle only assigned/unassigned. Any other pull_request action skips 202, never 400.
   if (isPullAssignWebhookEvent(event, eventType)) {
     const action = peekWebhookAction(rawBody);
-    if (action !== "assigned" && action !== "unassigned") {
+    if (action !== "assigned" && action !== "unassigned" && !isPullWaitClearAction(action)) {
       return skipped(
         action ? `unsupported action ${action}` : `unsupported event ${event ?? eventType ?? "pull_request"}`,
         logger
       );
+    }
+    if (action === "closed" || action === "merged") {
+      try {
+        const jobs = await wakeJobsFromPull(rawBody, delivery, policy, deps);
+        if (jobs.length === 0) {
+          return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
+        }
+        return enqueueJobList(jobs, deps.queue, delivery, logger);
+      } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        return skipped(
+          action ? `unsupported action ${action}` : `unsupported event ${event ?? "pull_request"}`,
+          logger
+        );
+      }
     }
     try {
       const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api, logger);
@@ -162,6 +217,15 @@ export async function handleWorkerWebhookEvent(
           ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)
           : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
         logger(`cancelled ${result.key}`);
+        try {
+          const jobs = await wakeJobsFromPull(rawBody, delivery, policy, deps);
+          if (jobs.length > 0) return enqueueJobList(jobs, deps.queue, delivery, logger);
+        } catch (err) {
+          if (isQueueUnavailable(err)) {
+            logger(`queue unavailable: ${err.message}`);
+            return json(503, { error: "queue unavailable" });
+          }
+        }
         return json(202, result);
       }
       const job: IssueJob = {

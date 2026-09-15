@@ -27,7 +27,7 @@ import {
   verifyGiteaSignature,
   type WebhookPolicy,
 } from "./webhook.ts";
-import type { HandleWorkerWebhookDeps, WorkerWebhookPolicy } from "./worker_webhook.ts";
+import { type HandleWorkerWebhookDeps, handleWorkerWebhookEvent, type WorkerWebhookPolicy } from "./worker_webhook.ts";
 
 export const JUMI_LABEL = "jumi";
 export const GITHUB_ORIGIN = "https://github.com";
@@ -348,6 +348,12 @@ export async function handleGithubWebhookEvent(
         logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
         return json(400, { error: "invalid webhook payload" });
       }
+    }
+    if (deps.worker && (action === "closed" || action === "merged" || action === "unassigned")) {
+      return handleWorkerWebhookEvent(rawBody, event, event, delivery, policy, {
+        ...deps.worker,
+        logger: deps.worker.logger ?? logger,
+      });
     }
     return skipped(action ? `unsupported action ${action}` : `unsupported event ${event ?? "pull_request"}`, logger);
   }

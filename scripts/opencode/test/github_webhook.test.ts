@@ -330,6 +330,59 @@ describe("POST /webhooks/github", () => {
     expect(store.rows).toHaveLength(0);
   });
 
+  test("closed assigned foreign PR wakes labeled issues", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          listRepoIssues: async () => [
+            makeLinkedIssue({ number: 12, html_url: "https://github.com/kirmanak/demo/issues/12" }),
+          ],
+          getIssue: async () =>
+            githubIssue({
+              number: 12,
+              title: "Slice",
+              html_url: "https://github.com/kirmanak/demo/issues/12",
+            }),
+          getRepo: async () => githubRepo,
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "closed",
+          repository: githubRepo,
+          pull_request: makePR({
+            number: 50,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate[bot]" }),
+            assignee: makeUser({ login: "kirmanak-jumi[bot]" }),
+            assignees: [makeUser({ login: "kirmanak-jumi[bot]" })],
+            html_url: "https://github.com/kirmanak/demo/pulls/50",
+            head: {
+              label: "kirmanak:renovate/x",
+              ref: "renovate/x",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows[0]?.kind).toBe("implement");
+  });
+
   test("enqueues review on synchronize and skips draft / WIP", async () => {
     const queue = makeReviewQueue();
     const handler = createFetchHandler(githubConfig(), { queue });
