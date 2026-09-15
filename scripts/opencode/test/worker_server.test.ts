@@ -402,6 +402,55 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs).toHaveLength(0);
   });
 
+  test("closed blocker issue returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        getIssue: async () => makeIssue({ number: 206 }),
+        getRepo: async () => makeRepo(),
+      },
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) }))
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("reopened blocker returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        getIssue: async () => makeIssue({ number: 206 }),
+        getRepo: async () => makeRepo(),
+      },
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "reopened", issue: makeIssue({ number: 196 }) }))
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
   test("closed assigned foreign PR wakes other assigned issues in the repo", async () => {
     const queue = makeQueue();
     const repository = makeRepo();

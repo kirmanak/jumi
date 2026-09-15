@@ -275,6 +275,38 @@ describe("POST /webhooks/github", () => {
     expect((await handler(await signedGithubRequest({ zen: "pong" }, { event: "ping" }))).status).toBe(401);
   });
 
+  test("closing a blocker returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      logger: (message) => logs.push(message),
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () => githubIssue(),
+          listIssueBlocks: async () => {
+            throw new Error("blocks down");
+          },
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        labeledPayload({
+          action: "closed",
+          issue: githubIssue({ number: 196, state: "closed", labels: [] }),
+        }),
+        { event: "issues" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(store.rows).toHaveLength(0);
+  });
+
   test("closing a blocker enqueues the blocked issue if it still has label jumi", async () => {
     const { handler, store } = mailbox();
     const response = await handler(

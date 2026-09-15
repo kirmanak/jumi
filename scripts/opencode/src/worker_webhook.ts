@@ -371,10 +371,7 @@ export async function handleWorkerWebhookEvent(
         });
         for (const partial of woken) addJob(partial);
       } catch (err) {
-        if (jobs.length === 0) {
-          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
-          return skipped("failed to list blocked issues", logger);
-        }
+        return wakeFailedResponse(err, logger);
       }
     }
 

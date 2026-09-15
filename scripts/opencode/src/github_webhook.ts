@@ -486,10 +486,12 @@ export async function handleGithubWebhookEvent(
         });
         for (const partial of woken) addJob(partial);
       } catch (err) {
-        if (jobs.length === 0) {
-          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
-          return skipped("failed to list blocked issues", logger);
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
         }
+        logger(`failed to wake waiting issues: ${err instanceof Error ? err.message : String(err)}`);
+        return json(503, { error: "failed to wake waiting issues" });
       }
     }
 
