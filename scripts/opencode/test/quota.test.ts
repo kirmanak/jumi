@@ -4,14 +4,27 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  clampQuotaWaitMs,
+  classifyQuotaText,
+  decideQuotaRetry,
+  encodeQuotaWaitMarker,
   hasQuotaInLogDir,
   hasQuotaInLogText,
   hasQuotaRetryInDb,
+  inspectQuotaInLogText,
+  isHardQuotaText,
   isQuotaError,
   isQuotaLiveText,
   isQuotaLogLine,
   isQuotaText,
+  isQuotaWaitMarker,
+  isResettingQuotaText,
+  parseRetryAfterMs,
   QUOTA_STUCK_TEXT,
+  QUOTA_WAIT_BUDGET_MS,
+  QUOTA_WAIT_DEFAULT_MS,
+  QUOTA_WAIT_MAX_ATTEMPTS,
+  QuotaCooldown,
 } from "../src/quota.ts";
 import {
   cancelReviewWork,
@@ -358,5 +371,88 @@ describe("reviewer quota TTL", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resetting vs hard quota", () => {
+  test("Free/Zen class is resetting; Go and balance are hard", () => {
+    expect(isResettingQuotaText("FreeUsageLimitError")).toBe(true);
+    expect(isResettingQuotaText("Free usage exceeded, subscribe to Go")).toBe(true);
+    expect(isResettingQuotaText("Rate limit exceeded. Please try again later.")).toBe(true);
+    expect(isResettingQuotaText("free_tier_limit")).toBe(true);
+    expect(isHardQuotaText("Insufficient balance")).toBe(true);
+    expect(isHardQuotaText("GoUsageLimitError")).toBe(true);
+    expect(isHardQuotaText("Go limit reached")).toBe(true);
+    expect(isResettingQuotaText("Insufficient balance")).toBe(false);
+    expect(isResettingQuotaText(QUOTA_STUCK_TEXT)).toBe(false);
+    expect(classifyQuotaText("FreeUsageLimitError")).toBe("resetting");
+    expect(classifyQuotaText("Insufficient balance")).toBe("hard");
+  });
+
+  test("inspectQuotaInLogText classifies the matching stream-error line", () => {
+    const hit = inspectQuotaInLogText(
+      'level=ERROR message="stream error" error.error="AI_APICallError: Free usage exceeded" retry-after=3600\n'
+    );
+    expect(hit?.kind).toBe("resetting");
+    expect(hit?.retryAfterMs).toBe(3_600_000);
+    expect(
+      inspectQuotaInLogText(
+        'message="stream error" error.error="AI_APICallError: Insufficient balance. Manage your billing"\n'
+      )?.kind
+    ).toBe("hard");
+  });
+});
+
+describe("quota wait delay", () => {
+  test("parses retry-after seconds, ms, and human units", () => {
+    expect(parseRetryAfterMs("retry-after: 7200")).toBe(7_200_000);
+    expect(parseRetryAfterMs("retryAfter=3600000")).toBe(3_600_000);
+    expect(parseRetryAfterMs("retry in 2 hours")).toBe(7_200_000);
+    expect(parseRetryAfterMs("no hint")).toBeUndefined();
+  });
+
+  test("clamps parsed waits to 1h-24h", () => {
+    expect(clampQuotaWaitMs(5_000)).toBe(QUOTA_WAIT_DEFAULT_MS);
+    expect(clampQuotaWaitMs(48 * 60 * 60 * 1000)).toBe(24 * 60 * 60 * 1000);
+    expect(clampQuotaWaitMs(2 * 60 * 60 * 1000)).toBe(2 * 60 * 60 * 1000);
+  });
+
+  test("requeues until the 30h wall-clock budget then exhausts", () => {
+    const first = decideQuotaRetry(null, 1_000, undefined, () => 0);
+    expect(first.action).toBe("requeue");
+    if (first.action !== "requeue") return;
+    expect(first.count).toBe(1);
+    expect(first.backoffMs).toBe(QUOTA_WAIT_DEFAULT_MS);
+    expect(isQuotaWaitMarker(first.marker)).toBe(true);
+    const later = decideQuotaRetry(first.marker, 1_000 + QUOTA_WAIT_BUDGET_MS, undefined, () => 0);
+    expect(later).toEqual({ action: "exhaust", reason: QUOTA_STUCK_TEXT });
+  });
+
+  test("caps attempts so a bad clock cannot loop forever", () => {
+    const marker = encodeQuotaWaitMarker(QUOTA_WAIT_MAX_ATTEMPTS - 1, Date.now());
+    expect(decideQuotaRetry(marker, Date.now(), undefined, () => 0).action).toBe("exhaust");
+  });
+});
+
+describe("QuotaCooldown", () => {
+  test("blocks leasing until the wait timestamp", () => {
+    const cool = new QuotaCooldown();
+    expect(cool.canLease(0)).toBe(true);
+    cool.recordWaitUntil(1_000);
+    expect(cool.canLease(999)).toBe(false);
+    expect(cool.canLease(1_000)).toBe(true);
+  });
+
+  test("takeLog fires once per wait window", () => {
+    const cool = new QuotaCooldown();
+    expect(cool.takeLog(0)).toBe(false);
+    cool.recordWaitUntil(1_000);
+    expect(cool.takeLog(0)).toBe(true);
+    expect(cool.takeLog(0)).toBe(false);
+    expect(cool.takeLog(999)).toBe(false);
+    expect(cool.takeLog(1_000)).toBe(false);
+    cool.recordWaitUntil(2_000);
+    expect(cool.takeLog(1_000)).toBe(true);
+    expect(cool.takeLog(1_500)).toBe(false);
   });
 });

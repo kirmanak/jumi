@@ -32,6 +32,8 @@ export interface EngineRunOptions {
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";
 
+export type QuotaClass = "resetting" | "hard";
+
 export interface EngineResult {
   status: EngineStatus;
   exitCode?: number | null;
@@ -39,17 +41,23 @@ export interface EngineResult {
   message?: string;
   infra?: boolean;
   durationMs?: number;
+  quota?: QuotaClass;
+  retryAfterMs?: number;
 }
 
 export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;
 
 export class EngineFailedError extends Error {
   readonly infra: boolean;
+  readonly quota?: QuotaClass;
+  readonly retryAfterMs?: number;
 
-  constructor(message: string, infra = false) {
+  constructor(message: string, infra = false, extras?: { quota?: QuotaClass; retryAfterMs?: number }) {
     super(message);
     this.name = "EngineFailedError";
     this.infra = infra;
+    if (extras?.quota) this.quota = extras.quota;
+    if (extras?.retryAfterMs != null) this.retryAfterMs = extras.retryAfterMs;
   }
 }
 
@@ -59,5 +67,8 @@ export function resolveEngine(opts: { engine?: Engine; openCodeRunner?: Engine }
 
 export function throwIfEngineFailed(result: EngineResult): void {
   if (result.status === "ok") return;
-  throw new EngineFailedError(result.message ?? `engine ${result.status}`, result.infra === true);
+  throw new EngineFailedError(result.message ?? `engine ${result.status}`, result.infra === true, {
+    quota: result.quota,
+    retryAfterMs: result.retryAfterMs,
+  });
 }

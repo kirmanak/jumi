@@ -47,6 +47,25 @@ export const QUOTA_ERROR_RE =
 export const QUOTA_LIVE_RE =
   /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance/i;
 
+export type QuotaClass = "resetting" | "hard";
+
+const HARD_QUOTA_RE = /GoUsageLimitError|Go limit reached|Insufficient balance/i;
+const RESETTING_QUOTA_RE =
+  /FreeUsageLimitError|Free usage exceeded|Free limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\./i;
+
+export const QUOTA_WAIT_PREFIX = "quota-wait:";
+export const QUOTA_WAIT_DEFAULT_MS = 60 * 60 * 1000;
+export const QUOTA_WAIT_MIN_MS = 60 * 60 * 1000;
+export const QUOTA_WAIT_MAX_MS = 24 * 60 * 60 * 1000;
+export const QUOTA_WAIT_BUDGET_MS = 30 * 60 * 60 * 1000;
+export const QUOTA_WAIT_MAX_ATTEMPTS = 48;
+
+export interface QuotaHit {
+  kind: QuotaClass;
+  retryAfterMs?: number;
+  text: string;
+}
+
 /** Retry context required around a live match. The quota failure is logged by
  * the `llm` service as `message="stream error"` with the provider error
  * inline; permission-evaluation lines that merely echo a tool command
@@ -69,6 +88,72 @@ export function isQuotaLiveText(text: string | null | undefined): boolean {
   return QUOTA_LIVE_RE.test(text);
 }
 
+export function isHardQuotaText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return HARD_QUOTA_RE.test(text);
+}
+
+export function isResettingQuotaText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  if (HARD_QUOTA_RE.test(text)) return false;
+  return RESETTING_QUOTA_RE.test(text);
+}
+
+export function classifyQuotaText(text: string | null | undefined): QuotaClass | undefined {
+  if (!text || !isQuotaText(text)) return undefined;
+  if (HARD_QUOTA_RE.test(text)) return "hard";
+  if (RESETTING_QUOTA_RE.test(text)) return "resetting";
+  return "hard";
+}
+
+export function parseRetryAfterMs(text: string | null | undefined, nowMs = Date.now()): number | undefined {
+  if (!text) return undefined;
+  const header = /retry[-_\s]*after["'\s:=]+(\d+(?:\.\d+)?)/i.exec(text);
+  if (header) {
+    const n = Number(header[1]);
+    if (!Number.isFinite(n) || n <= 0) return undefined;
+    if (n > 1e12) return undefined;
+    if (n > 1e10) return Math.max(0, n - nowMs);
+    if (n >= 1_000_000) return n;
+    return n * 1000;
+  }
+  const httpDate = /retry[-_\s]*after["'\s:=]+([A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} [\d:]{8} GMT)/i.exec(text);
+  if (httpDate) {
+    const at = Date.parse(httpDate[1]);
+    if (Number.isFinite(at)) return Math.max(0, at - nowMs);
+  }
+  const iso = /retry[-_\s]*after["'\s:=]+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/i.exec(text);
+  if (iso) {
+    const at = Date.parse(iso[1]);
+    if (Number.isFinite(at)) return Math.max(0, at - nowMs);
+  }
+  const human = /retry in (\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|s|minutes?|m|hours?|h)\b/i.exec(text);
+  if (human) {
+    const n = Number(human[1]);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    const unit = human[2].toLowerCase();
+    if (unit.startsWith("ms") || unit.startsWith("millisecond")) return n;
+    if (unit.startsWith("s")) return n * 1000;
+    if (unit.startsWith("m")) return n * 60_000;
+    return n * 3_600_000;
+  }
+  return undefined;
+}
+
+export function clampQuotaWaitMs(ms: number): number {
+  if (!Number.isFinite(ms) || ms <= 0) return QUOTA_WAIT_DEFAULT_MS;
+  return Math.min(QUOTA_WAIT_MAX_MS, Math.max(QUOTA_WAIT_MIN_MS, ms));
+}
+
+function quotaHitFromText(text: string): QuotaHit {
+  const retryAfterMs = parseRetryAfterMs(text);
+  return {
+    kind: classifyQuotaText(text) ?? "hard",
+    ...(retryAfterMs != null ? { retryAfterMs } : {}),
+    text,
+  };
+}
+
 /**
  * True when a single log line carries a quota failure in retry context:
  * a `stream error` line containing a Free/Go quota string. Line-scoped so a
@@ -87,15 +172,17 @@ export function isQuotaLogLine(line: string | null | undefined): boolean {
  * retry marker and the quota string must share one log line. Never throws;
  * tests only the regex, never logs the transcript.
  */
-export function hasQuotaInLogText(text: string | null | undefined): boolean {
-  if (!text) return false;
-  // Bound the split for pathological single-line blobs; quota lines are
-  // early and short, and the per-run isolated log stays small.
+export function inspectQuotaInLogText(text: string | null | undefined): QuotaHit | undefined {
+  if (!text) return undefined;
   const capped = text.length > 10_000_000 ? text.slice(0, 10_000_000) : text;
   for (const line of capped.split(/\r?\n/)) {
-    if (isQuotaLogLine(line)) return true;
+    if (isQuotaLogLine(line)) return quotaHitFromText(line);
   }
-  return false;
+  return undefined;
+}
+
+export function hasQuotaInLogText(text: string | null | undefined): boolean {
+  return inspectQuotaInLogText(text) != null;
 }
 
 const MAX_LOG_FILES = 20;
@@ -108,14 +195,14 @@ const MAX_LOG_BYTES_PER_FILE = 10_000_000;
  * timestamped `*.log` rotation (1.15.5, keeps last 10). Returns false when the
  * dir is missing, empty, or unreadable. Never throws; never logs content.
  */
-export function hasQuotaInLogDir(logDir: string | null | undefined): boolean {
-  if (!logDir) return false;
+export function inspectQuotaInLogDir(logDir: string | null | undefined): QuotaHit | undefined {
+  if (!logDir) return undefined;
   let entries: string[];
   try {
-    if (!existsSync(logDir)) return false;
+    if (!existsSync(logDir)) return undefined;
     entries = readdirSync(logDir);
   } catch {
-    return false;
+    return undefined;
   }
   let checked = 0;
   for (const entry of entries) {
@@ -134,20 +221,22 @@ export function hasQuotaInLogDir(logDir: string | null | undefined): boolean {
     checked += 1;
     try {
       const capped = Math.min(size, MAX_LOG_BYTES_PER_FILE);
-      // Read the whole (capped) file; per-run logs stay small and quota can
-      // sit early (first failure) or late (quota after hours of work).
       const buf = readFileSync(abs);
       const text = buf.length > capped ? buf.subarray(0, capped).toString("utf8") : buf.toString("utf8");
-      if (hasQuotaInLogText(text)) return true;
-      // When capped in the middle, also check the tail window so a late quota
-      // line past the head cap still fires.
+      const head = inspectQuotaInLogText(text);
+      if (head) return head;
       if (buf.length > capped) {
         const tail = buf.subarray(buf.length - Math.min(buf.length, 1_000_000)).toString("utf8");
-        if (hasQuotaInLogText(tail)) return true;
+        const late = inspectQuotaInLogText(tail);
+        if (late) return late;
       }
     } catch {}
   }
-  return false;
+  return undefined;
+}
+
+export function hasQuotaInLogDir(logDir: string | null | undefined): boolean {
+  return inspectQuotaInLogDir(logDir) != null;
 }
 
 function tableNames(db: Database): Set<string> {
@@ -159,22 +248,13 @@ function tableNames(db: Database): Set<string> {
   }
 }
 
-function tableHasQuota(db: Database, table: string): boolean {
-  // Scope to the retry/error shape so task/feedback text quoting a quota
-  // string in a user message never matches. SQL LIKE keeps large
-  // part/message blobs out of the parent heap; candidate rows are then
-  // verified with JSON.parse below.
-  // The LIKE fragments tolerate JSON spacing (`"type":"retry"` vs
-  // `"type": "retry"`).
+function inspectTableQuota(db: Database, table: string): QuotaHit | undefined {
   const scope =
     table === "part"
       ? `data LIKE '%"type"%retry%'`
       : table === "message"
         ? `data LIKE '%"error"%'`
         : `(data LIKE '%"type"%retry%' OR data LIKE '%"error"%')`;
-  // Use SQL LIKE so large part/message blobs never enter the parent heap.
-  // LIKE is case-insensitive for ASCII by default; ordinary 429s ("429",
-  // "Too Many Requests") do not contain these quota strings and stay retries.
   const where = QUOTA_PATTERNS.map(() => `data LIKE ?`).join(" OR ");
   const params = QUOTA_PATTERNS.map((pattern) => `%${pattern}%`);
   try {
@@ -183,11 +263,12 @@ function tableHasQuota(db: Database, table: string): boolean {
       .all(...params) as Array<{ data: unknown }>;
     for (const row of rows) {
       if (typeof row?.data !== "string") continue;
-      if (rowIsQuotaData(row.data, table)) return true;
+      if (!rowIsQuotaData(row.data, table)) continue;
+      return quotaHitFromText(row.data);
     }
-    return false;
+    return undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -236,13 +317,37 @@ function rowIsQuotaData(data: string, table: string): boolean {
   return false;
 }
 
-function hasQuotaInOpenDb(db: Database): boolean {
+function inspectQuotaInOpenDb(db: Database): QuotaHit | undefined {
   const tables = tableNames(db);
   for (const table of ["message", "part", "session_message"] as const) {
     if (!tables.has(table)) continue;
-    if (tableHasQuota(db, table)) return true;
+    const hit = inspectTableQuota(db, table);
+    if (hit) return hit;
   }
-  return false;
+  return undefined;
+}
+
+function withQuotaDb(dbPath: string, read: (db: Database) => QuotaHit | undefined): QuotaHit | undefined {
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return read(db);
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Fall through to read-write.
+  }
+  try {
+    const db = new Database(dbPath);
+    try {
+      return read(db);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -253,33 +358,131 @@ function hasQuotaInOpenDb(db: Database): boolean {
  * a per-attempt retry row while it sleeps on a multi-hour retry-after, so
  * this must not be polled as the abort trigger.
  *
- * Returns false when the DB is missing, not yet initialized, locked, or
+ * Returns undefined when the DB is missing, not yet initialized, locked, or
  * contains no quota/retry record. Never throws.
  */
+export function inspectQuotaRetryInDb(dbPath: string | null | undefined): QuotaHit | undefined {
+  if (!dbPath) return undefined;
+  if (!existsSync(dbPath)) return undefined;
+  return withQuotaDb(dbPath, inspectQuotaInOpenDb);
+}
+
 export function hasQuotaRetryInDb(dbPath: string | null | undefined): boolean {
-  if (!dbPath) return false;
-  if (!existsSync(dbPath)) return false;
-  // While the child is alive its -shm exists so readonly works. After
-  // proc.kill() the -wal may be uncheckpointed and readonly cannot recreate
-  // -shm (same WAL note as token_metrics); fall back to read-write then.
-  try {
-    const db = new Database(dbPath, { readonly: true });
-    try {
-      return hasQuotaInOpenDb(db);
-    } finally {
-      db.close();
+  return inspectQuotaRetryInDb(dbPath) != null;
+}
+
+export function inspectQuotaHit(logDir: string | null | undefined, dbPath?: string | null): QuotaHit | undefined {
+  return inspectQuotaInLogDir(logDir) ?? inspectQuotaRetryInDb(dbPath);
+}
+
+export function isQuotaWaitMarker(error: string | null | undefined): boolean {
+  return Boolean(error?.startsWith(QUOTA_WAIT_PREFIX));
+}
+
+export function parseQuotaWaitMarker(
+  error: string | null | undefined
+): { count: number; firstHitAt: number } | undefined {
+  if (!isQuotaWaitMarker(error) || !error) return undefined;
+  const parts = error.slice(QUOTA_WAIT_PREFIX.length).split(":");
+  const count = Number(parts[0]);
+  const firstHitAt = Number(parts[1]);
+  if (!Number.isFinite(count) || count < 1 || !Number.isFinite(firstHitAt)) return undefined;
+  return { count, firstHitAt };
+}
+
+export function encodeQuotaWaitMarker(count: number, firstHitAt: number): string {
+  return `${QUOTA_WAIT_PREFIX}${count}:${firstHitAt}`;
+}
+
+export function quotaWaitJitterMs(delayMs: number, random: () => number = Math.random): number {
+  if (!Number.isFinite(delayMs) || delayMs <= 0) return 0;
+  const n = random();
+  if (!Number.isFinite(n)) return 0;
+  return Math.floor(delayMs * 0.1 * Math.min(1, Math.max(0, n)));
+}
+
+export type QuotaWaitDecision =
+  | {
+      action: "requeue";
+      count: number;
+      firstHitAt: number;
+      backoffMs: number;
+      marker: string;
+      budgetRemainingMs: number;
     }
-  } catch {
-    // Fall through to read-write.
+  | { action: "exhaust"; reason: string };
+
+export function decideQuotaRetry(
+  prevError: string | null | undefined,
+  nowMs: number,
+  retryAfterMs?: number,
+  random: () => number = Math.random
+): QuotaWaitDecision {
+  const prev = parseQuotaWaitMarker(prevError);
+  const count = (prev?.count ?? 0) + 1;
+  const firstHitAt = prev?.firstHitAt ?? nowMs;
+  const elapsed = nowMs - firstHitAt;
+  if (count >= QUOTA_WAIT_MAX_ATTEMPTS || elapsed >= QUOTA_WAIT_BUDGET_MS) {
+    return { action: "exhaust", reason: QUOTA_STUCK_TEXT };
   }
-  try {
-    const db = new Database(dbPath);
-    try {
-      return hasQuotaInOpenDb(db);
-    } finally {
-      db.close();
-    }
-  } catch {
-    return false;
+  const delay =
+    clampQuotaWaitMs(retryAfterMs ?? QUOTA_WAIT_DEFAULT_MS) + quotaWaitJitterMs(QUOTA_WAIT_DEFAULT_MS, random);
+  return {
+    action: "requeue",
+    count,
+    firstHitAt,
+    backoffMs: delay,
+    marker: encodeQuotaWaitMarker(count, firstHitAt),
+    budgetRemainingMs: Math.max(0, QUOTA_WAIT_BUDGET_MS - elapsed),
+  };
+}
+
+export class QuotaWaitError extends Error {
+  readonly backoffMs: number;
+  readonly marker: string;
+  readonly count: number;
+  readonly firstHitAt: number;
+  readonly budgetRemainingMs: number;
+
+  constructor(decision: Extract<QuotaWaitDecision, { action: "requeue" }>) {
+    super("quota wait");
+    this.name = "QuotaWaitError";
+    this.backoffMs = decision.backoffMs;
+    this.marker = decision.marker;
+    this.count = decision.count;
+    this.firstHitAt = decision.firstHitAt;
+    this.budgetRemainingMs = decision.budgetRemainingMs;
   }
 }
+
+export function isQuotaWaitError(err: unknown): err is QuotaWaitError {
+  return err instanceof QuotaWaitError;
+}
+
+export class QuotaCooldown {
+  private until = 0;
+  private loggedUntil = 0;
+
+  canLease(now = Date.now()): boolean {
+    return now >= this.until;
+  }
+
+  recordWaitUntil(untilMs: number): void {
+    if (!Number.isFinite(untilMs)) return;
+    this.until = Math.max(this.until, untilMs);
+  }
+
+  takeLog(now = Date.now()): boolean {
+    if (now >= this.until) return false;
+    if (this.loggedUntil === this.until) return false;
+    this.loggedUntil = this.until;
+    return true;
+  }
+
+  reset(): void {
+    this.until = 0;
+    this.loggedUntil = 0;
+  }
+}
+
+export const workerQuotaCooldown = new QuotaCooldown();

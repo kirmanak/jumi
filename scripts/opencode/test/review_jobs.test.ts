@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { encodeInfraMarker, INFRA_RETRY_PREFIX } from "../src/infra.ts";
+import { encodeQuotaWaitMarker } from "../src/quota.ts";
 import {
   HEARTBEAT_MS,
   isUniqueViolation,
@@ -715,6 +716,30 @@ describe("PgReviewJobStore infra requeue", () => {
     expect(update?.query).not.toContain("attempt = attempt + 1");
     expect(update?.query).toContain("state = 'queued'");
     expect(update?.params?.[2]).toBe(new Date(3_500).toISOString());
+  });
+
+  test("quota-wait marker reuses the same not-before requeue", async () => {
+    const queries: { query: string; params?: unknown[] }[] = [];
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        queries.push({ query, params });
+        if (query.includes("state = 'queued'") && query.includes("error = $4")) {
+          expect(params?.[3]).toBe(encodeQuotaWaitMarker(1, 1_500));
+          return [{ id: 1 }];
+        }
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.requeueInfra(1, "worker-1", 3_600_000, encodeQuotaWaitMarker(1, 1_500), new Date(1_500))).toBe(
+      true
+    );
+    const update = queries.find((row) => row.query.includes("error = $4"));
+    expect(update?.query).toContain("quota-wait:%");
+    expect(update?.query).not.toContain("attempt = attempt + 1");
   });
 
   test("lease skips cooling jobs until leased_until", async () => {

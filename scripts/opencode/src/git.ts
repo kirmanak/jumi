@@ -15,7 +15,13 @@ import {
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
-import { hasQuotaInLogDir, hasQuotaRetryInDb, QUOTA_MESSAGE, QUOTA_POLL_INTERVAL_MS } from "./quota.ts";
+import {
+  inspectQuotaHit,
+  inspectQuotaInLogDir,
+  QUOTA_MESSAGE,
+  QUOTA_POLL_INTERVAL_MS,
+  type QuotaHit,
+} from "./quota.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -422,22 +428,26 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     // transcript dump to Loki, no Phoenix. The isolated dir means any hit
     // belongs to this child; no ANSI concerns (log has no color codes).
     let quotaHit = false;
+    let quotaInfo: QuotaHit | undefined;
     const quotaIntervalMs = opts.quotaPollIntervalMs ?? QUOTA_POLL_INTERVAL_MS;
     const quotaTimer =
       quotaIntervalMs > 0
         ? setInterval(() => {
             if (quotaHit || timedOut || opts.abortSignal?.aborted) return;
-            let hit = false;
+            let hit: QuotaHit | undefined;
             try {
-              hit = hasQuotaInLogDir(logDir);
+              hit = inspectQuotaInLogDir(logDir);
             } catch {
-              hit = false;
+              hit = undefined;
             }
             if (!hit) return;
             quotaHit = true;
+            quotaInfo = hit;
             logDiagnostic(log, "opencode_quota", {
               review: opts.reviewLabel,
               elapsed_ms: Date.now() - trackerStartedAt,
+              quota_class: hit.kind,
+              retry_after_ms: hit.retryAfterMs ?? null,
             });
             try {
               proc.kill();
@@ -497,25 +507,20 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     // tested. stderr is intentionally not scanned: the real binary never
     // emits quota strings there, so any match would be a tool trace echoing
     // the literals, not a quota retry.
-    let quota = quotaHit;
-    if (!quota) {
+    if (!quotaInfo) {
       try {
-        quota = hasQuotaInLogDir(logDir);
+        quotaInfo = inspectQuotaHit(logDir, dbPath);
       } catch {
-        quota = false;
+        quotaInfo = undefined;
       }
     }
-    if (!quota) {
-      try {
-        quota = hasQuotaRetryInDb(dbPath);
-      } catch {
-        quota = false;
-      }
-    }
-    if (quota && !quotaHit) {
+    const quota = quotaInfo != null;
+    if (quotaInfo && !quotaHit) {
       logDiagnostic(log, "opencode_quota", {
         review: opts.reviewLabel,
         elapsed_ms: durationMs,
+        quota_class: quotaInfo.kind,
+        retry_after_ms: quotaInfo.retryAfterMs ?? null,
       });
     }
 
@@ -551,6 +556,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
       infra,
       quota,
+      quota_class: quotaInfo?.kind ?? null,
+      retry_after_ms: quotaInfo?.retryAfterMs ?? null,
     });
     await exportOpenCodeTrace({ dbPath, trace: opts.trace });
 
@@ -560,8 +567,17 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       throw err;
     }
 
-    if (quota) {
-      return { status: "stuck", exitCode, stdout, message: QUOTA_MESSAGE, infra: false, durationMs };
+    if (quota && quotaInfo) {
+      return {
+        status: "stuck",
+        exitCode,
+        stdout,
+        message: QUOTA_MESSAGE,
+        infra: false,
+        durationMs,
+        quota: quotaInfo.kind,
+        retryAfterMs: quotaInfo.retryAfterMs,
+      };
     }
 
     if (runError) {

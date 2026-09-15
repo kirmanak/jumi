@@ -1,5 +1,6 @@
 import { isInfraRetryMarker } from "./infra.ts";
 import type { EnqueueResult } from "./queue.ts";
+import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
@@ -187,9 +188,13 @@ CREATE TABLE IF NOT EXISTS issue_skip_latches (
 );
 `;
 
+function isBackoffMarker(error: string | null | undefined): boolean {
+  return isInfraRetryMarker(error) || isQuotaWaitMarker(error);
+}
+
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
   if (row.resultMarkdown || row.resultReason) return true;
-  return Boolean(row.error && !isInfraRetryMarker(row.error));
+  return Boolean(row.error && !isBackoffMarker(row.error));
 }
 
 function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefined): boolean {
@@ -1075,8 +1080,8 @@ export class PgReviewJobStore implements ReviewJobStore {
              updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            AND result_markdown IS NULL AND result_reason IS NULL
-           AND (error IS NULL OR error LIKE 'infra-retry:%')
-         RETURNING id`,
+            AND (error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%')
+          RETURNING id`,
         [id, leasedBy, new Date(now.getTime() + backoffMs).toISOString(), marker]
       )
     );
@@ -1090,8 +1095,8 @@ export class PgReviewJobStore implements ReviewJobStore {
          SET state = 'queued', leased_by = NULL, leased_until = NULL, updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            AND result_markdown IS NULL AND result_reason IS NULL
-           AND (error IS NULL OR error LIKE 'infra-retry:%')
-         RETURNING id`,
+            AND (error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%')
+          RETURNING id`,
         [id, leasedBy]
       )
     );
