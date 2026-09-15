@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
+import { meterWebhook, recordJobCompleted, renderProcessMetrics, renderWebhookMetrics } from "./control_metrics.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { createForge } from "./forge.ts";
@@ -23,7 +24,6 @@ import {
   type ReviewJobStore,
   renderQueueMetrics,
 } from "./review_jobs.ts";
-import { renderTokenMetrics } from "./token_metrics.ts";
 import type { ReviewJob } from "./types.ts";
 import {
   isReviewWebhookAction,
@@ -170,7 +170,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
     if (url.pathname === "/healthz") return json(200, { ok: true });
     if (url.pathname === "/metrics") {
       if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
-      const body = await (deps.renderMetrics ?? renderTokenMetrics)();
+      const body = await (deps.renderMetrics ?? renderProcessMetrics)();
       return new Response(body, {
         status: 200,
         headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
@@ -178,99 +178,106 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
     }
     if (url.pathname === "/webhooks/github") {
       if (!webhookEnabled) return json(404, { error: "not found" });
-      return handleGithubWebhook(request, config, {
-        review: deps.queue,
-        worker: deps.worker,
-        getPR: deps.getPR,
-        logger,
-      });
+      return meterWebhook(
+        request.headers.get("x-github-event"),
+        handleGithubWebhook(request, config, {
+          review: deps.queue,
+          worker: deps.worker,
+          getPR: deps.getPR,
+          logger,
+        })
+      );
     }
     if (url.pathname !== "/webhooks/gitea") return json(404, { error: "not found" });
     if (!webhookEnabled) return json(404, { error: "not found" });
-    if (request.method !== "POST") return json(405, { error: "method not allowed" });
-    if (!request.headers.get("content-type")?.includes("application/json")) {
-      return json(415, { error: "expected application/json" });
-    }
-    if (!authMatches(request.headers.get("authorization"), config.webhookAuthToken)) {
-      return json(401, { error: "invalid authorization header" });
-    }
-
-    const rawBody = new Uint8Array(await request.arrayBuffer());
-    if (rawBody.byteLength > config.maxWebhookBytes) {
-      return json(413, { error: "webhook payload too large" });
-    }
-    const signatureOk = await verifyGiteaSignature(
-      rawBody,
-      config.webhookSecret,
-      request.headers.get("x-gitea-signature")
-    );
-    if (!signatureOk) return json(401, { error: "invalid signature" });
-
     const event = request.headers.get("x-gitea-event");
     const eventType = request.headers.get("x-gitea-event-type");
-    if (event === "ping" || eventType === "ping") return json(200, { ok: true });
+    return meterWebhook(event || eventType || "unknown", handleGiteaWebhook());
 
-    const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
-    const reviewAction = event === "pull_request" ? peekWebhookAction(rawBody) : undefined;
-    if (event === "pull_request" && (!deps.worker || isReviewWebhookAction(reviewAction))) {
-      try {
-        const payload = parsePullRequestPayload(rawBody);
-        const validation = validateWebhookPayload(payload, {
-          giteaUrl: config.giteaUrl,
-          allowedOrgs: config.allowedOrgs,
-          allowedRepos: config.allowedRepos,
-        });
-        if ("skip" in validation) {
-          logger(`skipped ${validation.skip}`);
-          return json(202, { skipped: validation.skip });
-        }
-
-        const job = { ...validation, delivery };
-        if (deps.getPR) {
-          try {
-            const pr = await deps.getPR(job.owner, job.repo, job.prNumber);
-            if (job.headSha !== pr.head.sha) {
-              const key = reviewJobKey(job);
-              logger(`stale head ${key} current=${pr.head.sha}`);
-              return json(202, { key, queued: false });
-            }
-          } catch (err) {
-            logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-        const result = await deps.queue.enqueue(job);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
-        return json(202, result);
-      } catch (err) {
-        if (isQueueUnavailable(err)) {
-          logger(`queue unavailable: ${err.message}`);
-          return json(503, { error: "queue unavailable" });
-        }
-        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
-        return json(400, { error: "invalid webhook payload" });
+    async function handleGiteaWebhook(): Promise<Response> {
+      if (request.method !== "POST") return json(405, { error: "method not allowed" });
+      if (!request.headers.get("content-type")?.includes("application/json")) {
+        return json(415, { error: "expected application/json" });
       }
-    }
+      if (!authMatches(request.headers.get("authorization"), config.webhookAuthToken)) {
+        return json(401, { error: "invalid authorization header" });
+      }
 
-    if (deps.worker) {
-      return handleWorkerWebhookEvent(
+      const rawBody = new Uint8Array(await request.arrayBuffer());
+      if (rawBody.byteLength > config.maxWebhookBytes) {
+        return json(413, { error: "webhook payload too large" });
+      }
+      const signatureOk = await verifyGiteaSignature(
         rawBody,
-        event,
-        eventType,
-        delivery,
-        {
-          giteaUrl: config.giteaUrl,
-          allowedOrgs: config.allowedOrgs,
-          allowedRepos: config.allowedRepos,
-          botUsername: config.botUsername,
-          followupIgnoreLogins: config.followupIgnoreLogins,
-        },
-        { ...deps.worker, logger: deps.worker.logger ?? logger }
+        config.webhookSecret,
+        request.headers.get("x-gitea-signature")
       );
-    }
+      if (!signatureOk) return json(401, { error: "invalid signature" });
 
-    const skipReason = `unsupported event ${event ?? "unknown"}`;
-    logger(`skipped ${skipReason}`);
-    return json(202, { skipped: skipReason });
+      if (event === "ping" || eventType === "ping") return json(200, { ok: true });
+
+      const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+      const reviewAction = event === "pull_request" ? peekWebhookAction(rawBody) : undefined;
+      if (event === "pull_request" && (!deps.worker || isReviewWebhookAction(reviewAction))) {
+        try {
+          const payload = parsePullRequestPayload(rawBody);
+          const validation = validateWebhookPayload(payload, {
+            giteaUrl: config.giteaUrl,
+            allowedOrgs: config.allowedOrgs,
+            allowedRepos: config.allowedRepos,
+          });
+          if ("skip" in validation) {
+            logger(`skipped ${validation.skip}`);
+            return json(202, { skipped: validation.skip });
+          }
+
+          const job = { ...validation, delivery };
+          if (deps.getPR) {
+            try {
+              const pr = await deps.getPR(job.owner, job.repo, job.prNumber);
+              if (job.headSha !== pr.head.sha) {
+                const key = reviewJobKey(job);
+                logger(`stale head ${key} current=${pr.head.sha}`);
+                return json(202, { key, queued: false });
+              }
+            } catch (err) {
+              logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          const result = await deps.queue.enqueue(job);
+          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+          return json(202, result);
+        } catch (err) {
+          if (isQueueUnavailable(err)) {
+            logger(`queue unavailable: ${err.message}`);
+            return json(503, { error: "queue unavailable" });
+          }
+          logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+          return json(400, { error: "invalid webhook payload" });
+        }
+      }
+
+      if (deps.worker) {
+        return handleWorkerWebhookEvent(
+          rawBody,
+          event,
+          eventType,
+          delivery,
+          {
+            giteaUrl: config.giteaUrl,
+            allowedOrgs: config.allowedOrgs,
+            allowedRepos: config.allowedRepos,
+            botUsername: config.botUsername,
+            followupIgnoreLogins: config.followupIgnoreLogins,
+          },
+          { ...deps.worker, logger: deps.worker.logger ?? logger }
+        );
+      }
+
+      const skipReason = `unsupported event ${event ?? "unknown"}`;
+      logger(`skipped ${skipReason}`);
+      return json(202, { skipped: skipReason });
+    }
   };
 }
 
@@ -379,6 +386,11 @@ async function publishAndCompleteJob(
   return result;
 }
 
+function publishedJobResult(row: ReviewJobRecord, result: ReviewResult): "succeeded" | "skipped" | "failed" {
+  if (row.error && !row.resultMarkdown) return "failed";
+  return publishedState(result);
+}
+
 export async function processEngineTick(
   store: ReviewJobStore,
   config: ServiceConfig,
@@ -452,7 +464,9 @@ export async function processEngineTick(
       logger(`engine job ${row.jobKey} cancelled`);
       return "processed";
     }
-    await store.markPublished(row.id, leasedBy, { state: publishedState(result), reason: result.reason });
+    const state = publishedState(result);
+    await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
+    recordJobCompleted(row.kind, state);
     await handoverFollowUp(store, api, config, row, result, logger);
     breaker.recordModelReached();
     return "processed";
@@ -473,7 +487,10 @@ export async function processEngineTick(
         if (decision.action === "exhaust") {
           await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
           const current = await store.get(row.id);
-          if (current) await publishAndCompleteJob(store, api, config, current, logger);
+          if (current) {
+            const published = await publishAndCompleteJob(store, api, config, current, logger);
+            recordJobCompleted(current.kind, publishedJobResult(current, published));
+          }
           logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
         } else {
           await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
@@ -500,7 +517,8 @@ export async function processEngineTick(
       if (current && current.leasedBy !== leasedBy) {
         published = true;
       } else if (current && hasPersistedResult(current)) {
-        await publishAndCompleteJob(store, api, config, current, logger);
+        const publishedResult = await publishAndCompleteJob(store, api, config, current, logger);
+        recordJobCompleted(current.kind, publishedJobResult(current, publishedResult));
         published = true;
       }
     } catch (publishErr) {
@@ -636,7 +654,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       createFetchHandler(config, {
         queue: store,
         logger,
-        renderMetrics: () => renderQueueMetrics(store),
+        renderMetrics: async () => `${await renderQueueMetrics(store)}${renderWebhookMetrics()}`,
         getPR: (owner, repo, index) => api.getPR(owner, repo, index),
         worker: {
           queue: { enqueue: (job) => store.enqueueIssue(job) },
@@ -697,6 +715,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       },
       logger,
       webhookEnabled: false,
+      renderMetrics: renderProcessMetrics,
     }),
     logger,
     deps
