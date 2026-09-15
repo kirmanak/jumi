@@ -587,12 +587,313 @@ export async function publishRelease(opts: {
   return { tagCreated, releaseCreated };
 }
 
+interface GitHubRefObject {
+  sha?: string;
+  type?: string;
+  url?: string;
+}
+
+interface GitHubRef {
+  ref?: string;
+  object?: GitHubRefObject;
+}
+
+interface GitHubTagObject {
+  sha?: string;
+  tag?: string;
+  object?: GitHubRefObject;
+}
+
+export function touchesGitHubWorkflows(repoDir: string, sha = "HEAD"): boolean {
+  const out =
+    gitAllowFail(
+      ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha, "--", ".github/workflows"],
+      repoDir
+    ) ?? "";
+  return (
+    out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean).length > 0
+  );
+}
+
+export function advertisedNextVersion(repoDir: string, sha = "HEAD"): string | null {
+  const plan = computeRelease(repoDir);
+  if (plan.bump !== "reuse" && touchesGitHubWorkflows(repoDir, sha)) {
+    return null;
+  }
+  return plan.version;
+}
+
+export function peeledCommitForTag(repoDir: string, tag: string): string | null {
+  const out = gitAllowFail(["rev-parse", `${tag}^{commit}`], repoDir);
+  const sha = out?.trim() ?? "";
+  return sha || null;
+}
+
+function changesBetween(repoDir: string, fromTag: string | null, toRef: string): string[] {
+  const out = fromTag
+    ? (gitAllowFail(["log", "--oneline", `${fromTag}..${toRef}`], repoDir) ?? "")
+    : (gitAllowFail(["log", "--oneline", "-1", toRef], repoDir) ?? "");
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export function releaseBodyForTag(repoDir: string, tag: string): string {
+  const tags = listSemverTags(repoDir);
+  const idx = tags.indexOf(tag);
+  const previousTag = idx > 0 ? tags[idx - 1] : null;
+  const previousContract = previousTag ? (contractAt(repoDir, previousTag) ?? "") : null;
+  const current = contractAt(repoDir, tag) ?? "";
+  return buildReleaseBody({
+    previousContract: previousContract,
+    currentContract: current,
+    changes: changesBetween(repoDir, previousTag, tag),
+  });
+}
+
+export async function publishGitHubRelease(opts: {
+  apiUrl: string;
+  token: string;
+  owner: string;
+  repo: string;
+  sha: string;
+  version: string;
+  body: string;
+  makeLatest?: boolean;
+  skipMissingRelease?: boolean;
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
+}): Promise<{ tagCreated: boolean; releaseCreated: boolean }> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const base = `${opts.apiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}`;
+  const headers = {
+    Authorization: `Bearer ${opts.token}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "jumi",
+  };
+
+  async function request(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
+    const res = await fetchImpl(`${base}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text().catch(() => "");
+    if (res.status === 403) {
+      throw new Error(
+        `GitHub API 403 ${method} ${path}. The default Actions token cannot write tags/releases. Do not add a PAT; fix token permissions.`
+      );
+    }
+    return { status: res.status, text };
+  }
+
+  async function peeledCommit(refSha: string, refType: string): Promise<string> {
+    if (refType !== "tag") return refSha;
+    const tagObj = await request("GET", `/git/tags/${refSha}`);
+    if (tagObj.status !== 200) {
+      throw new Error(`GitHub API GET /git/tags/${refSha} → ${tagObj.status}: ${tagObj.text}`);
+    }
+    const parsed = JSON.parse(tagObj.text) as GitHubTagObject;
+    const peeled = parsed.object?.sha ?? "";
+    if (!peeled) throw new Error(`GitHub tag object ${refSha} is missing peeled commit`);
+    return peeled;
+  }
+
+  const refPath = `/git/ref/tags/${encodeURIComponent(opts.version)}`;
+  const existingRef = await request("GET", refPath);
+  let tagCreated = false;
+  if (existingRef.status === 200) {
+    const parsed = JSON.parse(existingRef.text) as GitHubRef;
+    const refSha = parsed.object?.sha ?? "";
+    const refType = parsed.object?.type ?? "";
+    if (!refSha) throw new Error(`GitHub ref tags/${opts.version} is missing object sha`);
+    const peeled = await peeledCommit(refSha, refType);
+    if (peeled !== opts.sha) {
+      throw new Error(`Refusing to move immutable tag ${opts.version} from ${peeled} to ${opts.sha}`);
+    }
+  } else if (existingRef.status === 404) {
+    const tagObj = await request("POST", "/git/tags", {
+      tag: opts.version,
+      message: opts.version,
+      object: opts.sha,
+      type: "commit",
+    });
+    if (tagObj.status !== 200 && tagObj.status !== 201) {
+      throw new Error(`GitHub API POST /git/tags → ${tagObj.status}: ${tagObj.text}`);
+    }
+    const parsedTag = JSON.parse(tagObj.text) as { sha?: string };
+    const tagObjectSha = parsedTag.sha ?? "";
+    if (!tagObjectSha) throw new Error("GitHub API POST /git/tags did not return a tag object sha");
+    const ref = await request("POST", "/git/refs", {
+      ref: `refs/tags/${opts.version}`,
+      sha: tagObjectSha,
+    });
+    if (ref.status === 200 || ref.status === 201) {
+      tagCreated = true;
+    } else if (ref.status === 422) {
+      const retry = await request("GET", refPath);
+      if (retry.status !== 200) {
+        throw new Error(`GitHub API POST /git/refs → ${ref.status}: ${ref.text}`);
+      }
+      const reparsed = JSON.parse(retry.text) as GitHubRef;
+      const retrySha = reparsed.object?.sha ?? "";
+      const retryType = reparsed.object?.type ?? "";
+      if (!retrySha) throw new Error(`GitHub ref tags/${opts.version} is missing object sha`);
+      const peeled = await peeledCommit(retrySha, retryType);
+      if (peeled !== opts.sha) {
+        throw new Error(`Refusing to move immutable tag ${opts.version} from ${peeled} to ${opts.sha}`);
+      }
+    } else {
+      throw new Error(`GitHub API POST /git/refs → ${ref.status}: ${ref.text}`);
+    }
+  } else {
+    throw new Error(`GitHub API GET ${refPath} → ${existingRef.status}: ${existingRef.text}`);
+  }
+
+  const existingRelease = await request("GET", `/releases/tags/${encodeURIComponent(opts.version)}`);
+  if (existingRelease.status === 200) {
+    return { tagCreated, releaseCreated: false };
+  }
+  if (existingRelease.status !== 404) {
+    throw new Error(
+      `GitHub API GET /releases/tags/${opts.version} → ${existingRelease.status}: ${existingRelease.text}`
+    );
+  }
+  const createdRelease = await request("POST", "/releases", {
+    tag_name: opts.version,
+    ...(tagCreated ? { target_commitish: opts.sha } : {}),
+    name: opts.version,
+    body: opts.body,
+    draft: false,
+    prerelease: false,
+    generate_release_notes: false,
+    make_latest: opts.makeLatest === false ? "false" : "true",
+  });
+  if (createdRelease.status === 404 && opts.skipMissingRelease) {
+    return { tagCreated, releaseCreated: false };
+  }
+  if (createdRelease.status !== 200 && createdRelease.status !== 201) {
+    throw new Error(`GitHub API POST /releases → ${createdRelease.status}: ${createdRelease.text}`);
+  }
+  return { tagCreated, releaseCreated: true };
+}
+
+export async function runPublishGitHub(opts: {
+  repoDir: string;
+  apiUrl: string;
+  token: string;
+  owner: string;
+  repo: string;
+  sha: string;
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
+}): Promise<void> {
+  const { repoDir: root, apiUrl, token, owner, repo, sha, fetchImpl } = opts;
+  const plan = computeRelease(root);
+  const latest = latestSemverTag(root);
+  if (plan.bump === "reuse") {
+    const result = await publishGitHubRelease({
+      apiUrl,
+      token,
+      owner,
+      repo,
+      sha,
+      version: plan.version,
+      body: plan.body,
+      fetchImpl,
+    });
+    console.log(
+      `Published ${plan.version} bump=reuse tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
+    );
+    const older = listSemverTags(root).filter((tag) => tag !== plan.version);
+    const previousLatest = older.at(-1) ?? null;
+    if (previousLatest && previousLatest !== plan.version) {
+      const tagCommit = peeledCommitForTag(root, previousLatest);
+      if (tagCommit) {
+        const backfill = await publishGitHubRelease({
+          apiUrl,
+          token,
+          owner,
+          repo,
+          sha: tagCommit,
+          version: previousLatest,
+          body: releaseBodyForTag(root, previousLatest),
+          makeLatest: false,
+          skipMissingRelease: true,
+          fetchImpl,
+        });
+        console.log(
+          `Backfilled ${previousLatest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`
+        );
+      }
+    }
+    return;
+  }
+  if (touchesGitHubWorkflows(root, sha)) {
+    console.log(
+      `Skipping new version ${plan.version} on ${sha} because it touches .github/workflows; backfilling latest tag if needed`
+    );
+    if (latest) {
+      const tagCommit = peeledCommitForTag(root, latest);
+      if (tagCommit) {
+        const backfill = await publishGitHubRelease({
+          apiUrl,
+          token,
+          owner,
+          repo,
+          sha: tagCommit,
+          version: latest,
+          body: releaseBodyForTag(root, latest),
+          fetchImpl,
+        });
+        console.log(`Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`);
+      }
+    }
+    return;
+  }
+  const result = await publishGitHubRelease({
+    apiUrl,
+    token,
+    owner,
+    repo,
+    sha,
+    version: plan.version,
+    body: plan.body,
+    fetchImpl,
+  });
+  console.log(
+    `Published ${plan.version} bump=${plan.bump} tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
+  );
+  if (latest && latest !== plan.version) {
+    const tagCommit = peeledCommitForTag(root, latest);
+    if (tagCommit) {
+      const backfill = await publishGitHubRelease({
+        apiUrl,
+        token,
+        owner,
+        repo,
+        sha: tagCommit,
+        version: latest,
+        body: releaseBodyForTag(root, latest),
+        makeLatest: false,
+        fetchImpl,
+      });
+      console.log(`Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`);
+    }
+  }
+}
+
 async function main(args: string[]): Promise<void> {
   const command = args[0] ?? "next-version";
   const root = repoRoot();
   const plan = computeRelease(root);
   if (command === "next-version") {
-    process.stdout.write(`${plan.version}\n`);
+    const version = advertisedNextVersion(root);
+    process.stdout.write(`${version ?? ""}\n`);
     return;
   }
   if (command === "release-body") {
@@ -627,6 +928,18 @@ async function main(args: string[]): Promise<void> {
     console.log(
       `Published ${plan.version} bump=${plan.bump} tagCreated=${result.tagCreated} releaseCreated=${result.releaseCreated}`
     );
+    return;
+  }
+  if (command === "publish-github") {
+    const token = process.env.GITHUB_TOKEN;
+    const repository = process.env.GITHUB_REPOSITORY;
+    const apiUrl = process.env.GITHUB_API_URL || "https://api.github.com";
+    const sha = process.env.GITHUB_SHA;
+    if (!token) throw new Error("GITHUB_TOKEN is required to publish a release");
+    if (!repository?.includes("/")) throw new Error("GITHUB_REPOSITORY is required");
+    if (!sha) throw new Error("GITHUB_SHA is required");
+    const [owner, repo] = repository.split("/");
+    await runPublishGitHub({ repoDir: root, apiUrl, token, owner, repo, sha });
     return;
   }
   throw new Error(`Unknown command: ${command}`);
