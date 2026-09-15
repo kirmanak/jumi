@@ -7,6 +7,12 @@ export type PermissionApi = Pick<
   "getCollaboratorPermission"
 >;
 
+/**
+ * Same write-or-stronger bar for people and Apps.
+ * Gitea reports `admin` / `write` / `read`.
+ * GitHub reports `admin` / `maintain` / `write` / `triage` / `read`.
+ * Fail-closed: anything else (including triage/read/none/unknown) is not write.
+ */
 const WRITE_PERMISSIONS = new Set(["write", "admin", "owner"]);
 const WRITE_ROLE_NAMES = new Set(["write", "admin", "owner", "maintain", "push"]);
 
@@ -21,6 +27,96 @@ export function hasWritePermission(permission: string | undefined, roleName?: st
 export function hasWriteAccessFromPermission(info: CollaboratorPermission | undefined): boolean {
   if (!info) return false;
   return hasWritePermission(info.permission, info.role_name);
+}
+
+export function normalizePermission(permission: string | undefined | null): string {
+  if (typeof permission !== "string" || !permission.trim()) return "none";
+  return permission.trim().toLowerCase();
+}
+
+function loginKey(login: string | undefined | null): string | undefined {
+  if (typeof login !== "string") return undefined;
+  const trimmed = login.trim();
+  if (!trimmed) return undefined;
+  return trimmed.toLowerCase();
+}
+
+function permissionFromResult(result: CollaboratorPermission | undefined | null): string | undefined {
+  if (result == null) return undefined;
+  if (typeof result.permission === "string" && result.permission.trim()) return result.permission;
+  if (typeof result.role_name === "string" && result.role_name.trim()) return result.role_name;
+  return undefined;
+}
+
+export interface ResolvePermissionsResult {
+  /** Raw forge permission per lowercased login, fail-closed `"none"` on any lookup failure. */
+  detail: Map<string, string>;
+  /** Write-or-stronger per login, using the same bar as follow-up (`hasWriteAccessFromPermission`). */
+  writes: Map<string, boolean>;
+  /** Distinct logins queried. */
+  lookups: number;
+  /** Lookups that failed (including unavailable API); detail holds `"none"` for each. */
+  failures: number;
+  /** First forge error message (truncated), for server-side warning logs. Not for the prompt. */
+  sampleError?: string;
+}
+
+/**
+ * Raw permission strings per login, lowercased. Fail-closed entries are `"none"`.
+ * Counts per-login failures so callers can warn when a systemic forge denial
+ * demotes every writer to discussion instead of looking like a thread with no writers.
+ */
+export async function resolvePermissions(
+  api: Partial<PermissionApi> | undefined,
+  owner: string,
+  repo: string,
+  logins: Iterable<string | undefined | null>
+): Promise<ResolvePermissionsResult> {
+  const distinct = new Map<string, string>();
+  for (const login of logins) {
+    const key = loginKey(login);
+    if (!key) continue;
+    if (!distinct.has(key) && typeof login === "string" && login.trim()) {
+      distinct.set(key, login.trim());
+    }
+  }
+  const out = new Map<string, string>();
+  const writes = new Map<string, boolean>();
+  const fn = typeof api?.getCollaboratorPermission === "function" ? api.getCollaboratorPermission : undefined;
+  if (!fn) {
+    for (const key of distinct.keys()) {
+      out.set(key, "none");
+      writes.set(key, false);
+    }
+    return {
+      detail: out,
+      writes,
+      lookups: distinct.size,
+      failures: distinct.size,
+      ...(distinct.size > 0 ? { sampleError: "collaborator permission API unavailable" } : {}),
+    };
+  }
+  const errors: string[] = [];
+  await Promise.all(
+    [...distinct.entries()].map(async ([key, login]) => {
+      try {
+        const result = await fn.call(api, owner, repo, login);
+        out.set(key, normalizePermission(permissionFromResult(result)));
+        writes.set(key, hasWriteAccessFromPermission(result));
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+        out.set(key, "none");
+        writes.set(key, false);
+      }
+    })
+  );
+  return {
+    detail: out,
+    writes,
+    lookups: distinct.size,
+    failures: errors.length,
+    ...(errors.length > 0 && errors[0] ? { sampleError: errors[0].slice(0, 240) } : {}),
+  };
 }
 
 /**
