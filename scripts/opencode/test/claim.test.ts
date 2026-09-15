@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ClaimRecord } from "../src/claim.ts";
@@ -7,10 +7,15 @@ import {
   acquireClaim,
   CLAIM_STALE_MS,
   claimFilePath,
+  conflictStatePath,
   deleteClaim,
   isClaimLive,
   isPidAlive,
   readClaim,
+  readSkipLatchGeneration,
+  skipLatchGenerationPath,
+  stuckStatePath,
+  syncHomeSkipLatch,
   writeClaim,
 } from "../src/claim.ts";
 
@@ -81,6 +86,25 @@ describe("claim files", () => {
       await deleteClaim(path);
       await writeClaim(path, live);
       expect((await readClaim(path))?.pid).toBe(42);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("syncHomeSkipLatch", () => {
+  test("wipes ordinal skip files when generation advances", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-latch-"));
+    try {
+      await writeClaim(conflictStatePath(home, "kirmanak", "demo", 12), makeClaim());
+      await writeClaim(stuckStatePath(home, "kirmanak", "demo", 12), makeClaim());
+      await syncHomeSkipLatch(home, "kirmanak", "demo", 12, 1);
+      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+      expect(await readFile(stuckStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+      expect(await readSkipLatchGeneration(skipLatchGenerationPath(home, "kirmanak", "demo", 12))).toBe(1);
+      await writeClaim(conflictStatePath(home, "kirmanak", "demo", 12), makeClaim());
+      await syncHomeSkipLatch(home, "kirmanak", "demo", 12, 1);
+      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8")).toContain("pid");
     } finally {
       await rm(home, { recursive: true, force: true });
     }

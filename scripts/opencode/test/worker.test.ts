@@ -1,8 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimFilePath, isPidAlive, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
+import {
+  claimFilePath,
+  conflictStatePath,
+  isPidAlive,
+  readClaim,
+  skipLatchGenerationPath,
+  stuckStatePath,
+  writeClaim,
+} from "../src/claim.ts";
+import { writeConflictState } from "../src/conflict.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { implementIssue } from "../src/implement.ts";
@@ -18,7 +27,7 @@ import {
   QuotaWaitError,
 } from "../src/quota.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
-import { isQuotaStuck, readStuckState } from "../src/stuck.ts";
+import { isQuotaStuck, readStuckState, writeStuckState } from "../src/stuck.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
@@ -160,6 +169,26 @@ describe("handleIssueCancel", () => {
       expect(api.comments.at(-1)).toContain("stopped");
       child.kill();
       await child.exited;
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("clears the shared skip latch so another ordinal can recover", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-latch-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 19,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -1217,5 +1246,87 @@ describe("processWorkerTick", () => {
     } finally {
       await rm(home, { recursive: true, force: true });
     }
+  });
+
+  test("shared skip latch skips follow-up without OpenCode on another ordinal", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-latch-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+      await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
+        fingerprints: [
+          { kind: "error", hash: "aaa" },
+          { kind: "error", hash: "aaa" },
+          { kind: "error", hash: "aaa" },
+        ],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 19, headSha: "headsha" }));
+      let followUp = 0;
+      const logs: string[] = [];
+      await processWorkerTick(
+        store,
+        makeWorkerConfig({ home }),
+        makeApi(),
+        "worker-1",
+        {
+          followUp: async () => {
+            followUp++;
+            return { status: "skipped", reason: "stuck: repeated error" };
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(followUp).toBe(0);
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe("stuck: cannot resolve conflicts");
+      expect(logs.some((line) => line.includes("stuck: cannot resolve conflicts"))).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("kill switch wipes HOME skip files so a writer follow-up runs", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-kill-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 19,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 19, headSha: "headsha" }));
+      let followUp = 0;
+      await processWorkerTick(store, makeWorkerConfig({ home }), makeApi(), "worker-1", {
+        followUp: async () => {
+          followUp++;
+          return { status: "pushed", prNumber: 19, htmlUrl: "https://github.com/kirmanak/demo/pull/19" };
+        },
+      });
+      expect(followUp).toBe(1);
+      expect(store.rows.at(-1)?.state).toBe("succeeded");
+      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+      expect(JSON.parse(await readFile(skipLatchGenerationPath(home, "kirmanak", "demo", 12), "utf8"))).toEqual({
+        generation: 1,
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("follow-up stuck skip records a shared latch", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 19, headSha: "headsha" }));
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      followUp: async () => ({ status: "skipped", reason: "stuck: repeated error" }),
+    });
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({
+      generation: 0,
+      skipReason: "stuck: repeated error",
+    });
   });
 });

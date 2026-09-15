@@ -95,6 +95,22 @@ export interface ReviewJobStore {
   countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number>;
   countByState(): Promise<Record<ReviewJobState, number>>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
+  readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
+  clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
+  setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
+}
+
+export interface IssueSkipLatch {
+  generation: number;
+  skipReason: string | null;
+}
+
+export function emptyIssueSkipLatch(): IssueSkipLatch {
+  return { generation: 0, skipReason: null };
+}
+
+function issueSkipLatchKey(owner: string, repo: string, issueNumber: number): string {
+  return `${owner}/${repo}#${issueNumber}`;
 }
 
 export const REVIEW_JOBS_SCHEMA_SQL = `
@@ -160,6 +176,16 @@ WHERE id IN (
 CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
   ON review_jobs (owner, repo, issue_number)
   WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS issue_skip_latches (
+  owner TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  issue_number INTEGER NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0,
+  skip_reason TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (owner, repo, issue_number)
+);
 `;
 
 function isBackoffMarker(error: string | null | undefined): boolean {
@@ -323,10 +349,18 @@ function emptyCounts(): Record<ReviewJobState, number> {
   return { queued: 0, leased: 0, succeeded: 0, skipped: 0, failed: 0, cancelled: 0 };
 }
 
+function mapIssueSkipLatch(row: { generation: unknown; skip_reason: unknown }): IssueSkipLatch {
+  return {
+    generation: num(row.generation),
+    skipReason: strOrNull(row.skip_reason),
+  };
+}
+
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
   private nextId = 1;
   private chain = Promise.resolve();
+  private readonly skipLatches = new Map<string, IssueSkipLatch>();
 
   private locked<T>(fn: () => T | Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);
@@ -657,6 +691,31 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           row.issueNumber === issueNumber &&
           row.state === "succeeded"
       ).length;
+    });
+  }
+
+  readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
+    return this.locked(() => {
+      const latch = this.skipLatches.get(issueSkipLatchKey(owner, repo, issueNumber));
+      return latch ? { ...latch } : emptyIssueSkipLatch();
+    });
+  }
+
+  clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
+    return this.locked(() => {
+      const key = issueSkipLatchKey(owner, repo, issueNumber);
+      const current = this.skipLatches.get(key);
+      const next: IssueSkipLatch = { generation: (current?.generation ?? 0) + 1, skipReason: null };
+      this.skipLatches.set(key, next);
+      return { ...next };
+    });
+  }
+
+  setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void> {
+    return this.locked(() => {
+      const key = issueSkipLatchKey(owner, repo, issueNumber);
+      const current = this.skipLatches.get(key);
+      this.skipLatches.set(key, { generation: current?.generation ?? 0, skipReason: reason });
     });
   }
 }
@@ -1219,6 +1278,40 @@ export class PgReviewJobStore implements ReviewJobStore {
       )
     );
     return rows[0] ? num(rows[0].n) : 0;
+  }
+
+  async readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
+    const rows = asRows<{ generation: unknown; skip_reason: unknown }>(
+      await this.sql.unsafe(
+        `SELECT generation, skip_reason FROM issue_skip_latches WHERE owner = $1 AND repo = $2 AND issue_number = $3`,
+        [owner, repo, issueNumber]
+      )
+    );
+    return rows[0] ? mapIssueSkipLatch(rows[0]) : emptyIssueSkipLatch();
+  }
+
+  async clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
+    const rows = asRows<{ generation: unknown; skip_reason: unknown }>(
+      await this.sql.unsafe(
+        `INSERT INTO issue_skip_latches (owner, repo, issue_number, generation, skip_reason, updated_at)
+         VALUES ($1, $2, $3, 1, NULL, NOW())
+         ON CONFLICT (owner, repo, issue_number)
+         DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL, updated_at = NOW()
+         RETURNING generation, skip_reason`,
+        [owner, repo, issueNumber]
+      )
+    );
+    return rows[0] ? mapIssueSkipLatch(rows[0]) : emptyIssueSkipLatch();
+  }
+
+  async setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void> {
+    await this.sql.unsafe(
+      `INSERT INTO issue_skip_latches (owner, repo, issue_number, generation, skip_reason, updated_at)
+       VALUES ($1, $2, $3, 0, $4, NOW())
+       ON CONFLICT (owner, repo, issue_number)
+       DO UPDATE SET skip_reason = EXCLUDED.skip_reason, updated_at = NOW()`,
+      [owner, repo, issueNumber, reason]
+    );
   }
 }
 
