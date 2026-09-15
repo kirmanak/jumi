@@ -561,6 +561,159 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs.map((job) => job.issueNumber)).toEqual([4386]);
   });
 
+  test("closed assigned foreign PR returns 503 when listing assigned issues fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("issues down");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 4373,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("issues down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("unassigned foreign PR returns 503 when wake listing fails after cancel", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("issues down");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+        getRepo: async () => repository,
+      },
+      cancel: async (owner, repo, issueNumber) => {
+        cancelled.push({ owner, repo, issueNumber });
+        return { key: `${owner}/${repo}#${issueNumber}`, cancelled: true };
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "unassigned",
+          assignee: makeUser({ login: "jumi" }),
+          pull_request: makePR({
+            number: 4373,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(cancelled).toEqual([{ owner: "kirmanak", repo: "demo", issueNumber: 4373 }]);
+    expect(logs.some((line) => line.includes("issues down"))).toBe(true);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed blocker PR returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        getIssue: async () => makeIssue({ number: 206 }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 200,
+            state: "closed",
+            merged: true,
+            body: "Fixes #196",
+            user: makeUser({ login: "alice" }),
+            assignee: null,
+            assignees: [],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/200",
+            head: {
+              label: "kirmanak:fix",
+              ref: "fix",
+              sha: "abc",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
   test("closed pull_request without wait-clear API still 202-skips", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });

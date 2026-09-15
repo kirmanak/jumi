@@ -111,6 +111,15 @@ function skipped(reason: string, logger: (message: string) => void): Response {
   return json(202, { skipped: reason });
 }
 
+function wakeFailedResponse(err: unknown, logger: (message: string) => void): Response {
+  if (isQueueUnavailable(err)) {
+    logger(`queue unavailable: ${err.message}`);
+    return json(503, { error: "queue unavailable" });
+  }
+  logger(`failed to wake waiting issues: ${err instanceof Error ? err.message : String(err)}`);
+  return json(503, { error: "failed to wake waiting issues" });
+}
+
 function cancelKey(owner: string, repo: string, issueNumber: number): string {
   return `${owner}/${repo}#${issueNumber}`;
 }
@@ -199,14 +208,7 @@ export async function handleWorkerWebhookEvent(
         }
         return enqueueJobList(jobs, deps.queue, delivery, logger);
       } catch (err) {
-        if (isQueueUnavailable(err)) {
-          logger(`queue unavailable: ${err.message}`);
-          return json(503, { error: "queue unavailable" });
-        }
-        return skipped(
-          action ? `unsupported action ${action}` : `unsupported event ${event ?? "pull_request"}`,
-          logger
-        );
+        return wakeFailedResponse(err, logger);
       }
     }
     try {
@@ -221,10 +223,7 @@ export async function handleWorkerWebhookEvent(
           const jobs = await wakeJobsFromPull(rawBody, delivery, policy, deps);
           if (jobs.length > 0) return enqueueJobList(jobs, deps.queue, delivery, logger);
         } catch (err) {
-          if (isQueueUnavailable(err)) {
-            logger(`queue unavailable: ${err.message}`);
-            return json(503, { error: "queue unavailable" });
-          }
+          return wakeFailedResponse(err, logger);
         }
         return json(202, result);
       }

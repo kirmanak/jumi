@@ -284,42 +284,47 @@ export async function pullWaitClearJobsToEnqueue(
     jobs.push(job);
   };
 
+  let blocksError: unknown;
   if ((payload.action === "closed" || payload.action === "merged") && api.listIssueBlocks) {
-    const numbers = new Set<number>([pr.number, ...extractClosingIssueNumbers(pr)]);
-    for (const number of numbers) {
-      const woken = await blockedIssueJobsFrom(owner, repo, number, payload.repository, payload.action, policy, {
-        listIssueBlocks: api.listIssueBlocks,
-        getIssue: api.getIssue,
-        getRepo: api.getRepo,
-      });
-      for (const job of woken) add(job);
+    try {
+      const numbers = new Set<number>([pr.number, ...extractClosingIssueNumbers(pr)]);
+      for (const number of numbers) {
+        const woken = await blockedIssueJobsFrom(owner, repo, number, payload.repository, payload.action, policy, {
+          listIssueBlocks: api.listIssueBlocks,
+          getIssue: api.getIssue,
+          getRepo: api.getRepo,
+        });
+        for (const job of woken) add(job);
+      }
+    } catch (err) {
+      blocksError = err;
     }
   }
 
-  if (!api.listRepoIssues || !shouldWakeAssignedIssues(payload, owner, repo, policy.botUsername)) {
-    return jobs;
+  if (api.listRepoIssues && shouldWakeAssignedIssues(payload, owner, repo, policy.botUsername)) {
+    let remainingLock = false;
+    try {
+      const pulls = await api.listOpenPulls(owner, repo);
+      remainingLock = pulls.some(
+        (open) => open.number !== pr.number && isAssignedForeignPR(open, owner, repo, policy.botUsername)
+      );
+    } catch {
+      remainingLock = true;
+    }
+    if (!remainingLock) {
+      const assigned = await assignedIssueJobsToEnqueue(
+        owner,
+        repo,
+        payload.repository,
+        payload.action,
+        policy,
+        { listRepoIssues: api.listRepoIssues, getIssue: api.getIssue },
+        new Set([pr.number])
+      );
+      for (const job of assigned) add(job);
+    }
   }
 
-  let remainingLock = false;
-  try {
-    const pulls = await api.listOpenPulls(owner, repo);
-    remainingLock = pulls.some(
-      (open) => open.number !== pr.number && isAssignedForeignPR(open, owner, repo, policy.botUsername)
-    );
-  } catch {
-    remainingLock = true;
-  }
-  if (remainingLock) return jobs;
-
-  const assigned = await assignedIssueJobsToEnqueue(
-    owner,
-    repo,
-    payload.repository,
-    payload.action,
-    policy,
-    { listRepoIssues: api.listRepoIssues, getIssue: api.getIssue },
-    new Set([pr.number])
-  );
-  for (const job of assigned) add(job);
+  if (blocksError && jobs.length === 0) throw blocksError;
   return jobs;
 }
