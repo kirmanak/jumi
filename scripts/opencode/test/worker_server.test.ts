@@ -509,6 +509,58 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs.map((job) => job.issueNumber)).toEqual([4386]);
   });
 
+  test("Gitea unassigned foreign PR without assignee cancels then wakes other assigned issues", async () => {
+    const queue = makeQueue();
+    const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+        getRepo: async () => repository,
+      },
+      cancel: async (owner, repo, issueNumber) => {
+        cancelled.push({ owner, repo, issueNumber });
+        return { key: `${owner}/${repo}#${issueNumber}`, cancelled: true };
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "unassigned",
+          pull_request: makePR({
+            number: 4373,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#4386", queued: true });
+    expect(cancelled).toEqual([{ owner: "kirmanak", repo: "demo", issueNumber: 4373 }]);
+    expect(queue.jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
   test("closed pull_request without wait-clear API still 202-skips", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
