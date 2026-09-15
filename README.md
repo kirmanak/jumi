@@ -294,12 +294,12 @@ bun run server
   workflows/
     jumi-reviewer-image.yml  # Reviewer image build/push to GHCR
     jumi-worker-image.yml    # Worker image build/push to GHCR
+    opencode-checks.yml      # PR lint/typecheck/test and image build checks
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
   opencode-implement.json    # Implement config (edit/write allow; skills.paths /app/review-skills; blanket skill allow)
   tool-versions.env          # Pinned OpenCode/Bun/Helm/Temurin versions
   workflows/
-    opencode-checks.yml      # PR lint/typecheck/test and image build checks
     jumi-release.yml         # Annotated vX.Y.Z git tag + Gitea Release
 deploy/
   contract.md                # GitOps runtime contract (semver source of truth)
