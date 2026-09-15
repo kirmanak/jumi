@@ -317,7 +317,7 @@ describe("push webhook HTTP", () => {
     const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(500);
     const body = await responseJson(response);
-    expect(body.error).toContain("→ 500");
+    expect(body).toEqual({ error: "internal error" });
     expect(body.skipped).toBeUndefined();
     expect(queue.jobs).toHaveLength(0);
   });
@@ -334,7 +334,7 @@ describe("push webhook HTTP", () => {
     });
     const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(500);
-    expect((await responseJson(response)).error).toContain("gitea unavailable");
+    expect(await responseJson(response)).toEqual({ error: "internal error" });
     expect(queue.jobs).toHaveLength(0);
   });
 
@@ -349,7 +349,7 @@ describe("push webhook HTTP", () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
     const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(500);
-    expect((await responseJson(response)).error).toContain("queue unavailable");
+    expect(await responseJson(response)).toEqual({ error: "internal error" });
   });
 
   test("HTTP handler does not call git / OpenCode", async () => {

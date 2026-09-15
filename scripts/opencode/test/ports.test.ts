@@ -58,6 +58,7 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
   const statuses: Array<{ sha: string; state: string; context?: string; description?: string }> = [];
   const defaults: Tracker & Forge = {
     getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getPR: async () => makePR(),
     getPRFiles: async () => [makeFile()],
     getIssue: async () => makeIssue(),
@@ -147,6 +148,7 @@ describe("Engine, Tracker, and Forge ports", () => {
     };
     const forge: Forge = {
       getRepo: async () => makeRepo(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
       getPR: async () => makePR(),
       getPRFiles: async () => [makeFile()],
       listOpenPulls: async () => [],

@@ -134,7 +134,7 @@ describe("createFetchHandler", () => {
     const response = await handler(await signedRequest({ action: "opened" }));
 
     expect(response.status).toBe(400);
-    expect((await responseJson(response)).error).toContain("missing repository");
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
   });
 
   test("does not enqueue a stale SHA when GET PR head differs", async () => {
@@ -307,6 +307,9 @@ describe("createFetchHandler router mailbox", () => {
       },
       listOpenPulls: async () => [jumiPr()],
       getIssue: async () => makeIssue(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getRepo: async () => makeRepo(),
+      getPR: async (_owner: string, _repo: string, index: number) => makePR({ number: index }),
     };
   }
 

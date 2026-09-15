@@ -18,6 +18,8 @@ export interface EngineRunOptions {
   maxOutputBytes?: number;
   reviewLabel?: string;
   memorySampleIntervalMs?: number;
+  /** Interval for the live per-run log-file quota poll. Defaults to QUOTA_POLL_INTERVAL_MS; 0 disables. */
+  quotaPollIntervalMs?: number;
   extraEnv?: Record<string, string>;
   abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;
@@ -25,6 +27,7 @@ export interface EngineRunOptions {
   trace?: TraceContext;
   prompt?: string;
   continueSession?: boolean;
+  hop?: boolean;
 }
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";

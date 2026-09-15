@@ -4,6 +4,7 @@ import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
 import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim, writeClaim } from "./claim.ts";
 import { type Engine, resolveEngine } from "./engine.ts";
+import { withModelHop } from "./fallback.ts";
 import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
 import {
@@ -56,6 +57,11 @@ export interface BeginClaimedWorktreeOpts {
   useClaim?: boolean;
   sanitizeOpenCodeEnv?: boolean;
   fallbackEngine: Engine;
+  fallbackModel?: string;
+  fallbackVariant?: string;
+  remainingLeaseMs?: () => number | Promise<number>;
+  extendLease?: () => Promise<boolean>;
+  logger?: (message: string) => void;
   branch?: string;
   forgetTerminal?: boolean;
 }
@@ -88,7 +94,13 @@ export async function beginClaimedWorktree(
   const now = () => opts.now?.() ?? new Date();
   const pidAlive = opts.pidAlive ?? isPidAlive;
   const git = opts.gitRunner ?? runGit;
-  const engine = resolveEngine(opts, opts.fallbackEngine);
+  const engine = withModelHop(resolveEngine(opts, opts.fallbackEngine), {
+    fallbackModel: opts.fallbackModel,
+    fallbackVariant: opts.fallbackVariant,
+    remainingLeaseMs: opts.remainingLeaseMs,
+    extendLease: opts.extendLease,
+    logger: opts.logger,
+  });
   const owner = assertSafeSegment(opts.job.owner, "owner");
   const repo = assertSafeSegment(opts.job.repo, "repo");
   const issueNumber = opts.job.issueNumber;

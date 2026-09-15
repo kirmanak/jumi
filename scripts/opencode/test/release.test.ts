@@ -271,6 +271,8 @@ describe("deploy/contract.md", () => {
       "FOLLOWUP_IGNORE_LOGINS",
       "OPENCODE_MODEL",
       "OPENCODE_VARIANT",
+      "OPENCODE_FALLBACK_MODEL",
+      "OPENCODE_FALLBACK_VARIANT",
       "OPENCODE_CONFIG",
       "OPENCODE_WELLKNOWN_URL",
       "OPENCODE_WELLKNOWN_KEY",
@@ -300,6 +302,8 @@ describe("deploy/contract.md", () => {
       "FOLLOWUP_IGNORE_LOGINS",
       "OPENCODE_MODEL",
       "OPENCODE_VARIANT",
+      "OPENCODE_FALLBACK_MODEL",
+      "OPENCODE_FALLBACK_VARIANT",
       "OPENCODE_CONFIG",
       "OPENCODE_WELLKNOWN_URL",
       "OPENCODE_WELLKNOWN_KEY",
@@ -464,15 +468,20 @@ describe("image labels and no double-build", () => {
 
   test("tag push does not start a second full image build", async () => {
     const reviewer = await readFile(join(repoRoot, ".github/workflows/jumi-reviewer-image.yml"), "utf8");
-    const worker = await readFile(join(repoRoot, ".gitea/workflows/jumi-worker-image.yml"), "utf8");
+    const worker = await readFile(join(repoRoot, ".github/workflows/jumi-worker-image.yml"), "utf8");
     expect(workflowRebuildsOnTag(reviewer)).toBe(false);
     expect(workflowRebuildsOnTag(worker)).toBe(false);
     expect(shouldSkipImageBuild("tag")).toBe(true);
     expect(shouldSkipImageBuild("branch")).toBe(false);
     expect(reviewer).toContain("$" + "{IMAGE}:$" + "{VERSION}");
-    expect(worker).toContain("$" + "{IMAGE}:$" + "{VERSION}");
+    expect(worker).toContain("${{ env.IMAGE }}:${{ env.VERSION }}");
     expect(reviewer).toContain("bun src/release.ts next-version");
     expect(worker).toContain("bun src/release.ts next-version");
+    expect(worker).toContain("target: worker");
+    expect(worker).toContain("ghcr.io/kirmanak/jumi-worker");
+    expect(worker).toContain("branches: [main]");
+    expect(worker).not.toContain("type=sha");
+    expect(worker).not.toContain(":${{ github.sha");
     expect(reviewer).toContain("target: runtime");
     expect(reviewer).toContain("ghcr.io/kirmanak/jumi-reviewer");
     expect(reviewer).toContain("branches: [main]");

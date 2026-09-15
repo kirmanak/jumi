@@ -84,6 +84,8 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `FOLLOWUP_IGNORE_LOGINS` | unset | Optional comma-separated logins skipped for follow-up in addition to `BOT_USERNAME` |
 | `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
 | `OPENCODE_VARIANT` | unset | OpenCode reasoning effort passed to `opencode run --variant`. Unset or empty omits the flag (model default). Do not bake an effort into the image |
+| `OPENCODE_FALLBACK_MODEL` | unset | Optional OpenCode model ID (`provider/model`) for one from-scratch hop when the primary child exits because the provider/model is unavailable. Unset or empty keeps current behavior (no hop) |
+| `OPENCODE_FALLBACK_VARIANT` | unset | OpenCode reasoning effort for the fallback spawn. Unset or empty omits `--variant` (model default) |
 | `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`; only `gitops-apply-review` is allowed (`skills.paths`); other skills denied; external_directory is last-match star deny then allow `/app/review-skills`; webfetch JSON stays scalar allow (OpenCode types it as Action); last-match star allow then deny `kirmanak.stream` and GitHub search is applied via `OPENCODE_PERMISSION`; task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
 | `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. Override to **your** well-known host. Unset or empty still defaults to `https://kirmanak.stream`. Set `disabled` to turn well-known **off** (no `auth.json` seed, no fetch). Other non-URL values fail closed. `OPENCODE_MODEL` and `OPENCODE_API_KEY` still apply with well-known off. Otherwise the service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy |
 | `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
@@ -189,19 +191,15 @@ When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs an OpenInfer
 
 This repository’s image workflows publish `jumi-reviewer` and `jumi-worker` with tags `latest` and `vX.Y.Z`. Point GitOps at the registry **you** push to. Reviewer and worker share one immutable semver tag per merge to `main`. `deploy/contract.md` is the bump source of truth (unchanged → patch, new optional GitOps → minor, required GitOps change or `BREAKING` → major). The first release is `v1.0.0`. A GitHub Release on that tag has `## GitOps` / `## Breaking` / `## Changes`. Images carry `org.opencontainers.image.source`, `version` (`vX.Y.Z`), and `revision` (full SHA).
 
-Required repository secrets for `.gitea/workflows/jumi-worker-image.yml`:
-
-| Name | Description |
-|------|-------------|
-| `CONTAINER_REGISTRY_PASS` | Token or password with package write access |
-
 The reviewer (`.github/workflows/jumi-reviewer-image.yml`) publishes to GHCR with `GITHUB_TOKEN` (`packages: write`); it needs no extra secrets.
+
+The worker (`.github/workflows/jumi-worker-image.yml`) publishes to GHCR with `GITHUB_TOKEN` (`packages: write`); it needs no extra secrets.
 
 Required repository variables:
 
 | Name | Description |
 |------|-------------|
-| `CONTAINER_REGISTRY_USER` | User that can push packages |
+| `CONTAINER_REGISTRY_USER` | Only needed for manual `bash .gitea/scripts/build-*.sh` pushes |
 
 Pull requests run the same lint/typecheck/test gate and build the image without publishing it.
 
@@ -295,14 +293,13 @@ bun run server
 .github/
   workflows/
     jumi-reviewer-image.yml  # Reviewer image build/push to GHCR
+    jumi-worker-image.yml    # Worker image build/push to GHCR
+    opencode-checks.yml      # PR lint/typecheck/test and image build checks
     jumi-release.yml         # Annotated vX.Y.Z git tag + GitHub Release
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
   opencode-implement.json    # Implement config (edit/write allow; skills.paths /app/review-skills; blanket skill allow)
   tool-versions.env          # Pinned OpenCode/Bun/Helm/Temurin versions
-  workflows/
-    opencode-checks.yml      # PR lint/typecheck/test and image build checks
-    jumi-worker-image.yml    # Worker image build/push workflow
 deploy/
   contract.md                # GitOps runtime contract (semver source of truth)
 review-skills/

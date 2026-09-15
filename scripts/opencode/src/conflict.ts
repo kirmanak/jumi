@@ -23,9 +23,18 @@ import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { openCodeEngine } from "./git.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, type HelmRunner, type ImplementOptions, type OpenCodeRunner } from "./implement.ts";
-import { gateShipAfterOpenCode, jobWithIssue, snapshotFromJob } from "./issue_recheck.ts";
+import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
-import { appendStuckFingerprint, evaluateStuck, fingerprintError, readStuckState, stuckComment } from "./stuck.ts";
+import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import {
+  appendStuckFingerprint,
+  evaluateStuck,
+  fingerprintError,
+  isQuotaStuck,
+  markQuotaStuck,
+  readStuckState,
+  stuckComment,
+} from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import { type GitRunner, workerOpenCodeChildEnv } from "./workspace.ts";
 
@@ -507,7 +516,13 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     return { status: "stuck" };
   }
   const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
-  const stuckReason = evaluateStuck((await readStuckState(stuckPath)).fingerprints);
+  const stuckState = await readStuckState(stuckPath);
+  if (isQuotaStuck(stuckState)) {
+    await sticky(QUOTA_STUCK_TEXT, pr.number);
+    await forgetClaim();
+    return { status: "stuck" };
+  }
+  const stuckReason = evaluateStuck(stuckState.fingerprints);
   if (stuckReason) {
     await sticky(stuckComment(stuckReason), pr.number);
     await forgetClaim();
@@ -580,33 +595,44 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         );
       }
 
-      const mergeResult = await mergeDefaultIntoWorktree({
-        git: loop.runConfiguredGit,
-        env: loop.env,
-        worktree,
-        defaultBranch: opts.job.defaultBranch,
-        headRef: branch,
-        skipCleanMerge: true,
-        job: taskJob,
-        pr,
-        model: opts.model,
-        variant: opts.variant,
-        home: opts.home,
-        sanitizeOpenCodeEnv: sanitizeEnv,
-        extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
-        maxOutputBytes: opts.maxOutputBytes,
-        timeoutMs,
-        openCodeRunner: engine,
-        helmRunner: opts.helmRunner,
-        logger: log,
-        abortSignal: opts.abortSignal,
-        ciMarkdown,
-        jobId: opts.jobId ?? opts.job.delivery,
-        onPid: loop.engineOnPid(opts.onPid),
-      }).catch((err: unknown) => {
+      let mergeResult: MergeDefaultResult;
+      try {
+        mergeResult = await mergeDefaultIntoWorktree({
+          git: loop.runConfiguredGit,
+          env: loop.env,
+          worktree,
+          defaultBranch: opts.job.defaultBranch,
+          headRef: branch,
+          skipCleanMerge: true,
+          job: taskJob,
+          pr,
+          model: opts.model,
+          variant: opts.variant,
+          home: opts.home,
+          sanitizeOpenCodeEnv: sanitizeEnv,
+          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+          maxOutputBytes: opts.maxOutputBytes,
+          timeoutMs,
+          openCodeRunner: engine,
+          helmRunner: opts.helmRunner,
+          logger: log,
+          abortSignal: opts.abortSignal,
+          ciMarkdown,
+          jobId: opts.jobId ?? opts.job.delivery,
+          onPid: loop.engineOnPid(opts.onPid),
+        });
+      } catch (err: unknown) {
+        if (isQuotaError(err)) {
+          await sticky(QUOTA_STUCK_TEXT, pr.number);
+          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          await loop.stopHeartbeat();
+          await loop.forgetSerialized().catch(() => undefined);
+          await loop.detachWorktree();
+          return { status: "stuck" };
+        }
         mergeDefaultThrew = true;
         throw err;
-      });
+      }
 
       if (mergeResult.status === "up-to-date") {
         await loop.stopHeartbeat();
@@ -624,20 +650,21 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         return { status: "stuck" };
       }
 
-      const gate = await gateShipAfterOpenCode({
-        api: opts.api,
-        owner,
-        repo,
-        issueNumber,
-        botUsername: opts.botUsername,
-        snapshot: snapshotFromJob(taskJob),
-        closerPrNumber: pr.number,
-        continueOpenCode: async (issue) => {
-          throwIfAborted(opts.abortSignal);
-          await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
-          log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
-          throwIfEngineFailed(
-            await engine({
+      let gate: ShipGate;
+      try {
+        gate = await gateShipAfterOpenCode({
+          api: opts.api,
+          owner,
+          repo,
+          issueNumber,
+          botUsername: opts.botUsername,
+          snapshot: snapshotFromJob(taskJob),
+          closerPrNumber: pr.number,
+          continueOpenCode: async (issue) => {
+            throwIfAborted(opts.abortSignal);
+            await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+            log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
+            const continued = await engine({
               model: opts.model,
               variant: opts.variant,
               workdir: worktree,
@@ -657,11 +684,27 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               logger: log,
               abortSignal: opts.abortSignal,
               onPid: loop.engineOnPid(opts.onPid),
-            })
-          );
-          await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md"]);
-        },
-      });
+            });
+            // Gate on the message so a future non-quota `stuck` producer does
+            // not set the human-clear quota flag.
+            if (continued.status === "stuck" && isQuotaText(continued.message)) {
+              await sticky(QUOTA_STUCK_TEXT, pr.number);
+              await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+              throw new Error(QUOTA_STUCK_TEXT);
+            }
+            throwIfEngineFailed(continued);
+            await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md"]);
+          },
+        });
+      } catch (err) {
+        if (isQuotaError(err)) {
+          await loop.stopHeartbeat();
+          await loop.forgetSerialized().catch(() => undefined);
+          await loop.detachWorktree();
+          return { status: "stuck" };
+        }
+        throw err;
+      }
       if (gate.action === "skip") {
         return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
       }
@@ -688,6 +731,14 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
+      if (isQuotaError(err)) {
+        await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
+        await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        await loop.stopHeartbeat();
+        await loop.forgetSerialized().catch(() => undefined);
+        await loop.detachWorktree();
+        return;
+      }
       await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(
         () => undefined
       );
