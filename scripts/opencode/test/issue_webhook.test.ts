@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DEPENDENCY_GRAPH_CAP } from "../src/dependencies.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import {
   assignedIssueJobsToEnqueue,
   blockedIssueJobsToEnqueue,
@@ -291,12 +292,16 @@ describe("blockedIssueJobsToEnqueue", () => {
 
 describe("assignedIssueJobsToEnqueue", () => {
   test("fresh-GETs open issues still assigned to the bot and skips the rest", async () => {
+    const listed: Array<{ state?: string; type?: string; assignedBy?: string } | undefined> = [];
     const jobs = await assignedIssueJobsToEnqueue("kirmanak", "demo", makeRepo(), "closed", policy, {
-      listRepoIssues: async () => [
-        makeLinkedIssue({ number: 4386, title: "stale" }),
-        makeLinkedIssue({ number: 9, title: "other" }),
-        makeLinkedIssue({ number: 50, title: "pr" }),
-      ],
+      listRepoIssues: async (_owner, _repo, opts) => {
+        listed.push(opts);
+        return [
+          makeLinkedIssue({ number: 4386, title: "stale" }),
+          makeLinkedIssue({ number: 9, title: "other" }),
+          makeLinkedIssue({ number: 50, title: "pr" }),
+        ];
+      },
       getIssue: async (_owner, _repo, index) => {
         if (index === 4386) {
           return makeIssue({
@@ -317,11 +322,40 @@ describe("assignedIssueJobsToEnqueue", () => {
         return makeIssue({ number: 50, pull_request: { merged_at: null } });
       },
     });
+    expect(listed).toEqual([{ state: "open", type: "issues", assignedBy: "jumi" }]);
     expect(jobs).toHaveLength(1);
     expect(jobs[0]?.issueNumber).toBe(4386);
     expect(jobs[0]?.title).toBe("fresh");
     expect(jobs[0]?.issueUpdatedAt).toBe("2026-09-15T00:00:00Z");
     expect(jobs[0]?.action).toBe("closed");
+  });
+
+  test("omits assignedBy when pickup is a label and keeps unlabeled-assignee issues", async () => {
+    const listed: Array<{ state?: string; type?: string; assignedBy?: string } | undefined> = [];
+    const jobs = await assignedIssueJobsToEnqueue(
+      "kirmanak",
+      "demo",
+      makeRepo(),
+      "closed",
+      { ...policy, isPickedUp: hasJumiLabel },
+      {
+        listRepoIssues: async (_owner, _repo, opts) => {
+          listed.push(opts);
+          return [makeLinkedIssue({ number: 12, title: "stale" })];
+        },
+        getIssue: async () =>
+          makeIssue({
+            number: 12,
+            title: "Slice",
+            assignee: null,
+            assignees: [],
+            labels: [{ name: "jumi" }],
+            html_url: "https://github.com/kirmanak/demo/issues/12",
+          }),
+      }
+    );
+    expect(listed).toEqual([{ state: "open", type: "issues" }]);
+    expect(jobs.map((job) => job.issueNumber)).toEqual([12]);
   });
 
   test("does not resurrect an issue excluded as the lock PR", async () => {
@@ -394,6 +428,102 @@ describe("pullWaitClearJobsToEnqueue", () => {
             head: { label: "kirmanak:renovate/y", ref: "renovate/y", sha: "abc", repo, repo_id: repo.id },
           }),
         ],
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+      }
+    );
+    expect(jobs).toEqual([]);
+  });
+
+  test("does not wake assigned issues when a merged foreign PR was never assigned to the bot", async () => {
+    const closer = makePR({
+      number: 200,
+      state: "closed",
+      merged: true,
+      title: "chore(deps)",
+      body: "",
+      user: makeUser({ login: "renovate" }),
+      assignee: null,
+      assignees: [],
+      head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "abc", repo, repo_id: repo.id },
+    });
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({ action: "closed", pull_request: closer, repository: repo }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+      }
+    );
+    expect(jobs).toEqual([]);
+  });
+
+  test("unassigned foreign PR wakes assigned issues when the bot was removed", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        assignee: makeUser({ login: "jumi" }),
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "alice" }),
+          assignees: [makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+      }
+    );
+    expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
+  test("does not wake assigned issues when a human is unassigned from a foreign PR", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        assignee: makeUser({ login: "alice" }),
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: null,
+          assignees: [],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
         listRepoIssues: async () => {
           throw new Error("should not list assigned issues");
         },

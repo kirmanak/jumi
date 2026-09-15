@@ -338,9 +338,10 @@ describe("POST /webhooks/github", () => {
         queue: { enqueue: (job) => store.enqueueIssue(job) },
         api: {
           listOpenPulls: async () => [],
-          listRepoIssues: async () => [
-            makeLinkedIssue({ number: 12, html_url: "https://github.com/kirmanak/demo/issues/12" }),
-          ],
+          listRepoIssues: async (_owner, _repo, opts) => {
+            if (opts?.assignedBy) throw new Error("GitHub pickup is the jumi label, not assignee");
+            return [makeLinkedIssue({ number: 12, html_url: "https://github.com/kirmanak/demo/issues/12" })];
+          },
           getIssue: async () =>
             githubIssue({
               number: 12,
@@ -363,8 +364,8 @@ describe("POST /webhooks/github", () => {
             title: "chore(deps)",
             body: "",
             user: makeUser({ login: "renovate[bot]" }),
-            assignee: makeUser({ login: "kirmanak-jumi[bot]" }),
-            assignees: [makeUser({ login: "kirmanak-jumi[bot]" })],
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
             html_url: "https://github.com/kirmanak/demo/pulls/50",
             head: {
               label: "kirmanak:renovate/x",

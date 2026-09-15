@@ -481,6 +481,7 @@ describe("createWorkerFetchHandler", () => {
       await signedRequest(
         makePayload({
           action: "unassigned",
+          assignee: makeUser({ login: "jumi" }),
           pull_request: makePR({
             number: 4373,
             title: "chore(deps)",

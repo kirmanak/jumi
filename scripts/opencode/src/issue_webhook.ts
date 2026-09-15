@@ -219,7 +219,7 @@ export async function assignedIssueJobsToEnqueue(
   const listed = await api.listRepoIssues(owner, repo, {
     state: "open",
     type: "issues",
-    assignedBy: policy.botUsername,
+    ...(policy.isPickedUp ? {} : { assignedBy: policy.botUsername }),
   });
   const jobs: Omit<IssueJob, "delivery" | "receivedAt">[] = [];
   const seen = new Set<number>();
@@ -244,26 +244,15 @@ function jobKey(job: Omit<IssueJob, "delivery" | "receivedAt">): string {
   return `${job.owner}/${job.repo}#${job.issueNumber}`;
 }
 
-function shouldWakeAssignedIssues(
-  pr: {
-    title: string;
-    body?: string | null;
-    draft?: boolean;
-    merged?: boolean;
-    user?: { login?: string };
-    assignee?: { login?: string } | null;
-    assignees?: Array<{ login?: string }> | null;
-    head?: { ref?: string; repo?: { full_name: string } | null };
-  },
-  owner: string,
-  repo: string,
-  botUsername: string,
-  action: string
-): boolean {
+function shouldWakeAssignedIssues(payload: GiteaPRPayload, owner: string, repo: string, botUsername: string): boolean {
+  const pr = payload.pull_request;
+  const action = payload.action;
   if (!isForeignPrIdentity(pr, owner, repo, botUsername)) return false;
-  if (action === "unassigned") return true;
+  if (action === "unassigned") {
+    return isAssignedToBot({ assignee: payload.assignee }, botUsername);
+  }
   if (action !== "closed" && action !== "merged") return false;
-  return isAssignedToBot(pr, botUsername) || pr.merged === true;
+  return isAssignedToBot(pr, botUsername);
 }
 
 export async function pullWaitClearJobsToEnqueue(
@@ -304,7 +293,7 @@ export async function pullWaitClearJobsToEnqueue(
     }
   }
 
-  if (!api.listRepoIssues || !shouldWakeAssignedIssues(pr, owner, repo, policy.botUsername, payload.action)) {
+  if (!api.listRepoIssues || !shouldWakeAssignedIssues(payload, owner, repo, policy.botUsername)) {
     return jobs;
   }
 
