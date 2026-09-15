@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  advertisedNextVersion,
   buildReleaseBody,
   classifyBump,
   computeRelease,
@@ -12,8 +14,10 @@ import {
   nextVersionFrom,
   parseContract,
   parseSemVerTag,
+  publishGitHubRelease,
   publishRelease,
   shouldSkipImageBuild,
+  touchesGitHubWorkflows,
   workflowRebuildsOnTag,
 } from "../src/release.ts";
 
@@ -448,6 +452,49 @@ describe("computeRelease git adapter", () => {
       }
     );
   });
+
+  test("workflow-only HEAD does not advertise a version publish-github will not mint", async () => {
+    await withRepo(
+      async (dir) => {
+        await mkdir(join(dir, "deploy"));
+        await writeFile(join(dir, "deploy/contract.md"), BASE_CONTRACT);
+        git(["add", "deploy/contract.md"], dir);
+        git(["commit", "-m", "baseline"], dir);
+        git(["tag", "-a", "v1.0.0", "-m", "v1.0.0"], dir);
+        await mkdir(join(dir, ".github/workflows"), { recursive: true });
+        await writeFile(join(dir, ".github/workflows/ci.yml"), "name: ci\non: push\n");
+        git(["add", ".github/workflows/ci.yml"], dir);
+        git(["commit", "-m", "workflow only"], dir);
+      },
+      async (dir) => {
+        const plan = computeRelease(dir);
+        expect(plan.version).toBe("v1.0.1");
+        expect(plan.bump).toBe("patch");
+        expect(touchesGitHubWorkflows(dir)).toBe(true);
+        expect(advertisedNextVersion(dir)).toBeNull();
+      }
+    );
+  });
+
+  test("untagged code HEAD still advertises the version that will be minted", async () => {
+    await withRepo(
+      async (dir) => {
+        await mkdir(join(dir, "deploy"));
+        await writeFile(join(dir, "deploy/contract.md"), BASE_CONTRACT);
+        git(["add", "deploy/contract.md"], dir);
+        git(["commit", "-m", "baseline"], dir);
+        git(["tag", "-a", "v1.0.0", "-m", "v1.0.0"], dir);
+        await mkdir(join(dir, "src"), { recursive: true });
+        await writeFile(join(dir, "src/app.ts"), "export {}\n");
+        git(["add", "src/app.ts"], dir);
+        git(["commit", "-m", "code only"], dir);
+      },
+      async (dir) => {
+        expect(touchesGitHubWorkflows(dir)).toBe(false);
+        expect(advertisedNextVersion(dir)).toBe("v1.0.1");
+      }
+    );
+  });
 });
 
 describe("image labels and no double-build", () => {
@@ -477,6 +524,8 @@ describe("image labels and no double-build", () => {
     expect(worker).toContain("${{ env.IMAGE }}:${{ env.VERSION }}");
     expect(reviewer).toContain("bun src/release.ts next-version");
     expect(worker).toContain("bun src/release.ts next-version");
+    expect(reviewer).toContain("if: $" + "{{ env.VERSION != '' }}");
+    expect(worker).toContain("if: $" + "{{ env.VERSION != '' }}");
     expect(worker).toContain("target: worker");
     expect(worker).toContain("ghcr.io/kirmanak/jumi-worker");
     expect(worker).toContain("branches: [main]");
@@ -488,9 +537,14 @@ describe("image labels and no double-build", () => {
     expect(reviewer).not.toContain("type=sha");
     expect(reviewer).not.toContain(":${{ github.sha");
     const release = await readFile(join(repoRoot, ".github/workflows/jumi-release.yml"), "utf8");
-    expect(release).toContain("bun src/release.ts publish");
+    expect(release).toContain("bun src/release.ts publish-github");
+    expect(release).not.toMatch(/bun src\/release\.ts publish\s*$/m);
     expect(release).toContain("github.token");
+    expect(release).toContain("contents: write");
+    expect(release).not.toContain("/api/v1");
+    expect(release).not.toContain("GITEA_TOKEN");
     expect(release).not.toMatch(/^\s*tags:/m);
+    expect(existsSync(join(repoRoot, ".gitea/workflows/jumi-release.yml"))).toBe(false);
   });
 });
 
@@ -554,6 +608,138 @@ describe("publishRelease", () => {
         fetchImpl: forbidden,
       })
     ).rejects.toThrow("Do not add a PAT");
+  });
+});
+
+describe("publishGitHubRelease", () => {
+  const baseOpts = {
+    apiUrl: "https://api.github.com",
+    token: "t",
+    owner: "kirmanak",
+    repo: "jumi",
+    sha: "abc",
+    version: "v1.0.0",
+    body: "## GitOps\nnone\n",
+  };
+
+  test("peels annotated refs and posts target_commitish, generate_release_notes false, make_latest true", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchImpl = async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, url, body });
+      if (url.endsWith("/git/ref/tags/v1.0.0") && method === "GET") {
+        return new Response(JSON.stringify({ object: { sha: "tagobj", type: "tag" } }), { status: 200 });
+      }
+      if (url.endsWith("/git/tags/tagobj") && method === "GET") {
+        return new Response(JSON.stringify({ object: { sha: "abc", type: "commit" } }), { status: 200 });
+      }
+      if (url.endsWith("/releases/tags/v1.0.0") && method === "GET") {
+        return new Response("Not Found", { status: 404 });
+      }
+      if (url.endsWith("/releases") && method === "POST") {
+        return new Response("{}", { status: 201 });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const result = await publishGitHubRelease({ ...baseOpts, fetchImpl });
+    expect(result).toEqual({ tagCreated: false, releaseCreated: true });
+    const created = calls.find((call) => call.method === "POST" && call.url.endsWith("/releases"));
+    expect(created?.body).toMatchObject({
+      tag_name: "v1.0.0",
+      target_commitish: "abc",
+      generate_release_notes: false,
+      make_latest: "true",
+    });
+  });
+
+  test("creates tag object then ref when the tag is missing", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchImpl = async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, url, body });
+      if (url.endsWith("/git/ref/tags/v1.0.0") && method === "GET") {
+        return new Response("Not Found", { status: 404 });
+      }
+      if (url.endsWith("/git/tags") && method === "POST") {
+        return new Response(JSON.stringify({ sha: "tagobj" }), { status: 201 });
+      }
+      if (url.endsWith("/git/refs") && method === "POST") {
+        return new Response("{}", { status: 201 });
+      }
+      if (url.endsWith("/releases/tags/v1.0.0") && method === "GET") {
+        return new Response("Not Found", { status: 404 });
+      }
+      if (url.endsWith("/releases") && method === "POST") {
+        return new Response("{}", { status: 201 });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const result = await publishGitHubRelease({ ...baseOpts, fetchImpl });
+    expect(result).toEqual({ tagCreated: true, releaseCreated: true });
+    const tagObj = calls.find((call) => call.method === "POST" && call.url.endsWith("/git/tags"));
+    const ref = calls.find((call) => call.method === "POST" && call.url.endsWith("/git/refs"));
+    expect(tagObj?.body).toMatchObject({ tag: "v1.0.0", object: "abc", type: "commit" });
+    expect(ref?.body).toMatchObject({ ref: "refs/tags/v1.0.0", sha: "tagobj" });
+    const tagIdx = calls.findIndex((call) => call.method === "POST" && call.url.endsWith("/git/tags"));
+    const refIdx = calls.findIndex((call) => call.method === "POST" && call.url.endsWith("/git/refs"));
+    expect(tagIdx).toBeGreaterThanOrEqual(0);
+    expect(refIdx).toBeGreaterThan(tagIdx);
+  });
+
+  test("refuses to move an immutable tag", async () => {
+    const fetchImpl = async (input: string) => {
+      const url = String(input);
+      if (url.endsWith("/git/ref/tags/v1.0.0")) {
+        return new Response(JSON.stringify({ object: { sha: "tagobj", type: "tag" } }), { status: 200 });
+      }
+      if (url.endsWith("/git/tags/tagobj")) {
+        return new Response(JSON.stringify({ object: { sha: "old", type: "commit" } }), { status: 200 });
+      }
+      return new Response("no", { status: 500 });
+    };
+    await expect(publishGitHubRelease({ ...baseOpts, sha: "new", fetchImpl })).rejects.toThrow("immutable tag");
+  });
+
+  test("403 wording says do not add a PAT", async () => {
+    const fetchImpl = async () => new Response("nope", { status: 403 });
+    await expect(publishGitHubRelease({ ...baseOpts, fetchImpl })).rejects.toThrow("Do not add a PAT");
+  });
+
+  test("backfill sets make_latest false and skips POST /releases 404", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchImpl = async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, url, body });
+      if (url.endsWith("/git/ref/tags/v1.0.0") && method === "GET") {
+        return new Response(JSON.stringify({ object: { sha: "abc", type: "commit" } }), { status: 200 });
+      }
+      if (url.endsWith("/releases/tags/v1.0.0") && method === "GET") {
+        return new Response("Not Found", { status: 404 });
+      }
+      if (url.endsWith("/releases") && method === "POST") {
+        return new Response("Not Found", { status: 404 });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const result = await publishGitHubRelease({
+      ...baseOpts,
+      makeLatest: false,
+      skipMissingRelease: true,
+      fetchImpl,
+    });
+    expect(result).toEqual({ tagCreated: false, releaseCreated: false });
+    const created = calls.find((call) => call.method === "POST" && call.url.endsWith("/releases"));
+    expect(created?.body).toMatchObject({
+      target_commitish: "abc",
+      generate_release_notes: false,
+      make_latest: "false",
+    });
   });
 });
 

@@ -44,10 +44,13 @@ jobs:
         working-directory: scripts/opencode
 
       - name: Compute version
-        run: echo "VERSION=$(bun src/release.ts next-version)" >> $GITHUB_ENV
+        run: |
+          VERSION="$(bun src/release.ts next-version)"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
         working-directory: scripts/opencode
 
       - name: Log in to GHCR
+        if: ${{ env.VERSION != '' }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -55,9 +58,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
+        if: ${{ env.VERSION != '' }}
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build and export to Docker
+        if: ${{ env.VERSION != '' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -81,6 +86,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Verify worker image
+        if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
           TEST_TAG="jumi-worker:test"
@@ -152,6 +158,7 @@ jobs:
           echo "Verified OCI labels"
 
       - name: Build and push worker image
+        if: ${{ env.VERSION != '' }}
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -178,6 +185,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Record registry manifest digest
+        if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
           echo "Pushed ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
@@ -185,6 +193,7 @@ jobs:
           # Source of truth for the GitOps pin is the registry manifest Docker-Content-Digest after push.
 
       - name: Verify anonymous pull
+        if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
           docker rmi "${IMAGE}:${VERSION}" "${IMAGE}:latest" || true

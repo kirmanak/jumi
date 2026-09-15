@@ -618,6 +618,14 @@ export function touchesGitHubWorkflows(repoDir: string, sha = "HEAD"): boolean {
   );
 }
 
+export function advertisedNextVersion(repoDir: string, sha = "HEAD"): string | null {
+  const plan = computeRelease(repoDir);
+  if (plan.bump !== "reuse" && touchesGitHubWorkflows(repoDir, sha)) {
+    return null;
+  }
+  return plan.version;
+}
+
 export function peeledCommitForTag(repoDir: string, tag: string): string | null {
   const out = gitAllowFail(["rev-parse", `${tag}^{commit}`], repoDir);
   const sha = out?.trim() ?? "";
@@ -655,6 +663,8 @@ export async function publishGitHubRelease(opts: {
   sha: string;
   version: string;
   body: string;
+  makeLatest?: boolean;
+  skipMissingRelease?: boolean;
   fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
 }): Promise<{ tagCreated: boolean; releaseCreated: boolean }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -756,12 +766,17 @@ export async function publishGitHubRelease(opts: {
   }
   const createdRelease = await request("POST", "/releases", {
     tag_name: opts.version,
+    target_commitish: opts.sha,
     name: opts.version,
     body: opts.body,
     draft: false,
     prerelease: false,
     generate_release_notes: false,
+    make_latest: opts.makeLatest === false ? "false" : "true",
   });
+  if (createdRelease.status === 404 && opts.skipMissingRelease) {
+    return { tagCreated, releaseCreated: false };
+  }
   if (createdRelease.status !== 200 && createdRelease.status !== 201) {
     throw new Error(`GitHub API POST /releases → ${createdRelease.status}: ${createdRelease.text}`);
   }
@@ -773,7 +788,8 @@ async function main(args: string[]): Promise<void> {
   const root = repoRoot();
   const plan = computeRelease(root);
   if (command === "next-version") {
-    process.stdout.write(`${plan.version}\n`);
+    const version = advertisedNextVersion(root);
+    process.stdout.write(`${version ?? ""}\n`);
     return;
   }
   if (command === "release-body") {
@@ -846,6 +862,8 @@ async function main(args: string[]): Promise<void> {
             sha: tagCommit,
             version: previousLatest,
             body: releaseBodyForTag(root, previousLatest),
+            makeLatest: false,
+            skipMissingRelease: true,
           });
           console.log(
             `Backfilled ${previousLatest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`
@@ -869,6 +887,8 @@ async function main(args: string[]): Promise<void> {
             sha: tagCommit,
             version: latest,
             body: releaseBodyForTag(root, latest),
+            makeLatest: false,
+            skipMissingRelease: true,
           });
           console.log(
             `Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`
@@ -900,6 +920,8 @@ async function main(args: string[]): Promise<void> {
           sha: tagCommit,
           version: latest,
           body: releaseBodyForTag(root, latest),
+          makeLatest: false,
+          skipMissingRelease: true,
         });
         console.log(`Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`);
       }
