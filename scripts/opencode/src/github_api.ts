@@ -4,6 +4,7 @@ import type {
   Check,
   CheckPayload,
   CheckState,
+  CollaboratorPermission,
   Comment,
   CreatePullReviewComment,
   CreatePullReviewOptions,
@@ -635,11 +636,7 @@ export class GithubAPI {
     return toRepo(await this.get<GithubRepo>(`/repos/${this.repoPath(owner, repo)}`));
   }
 
-  async getCollaboratorPermission(
-    owner: string,
-    repo: string,
-    username: string
-  ): Promise<{ permission: string; role_name?: string }> {
+  async getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission> {
     const info = await this.get<{ permission: string; role_name?: string }>(
       `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
     );

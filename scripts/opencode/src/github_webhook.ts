@@ -27,7 +27,7 @@ import {
   verifyGiteaSignature,
   type WebhookPolicy,
 } from "./webhook.ts";
-import type { HandleWorkerWebhookDeps, WorkerWebhookPolicy } from "./worker_webhook.ts";
+import { type HandleWorkerWebhookDeps, handleWorkerWebhookEvent, type WorkerWebhookPolicy } from "./worker_webhook.ts";
 
 export const JUMI_LABEL = "jumi";
 export const GITHUB_ORIGIN = "https://github.com";
@@ -349,6 +349,12 @@ export async function handleGithubWebhookEvent(
         return json(400, { error: "invalid webhook payload" });
       }
     }
+    if (deps.worker && (action === "closed" || action === "merged" || action === "unassigned")) {
+      return handleWorkerWebhookEvent(rawBody, event, event, delivery, policy, {
+        ...deps.worker,
+        logger: deps.worker.logger ?? logger,
+      });
+    }
     return skipped(action ? `unsupported action ${action}` : `unsupported event ${event ?? "pull_request"}`, logger);
   }
 
@@ -480,10 +486,12 @@ export async function handleGithubWebhookEvent(
         });
         for (const partial of woken) addJob(partial);
       } catch (err) {
-        if (jobs.length === 0) {
-          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
-          return skipped("failed to list blocked issues", logger);
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
         }
+        logger(`failed to wake waiting issues: ${err instanceof Error ? err.message : String(err)}`);
+        return json(503, { error: "failed to wake waiting issues" });
       }
     }
 

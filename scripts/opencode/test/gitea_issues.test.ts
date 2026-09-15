@@ -6,6 +6,7 @@ import {
   findOpenJumiClosingPullRequest,
   isAssignedForeignPR,
   isEligibleWorkerPR,
+  isForeignPrIdentity,
   pullRequestClosesIssue,
   resolveWorkerPullRequest,
 } from "../src/gitea_issues.ts";
@@ -197,6 +198,20 @@ describe("isEligibleWorkerPR", () => {
 });
 
 describe("isAssignedForeignPR", () => {
+  test("foreign identity ignores open state so a merged assigned PR still counts as the lock", () => {
+    const repo = makeRepo();
+    const foreign = makePR({
+      state: "closed",
+      merged: true,
+      user: makeUser({ login: "renovate" }),
+      assignee: makeUser({ login: "jumi" }),
+      assignees: [makeUser({ login: "jumi" })],
+      head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "abc", repo, repo_id: repo.id },
+    });
+    expect(isAssignedForeignPR(foreign, "kirmanak", "demo", "jumi")).toBe(false);
+    expect(isForeignPrIdentity(foreign, "kirmanak", "demo", "jumi")).toBe(true);
+  });
+
   test("matches an assigned non-jumi PR and ignores jumi closers", () => {
     const repo = makeRepo();
     const foreign = makePR({

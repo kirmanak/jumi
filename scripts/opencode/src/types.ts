@@ -132,6 +132,7 @@ export interface GiteaPRPayload {
   repository: GiteaRepo;
   sender: GiteaUser;
   review?: GiteaPRReviewRef;
+  assignee?: GiteaUser | null;
 }
 
 export interface GiteaIssueCommentPayload {

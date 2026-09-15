@@ -7,11 +7,17 @@ export const MAX_LINKED_ISSUE_BODY_BYTES = 8_192;
 const OMITTED_BODY = "[omitted; thread budget]";
 const encoder = new TextEncoder();
 
+export type ReviewCommentIntent = "product" | "discussion";
+
 export interface ReviewComment {
   id: number;
   author: string;
   created_at: string;
   body: string;
+  /** Raw forge permission, lowercased (`admin`/`write`/`maintain`/`read`/`triage`/`none`). */
+  permission?: string;
+  /** Product-intent labeling: writers are `product`, everyone else is `discussion`. */
+  intent?: ReviewCommentIntent;
 }
 
 export interface ReviewLinkedIssue {
@@ -45,21 +51,54 @@ export function escapeXml(str: string): string {
     .replace(/'/g, "&apos;");
 }
 
-export function mapReviewComment(comment: Comment): ReviewComment {
-  return {
+export function intentForWriteAccess(hasWrite: boolean): ReviewCommentIntent {
+  return hasWrite ? "product" : "discussion";
+}
+
+function lookupWriteAccess(permissions: ReadonlyMap<string, boolean> | undefined, author: string): boolean | undefined {
+  if (!permissions) return undefined;
+  const key = author.trim().toLowerCase();
+  if (!key) return false;
+  return permissions.get(key) === true;
+}
+
+function lookupPermissionDetail(
+  permissionDetail: ReadonlyMap<string, string> | undefined,
+  author: string,
+  hasWrite: boolean
+): string {
+  const key = author.trim().toLowerCase();
+  const detail = key ? permissionDetail?.get(key) : undefined;
+  if (typeof detail === "string" && detail.trim()) return detail.trim().toLowerCase();
+  return hasWrite ? "write" : "none";
+}
+
+export function mapReviewComment(
+  comment: Comment,
+  permissions?: ReadonlyMap<string, boolean>,
+  permissionDetail?: ReadonlyMap<string, string>
+): ReviewComment {
+  const author = comment.user?.login ?? "";
+  const base: ReviewComment = {
     id: comment.id,
-    author: comment.user?.login ?? "",
+    author,
     created_at: comment.created_at,
     body: comment.body ?? "",
   };
+  const hasWrite = lookupWriteAccess(permissions, author);
+  if (hasWrite === undefined) return base;
+  const permission = lookupPermissionDetail(permissionDetail, author, hasWrite);
+  return { ...base, permission, intent: intentForWriteAccess(hasWrite) };
 }
 
 export function mapReviewThread(opts: {
   prComments: Comment[];
   linkedIssues: Array<{ issue: Task; comments: Comment[] }>;
+  permissions?: ReadonlyMap<string, boolean>;
+  permissionDetail?: ReadonlyMap<string, string>;
 }): ReviewThread {
   return {
-    comments: opts.prComments.map(mapReviewComment),
+    comments: opts.prComments.map((comment) => mapReviewComment(comment, opts.permissions, opts.permissionDetail)),
     linkedIssues: opts.linkedIssues.map(({ issue, comments }) => ({
       number: issue.number,
       state: issue.state,
@@ -67,13 +106,17 @@ export function mapReviewThread(opts: {
       html_url: issue.html_url,
       title: issue.title,
       body: issue.body ?? "",
-      comments: comments.map(mapReviewComment),
+      comments: comments.map((comment) => mapReviewComment(comment, opts.permissions, opts.permissionDetail)),
     })),
   };
 }
 
 function formatCommentXml(comment: ReviewComment, indent: string): string {
-  return `${indent}<comment id="${comment.id}" author="${escapeXml(comment.author)}" created_at="${escapeXml(comment.created_at)}">${escapeXml(comment.body)}</comment>`;
+  const extra =
+    comment.intent !== undefined || comment.permission !== undefined
+      ? `${comment.permission !== undefined ? ` permission="${escapeXml(comment.permission)}"` : ""}${comment.intent !== undefined ? ` intent="${escapeXml(comment.intent)}"` : ""}`
+      : "";
+  return `${indent}<comment id="${comment.id}" author="${escapeXml(comment.author)}" created_at="${escapeXml(comment.created_at)}"${extra}>${escapeXml(comment.body)}</comment>`;
 }
 
 function formatCommentsXml(comments: ReviewComment[], indent: string): string {

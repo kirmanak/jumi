@@ -10,14 +10,16 @@ import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   blockedIssueJobsToEnqueue,
   isDependencyWakeAction,
+  isPullWaitClearAction,
   parseIssuesPayload,
+  pullWaitClearJobsToEnqueue,
   shouldEnqueueIssue,
 } from "./issue_webhook.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import type { IssueJob } from "./types.ts";
-import { parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
+import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
 export type WorkerWebhookPolicy = WebhookPolicy & {
   botUsername: string;
@@ -29,7 +31,7 @@ export interface WorkerWebhookQueue {
 }
 
 export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "getPR" | "getCollaboratorPermission">> & {
+  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission">> & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -109,8 +111,52 @@ function skipped(reason: string, logger: (message: string) => void): Response {
   return json(202, { skipped: reason });
 }
 
+function wakeFailedResponse(err: unknown, logger: (message: string) => void): Response {
+  if (isQueueUnavailable(err)) {
+    logger(`queue unavailable: ${err.message}`);
+    return json(503, { error: "queue unavailable" });
+  }
+  logger(`failed to wake waiting issues: ${err instanceof Error ? err.message : String(err)}`);
+  return json(503, { error: "failed to wake waiting issues" });
+}
+
 function cancelKey(owner: string, repo: string, issueNumber: number): string {
   return `${owner}/${repo}#${issueNumber}`;
+}
+
+async function enqueueJobList(
+  jobs: IssueJob[],
+  queue: WorkerWebhookQueue,
+  delivery: string,
+  logger: (message: string) => void
+): Promise<Response> {
+  if (jobs.length === 1) {
+    const job = jobs[0];
+    if (!job) return skipped("no waiting issues to wake", logger);
+    const result: EnqueueResult = await queue.enqueue(job);
+    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    return json(202, result);
+  }
+  const keys: string[] = [];
+  for (const job of jobs) {
+    const result: EnqueueResult = await queue.enqueue(job);
+    keys.push(result.key);
+    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+  }
+  return json(202, { queued: true, keys });
+}
+
+async function wakeJobsFromPull(
+  payload: ReturnType<typeof parsePullRequestPayload>,
+  delivery: string,
+  policy: WorkerWebhookPolicy,
+  deps: HandleWorkerWebhookDeps,
+  logger?: (message: string) => void
+): Promise<IssueJob[]> {
+  if (!deps.api) return [];
+  const partials = await pullWaitClearJobsToEnqueue(payload, policy, deps.api, logger);
+  const receivedAt = new Date().toISOString();
+  return partials.map((partial) => ({ ...partial, delivery, receivedAt }));
 }
 
 export async function cancelLedgerWorkerJobs(opts: {
@@ -148,20 +194,39 @@ export async function handleWorkerWebhookEvent(
   // Handle only assigned/unassigned. Any other pull_request action skips 202, never 400.
   if (isPullAssignWebhookEvent(event, eventType)) {
     const action = peekWebhookAction(rawBody);
-    if (action !== "assigned" && action !== "unassigned") {
+    if (action !== "assigned" && action !== "unassigned" && !isPullWaitClearAction(action)) {
       return skipped(
         action ? `unsupported action ${action}` : `unsupported event ${event ?? eventType ?? "pull_request"}`,
         logger
       );
     }
     try {
-      const decision = await shouldEnqueuePullAssign(parsePullRequestPayload(rawBody), policy, deps.api, logger);
+      const payload = parsePullRequestPayload(rawBody);
+      if (action === "closed" || action === "merged") {
+        assertRepositoryPolicy(payload.repository, policy);
+        try {
+          const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
+          if (jobs.length === 0) {
+            return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
+          }
+          return enqueueJobList(jobs, deps.queue, delivery, logger);
+        } catch (err) {
+          return wakeFailedResponse(err, logger);
+        }
+      }
+      const decision = await shouldEnqueuePullAssign(payload, policy, deps.api, logger);
       if (decision.type === "skip") return skipped(decision.reason, logger);
       if (decision.type === "cancel") {
         const result = deps.cancel
           ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)
           : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
         logger(`cancelled ${result.key}`);
+        try {
+          const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
+          if (jobs.length > 0) return enqueueJobList(jobs, deps.queue, delivery, logger);
+        } catch (err) {
+          return wakeFailedResponse(err, logger);
+        }
         return json(202, result);
       }
       const job: IssueJob = {
@@ -308,10 +373,7 @@ export async function handleWorkerWebhookEvent(
         });
         for (const partial of woken) addJob(partial);
       } catch (err) {
-        if (jobs.length === 0) {
-          logger(`failed to list blocked issues: ${err instanceof Error ? err.message : String(err)}`);
-          return skipped("failed to list blocked issues", logger);
-        }
+        return wakeFailedResponse(err, logger);
       }
     }
 
