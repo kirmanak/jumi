@@ -165,6 +165,7 @@ describe("handleIssueCancel", () => {
         new Map()
       );
       expect(store.rows[0]?.state).toBe("cancelled");
+      expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
       expect(isPidAlive(child.pid)).toBe(true);
       expect(api.comments.at(-1)).toContain("stopped");
       child.kill();
@@ -179,6 +180,7 @@ describe("handleIssueCancel", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+      await store.enqueueIssue(makeIssueJob());
       await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 19,
         round: 3,
@@ -188,7 +190,15 @@ describe("handleIssueCancel", () => {
       });
       await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+      expect(await store.skipLatches.get({ owner: "kirmanak", repo: "demo", issueNumber: 12 })).toEqual({
+        followup: {},
+        conflict: {},
+        ci: {},
+        stuck: {},
+      });
       expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 2, skipReason: null });
     } finally {
       await rm(home, { recursive: true, force: true });
     }

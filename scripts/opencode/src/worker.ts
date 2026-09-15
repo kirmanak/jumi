@@ -21,6 +21,7 @@ import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
+import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { isSkipLatchReason } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -49,7 +50,8 @@ function log(message: string) {
 export function createIssueQueue(
   config: WorkerConfig,
   api: IssueApi = createForge(config),
-  logger: (message: string) => void = log
+  logger: (message: string) => void = log,
+  skipLatches?: SkipLatchStore
 ): ReviewQueue<IssueJob> {
   const aborts = new Map<string, AbortController>();
 
@@ -72,6 +74,7 @@ export function createIssueQueue(
           fallbackModel: config.fallbackModel,
           fallbackVariant: config.fallbackVariant,
           home: config.home,
+          skipLatches,
           workdir: config.workdir,
           maxOutputBytes: config.maxOutputBytes,
           sanitizeOpenCodeEnv: true,
@@ -160,7 +163,8 @@ export async function handleIssueCancel(
   queue?: ReviewQueue<IssueJob>,
   store?: ReviewJobStore,
   aborts?: Map<string, AbortController>,
-  pids?: Map<string, number>
+  pids?: Map<string, number>,
+  skipLatches?: SkipLatchStore
 ): Promise<{ key: string; cancelled: true }> {
   const key = issueJobKey({ owner, repo, issueNumber });
   if (queue) {
@@ -168,7 +172,11 @@ export async function handleIssueCancel(
     abortIssueJob(queue, key);
   }
   abortLocalJob(aborts, pids, key);
+  const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
+  if (!store || latches !== store.skipLatches) {
+    await latches.delete({ owner, repo, issueNumber });
+  }
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
   const claim = await readClaim(claimPath);
@@ -360,6 +368,7 @@ export async function processWorkerTick(
       },
       extendLease: () => store.heartbeat(row.id, leasedBy, config.leaseMs),
       home: config.home,
+      skipLatches: store.skipLatches,
       workdir: config.workdir,
       maxOutputBytes: config.maxOutputBytes,
       sanitizeOpenCodeEnv: true,

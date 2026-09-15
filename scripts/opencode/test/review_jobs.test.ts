@@ -11,6 +11,7 @@ import {
   REVIEW_JOBS_SCHEMA_SQL,
   WORKER_JOB_KINDS,
 } from "../src/review_jobs.ts";
+import { ISSUE_SKIP_LATCHES_SCHEMA_SQL } from "../src/skip_latches.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
 
 describe("MemoryReviewJobStore", () => {
@@ -348,8 +349,18 @@ describe("MemoryReviewJobStore", () => {
       generation: 0,
       skipReason: "stuck: cannot resolve conflicts",
     });
+    await store.skipLatches.put(
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      { followup: { round: 3 }, stuck: { fingerprints: [{ kind: "action", hash: "aaa" }] } }
+    );
     expect(await store.clearIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
     expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+    expect(await store.skipLatches.get({ owner: "kirmanak", repo: "demo", issueNumber: 12 })).toEqual({
+      followup: {},
+      conflict: {},
+      ci: {},
+      stuck: {},
+    });
     await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: repeated error");
     expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({
       generation: 1,
@@ -619,7 +630,8 @@ describe("PgReviewJobStore.migrate", () => {
     expect(indexAt).toBeGreaterThan(requeueAt);
     expect(REVIEW_JOBS_SCHEMA_SQL).toContain("WHERE rn > 1");
     expect(REVIEW_JOBS_SCHEMA_SQL).toContain("state = 'queued'");
-    expect(REVIEW_JOBS_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS issue_skip_latches");
+    expect(ISSUE_SKIP_LATCHES_SCHEMA_SQL).toContain("generation INTEGER NOT NULL DEFAULT 0");
+    expect(ISSUE_SKIP_LATCHES_SCHEMA_SQL).toContain("skip_reason TEXT");
   });
 });
 
@@ -832,6 +844,11 @@ describe("PgReviewJobStore kind ANY() bind", () => {
     const clearLatch = captured.find((row) => row.query.includes("issue_skip_latches") && row.query.includes("INSERT"));
     expect(clearLatch?.query).toContain("generation = issue_skip_latches.generation + 1");
     expect(clearLatch?.query).toContain("skip_reason = NULL");
+    expect(clearLatch?.query).toContain("followup = '{}'::jsonb");
+    expect(clearLatch?.query).toContain("conflict = '{}'::jsonb");
+    expect(clearLatch?.query).toContain("ci = '{}'::jsonb");
+    expect(clearLatch?.query).toContain("stuck = '{}'::jsonb");
     expect(clearLatch?.params).toEqual(["kirmanak", "demo", 12]);
+    expect(captured.some((row) => row.query.includes("DELETE FROM issue_skip_latches"))).toBe(false);
   });
 });

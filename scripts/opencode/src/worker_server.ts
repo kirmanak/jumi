@@ -156,7 +156,10 @@ async function main() {
   const store: ReviewJobStore | undefined = config.databaseUrl
     ? await createPgReviewJobStore(config.databaseUrl)
     : undefined;
-  const ramQueue: ReviewQueue<IssueJob> | undefined = store ? undefined : createIssueQueue(config, api);
+  const skipLatches = store?.skipLatches;
+  const ramQueue: ReviewQueue<IssueJob> | undefined = store
+    ? undefined
+    : createIssueQueue(config, api, log, skipLatches);
   const aborts = new Map<string, AbortController>();
   const pids = new Map<string, number>();
   const queue: WorkerQueueLike = store ? { enqueue: (job) => store.enqueueIssue(job) } : ramQueue!;
@@ -167,7 +170,7 @@ async function main() {
       queue,
       api,
       cancel: (owner, repo, issueNumber) =>
-        handleIssueCancel(config, api, owner, repo, issueNumber, ramQueue, store, aborts, pids),
+        handleIssueCancel(config, api, owner, repo, issueNumber, ramQueue, store, aborts, pids, skipLatches),
     }),
   });
 
