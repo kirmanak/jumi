@@ -5,6 +5,28 @@ import { renderTokenMetrics } from "./token_metrics.ts";
 export const WEBHOOK_RESULTS = ["accepted", "skipped", "hmac", "too large", "unavailable", "ping"] as const;
 export type WebhookResult = (typeof WEBHOOK_RESULTS)[number];
 
+export const WEBHOOK_EVENTS = [
+  "check_run",
+  "issue_assign",
+  "issue_comment",
+  "issues",
+  "ping",
+  "pull_request",
+  "pull_request_assign",
+  "pull_request_comment",
+  "pull_request_rejected",
+  "pull_request_review",
+  "pull_request_review_comment",
+  "pull_request_review_rejected",
+  "push",
+  "status",
+  "workflow_job",
+  "workflow_run",
+] as const;
+export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
+
+const WEBHOOK_EVENT_SET = new Set<string>(WEBHOOK_EVENTS);
+
 export const JOB_RESULTS = ["succeeded", "skipped", "failed"] as const;
 export type JobResult = (typeof JOB_RESULTS)[number];
 
@@ -63,14 +85,18 @@ export function classifyOpenCodeExit(result: {
   return "incomplete";
 }
 
-export function recordWebhook(event: string, result: WebhookResult): void {
-  add(webhookCounts, webhookKey(event || "unknown", result));
+export function webhookEventLabel(event: string | null | undefined): string {
+  return event && WEBHOOK_EVENT_SET.has(event) ? event : "unknown";
+}
+
+export function recordWebhook(event: string | null | undefined, result: WebhookResult): void {
+  add(webhookCounts, webhookKey(webhookEventLabel(event), result));
 }
 
 export async function meterWebhook(event: string | null, response: Response | Promise<Response>): Promise<Response> {
   const resolved = await response;
   const result = await webhookResultFromResponse(resolved);
-  if (result) recordWebhook(event || "unknown", result);
+  if (result) recordWebhook(event, result);
   return resolved;
 }
 

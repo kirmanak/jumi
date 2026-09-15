@@ -55,6 +55,19 @@ describe("webhook metrics", () => {
     expect(text).not.toContain("invalid webhook payload");
     expect(text).not.toContain('result="hmac"} 2');
   });
+
+  test("maps unknown forge event names to unknown", async () => {
+    await meterWebhook("evil-event", jsonResponse(401, { error: "invalid signature" }));
+    await meterWebhook(`${"x".repeat(80)}\nlabel="owned"`, jsonResponse(413, { error: "webhook payload too large" }));
+    await meterWebhook("status", jsonResponse(202, { skipped: "unsupported event status" }));
+
+    const text = renderWebhookMetrics();
+    expect(text).toContain('jumi_webhooks_total{event="unknown",result="hmac"} 1');
+    expect(text).toContain('jumi_webhooks_total{event="unknown",result="too large"} 1');
+    expect(text).toContain('jumi_webhooks_total{event="status",result="skipped"} 1');
+    expect(text).not.toContain("evil-event");
+    expect(text).not.toContain("owned");
+  });
 });
 
 describe("run metrics", () => {
