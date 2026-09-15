@@ -538,7 +538,7 @@ function engineId(): string {
 
 function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
   const extra = api as ReviewApi &
-    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks">> & {
+    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues">> & {
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
     };
   return {
@@ -550,6 +550,7 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)
       : undefined,
+    listRepoIssues: extra.listRepoIssues ? (owner, repo, opts) => extra.listRepoIssues!(owner, repo, opts) : undefined,
     rememberInstallation: extra.rememberInstallation?.bind(extra),
   };
 }

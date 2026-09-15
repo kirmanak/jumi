@@ -1,7 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import { DEPENDENCY_GRAPH_CAP } from "../src/dependencies.ts";
-import { blockedIssueJobsToEnqueue, parseIssuesPayload, shouldEnqueueIssue } from "../src/issue_webhook.ts";
-import { encodeJson, makeIssue, makeIssuePayload, makeLinkedIssue, makeRepo, makeUser } from "./fixtures.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
+import {
+  assignedIssueJobsToEnqueue,
+  blockedIssueJobsToEnqueue,
+  parseIssuesPayload,
+  pullWaitClearJobsToEnqueue,
+  shouldEnqueueIssue,
+} from "../src/issue_webhook.ts";
+import {
+  encodeJson,
+  makeIssue,
+  makeIssuePayload,
+  makeLinkedIssue,
+  makePayload,
+  makePR,
+  makeRepo,
+  makeUser,
+} from "./fixtures.ts";
 
 const policy = {
   giteaUrl: "https://gitea.kirmanak.stream",
@@ -271,5 +287,407 @@ describe("blockedIssueJobsToEnqueue", () => {
     );
     expect(calls).toBe(DEPENDENCY_GRAPH_CAP);
     expect(jobs).toHaveLength(DEPENDENCY_GRAPH_CAP);
+  });
+});
+
+describe("assignedIssueJobsToEnqueue", () => {
+  test("fresh-GETs open issues still assigned to the bot and skips the rest", async () => {
+    const listed: Array<{ state?: string; type?: string; assignedBy?: string } | undefined> = [];
+    const jobs = await assignedIssueJobsToEnqueue("kirmanak", "demo", makeRepo(), "closed", policy, {
+      listRepoIssues: async (_owner, _repo, opts) => {
+        listed.push(opts);
+        return [
+          makeLinkedIssue({ number: 4386, title: "stale" }),
+          makeLinkedIssue({ number: 9, title: "other" }),
+          makeLinkedIssue({ number: 50, title: "pr" }),
+        ];
+      },
+      getIssue: async (_owner, _repo, index) => {
+        if (index === 4386) {
+          return makeIssue({
+            number: 4386,
+            title: "fresh",
+            body: "do it",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+            updated_at: "2026-09-15T00:00:00Z",
+          });
+        }
+        if (index === 9) {
+          return makeIssue({
+            number: 9,
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+          });
+        }
+        return makeIssue({ number: 50, pull_request: { merged_at: null } });
+      },
+    });
+    expect(listed).toEqual([{ state: "open", type: "issues", assignedBy: "jumi" }]);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.issueNumber).toBe(4386);
+    expect(jobs[0]?.title).toBe("fresh");
+    expect(jobs[0]?.issueUpdatedAt).toBe("2026-09-15T00:00:00Z");
+    expect(jobs[0]?.action).toBe("closed");
+  });
+
+  test("omits assignedBy when pickup is a label and keeps unlabeled-assignee issues", async () => {
+    const listed: Array<{ state?: string; type?: string; assignedBy?: string } | undefined> = [];
+    const jobs = await assignedIssueJobsToEnqueue(
+      "kirmanak",
+      "demo",
+      makeRepo(),
+      "closed",
+      { ...policy, isPickedUp: hasJumiLabel },
+      {
+        listRepoIssues: async (_owner, _repo, opts) => {
+          listed.push(opts);
+          return [makeLinkedIssue({ number: 12, title: "stale" })];
+        },
+        getIssue: async () =>
+          makeIssue({
+            number: 12,
+            title: "Slice",
+            assignee: null,
+            assignees: [],
+            labels: [{ name: "jumi" }],
+            html_url: "https://github.com/kirmanak/demo/issues/12",
+          }),
+      }
+    );
+    expect(listed).toEqual([{ state: "open", type: "issues" }]);
+    expect(jobs.map((job) => job.issueNumber)).toEqual([12]);
+  });
+
+  test("does not resurrect an issue excluded as the lock PR", async () => {
+    const jobs = await assignedIssueJobsToEnqueue(
+      "kirmanak",
+      "demo",
+      makeRepo(),
+      "closed",
+      policy,
+      {
+        listRepoIssues: async () => [makeLinkedIssue({ number: 50 })],
+        getIssue: async () => makeIssue({ number: 50 }),
+      },
+      new Set([50])
+    );
+    expect(jobs).toEqual([]);
+  });
+});
+
+describe("pullWaitClearJobsToEnqueue", () => {
+  const repo = makeRepo();
+  const foreign = makePR({
+    number: 4373,
+    state: "closed",
+    merged: true,
+    title: "chore(deps)",
+    body: "",
+    user: makeUser({ login: "renovate" }),
+    assignee: makeUser({ login: "jumi" }),
+    assignees: [makeUser({ login: "jumi" })],
+    html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+    head: {
+      label: "kirmanak:renovate/all-digest",
+      ref: "renovate/all-digest",
+      sha: "headsha",
+      repo,
+      repo_id: repo.id,
+    },
+  });
+
+  test("closed assigned foreign PR enqueues other assigned issues when no lock remains", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({ action: "closed", pull_request: foreign, repository: repo }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386, title: "stale" })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            title: "Slice",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+      }
+    );
+    expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
+  test("does not wake assigned issues while another assigned foreign PR remains", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({ action: "closed", pull_request: foreign, repository: repo }),
+      policy,
+      {
+        listOpenPulls: async () => [
+          makePR({
+            number: 80,
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            head: { label: "kirmanak:renovate/y", ref: "renovate/y", sha: "abc", repo, repo_id: repo.id },
+          }),
+        ],
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+      }
+    );
+    expect(jobs).toEqual([]);
+  });
+
+  test("does not wake assigned issues when a merged foreign PR was never assigned to the bot", async () => {
+    const closer = makePR({
+      number: 200,
+      state: "closed",
+      merged: true,
+      title: "chore(deps)",
+      body: "",
+      user: makeUser({ login: "renovate" }),
+      assignee: null,
+      assignees: [],
+      head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "abc", repo, repo_id: repo.id },
+    });
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({ action: "closed", pull_request: closer, repository: repo }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+      }
+    );
+    expect(jobs).toEqual([]);
+  });
+
+  test("unassigned foreign PR wakes assigned issues when the bot was removed", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        assignee: makeUser({ login: "jumi" }),
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "alice" }),
+          assignees: [makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+      }
+    );
+    expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
+  test("Gitea unassigned foreign PR wakes when payload has no assignee and the bot is gone", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "alice" }),
+          assignees: [makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+      }
+    );
+    expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
+  test("Gitea unassigned foreign PR does not wake when the bot remains assigned", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" }), makeUser({ login: "alice" })],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+      }
+    );
+    expect(jobs).toEqual([]);
+  });
+
+  test("does not wake assigned issues when a human is unassigned from a foreign PR", async () => {
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({
+        action: "unassigned",
+        assignee: makeUser({ login: "alice" }),
+        pull_request: makePR({
+          number: 4373,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate" }),
+          assignee: null,
+          assignees: [],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        repository: repo,
+      }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+      }
+    );
+    expect(jobs).toEqual([]);
+  });
+
+  test("listIssueBlocks failure still wakes assigned issues", async () => {
+    const logs: string[] = [];
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({ action: "closed", pull_request: foreign, repository: repo }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386, title: "stale" })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            title: "Slice",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+      },
+      (message) => logs.push(message)
+    );
+    expect(jobs.map((job) => job.issueNumber)).toEqual([4386]);
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+  });
+
+  test("listOpenPulls failure throws so the webhook can retry", async () => {
+    await expect(
+      pullWaitClearJobsToEnqueue(makePayload({ action: "closed", pull_request: foreign, repository: repo }), policy, {
+        listOpenPulls: async () => {
+          throw new Error("pulls down");
+        },
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () => makeIssue({ number: 4386 }),
+      })
+    ).rejects.toThrow("pulls down");
+  });
+
+  test("listIssueBlocks failure throws when assigned wake does not apply", async () => {
+    const closer = makePR({
+      number: 200,
+      state: "closed",
+      merged: true,
+      body: "Fixes #196",
+      user: makeUser({ login: "alice" }),
+      assignee: null,
+      assignees: [],
+      head: { label: "kirmanak:fix", ref: "fix", sha: "abc", repo, repo_id: repo.id },
+    });
+    await expect(
+      pullWaitClearJobsToEnqueue(makePayload({ action: "closed", pull_request: closer, repository: repo }), policy, {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        listRepoIssues: async () => {
+          throw new Error("should not list assigned issues");
+        },
+        getIssue: async () => makeIssue({ number: 206 }),
+      })
+    ).rejects.toThrow("blocks down");
+  });
+
+  test("closed of a blocker PR wakes /blocks dependents even when the PR was not assigned", async () => {
+    const closer = makePR({
+      number: 200,
+      state: "closed",
+      merged: true,
+      body: "Fixes #196",
+      user: makeUser({ login: "alice" }),
+      assignee: null,
+      assignees: [],
+      head: { label: "kirmanak:fix", ref: "fix", sha: "abc", repo, repo_id: repo.id },
+    });
+    const jobs = await pullWaitClearJobsToEnqueue(
+      makePayload({ action: "closed", pull_request: closer, repository: repo }),
+      policy,
+      {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async (_owner, _repo, index) =>
+          index === 196 ? [makeLinkedIssue({ number: 206, title: "stale" })] : [],
+        getIssue: async (_owner, _repo, index) =>
+          makeIssue({
+            number: index,
+            title: "Dependent",
+            html_url: `https://gitea.kirmanak.stream/kirmanak/demo/issues/${index}`,
+          }),
+      }
+    );
+    expect(jobs.map((job) => job.issueNumber)).toEqual([206]);
   });
 });

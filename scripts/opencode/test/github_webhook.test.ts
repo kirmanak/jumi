@@ -275,6 +275,38 @@ describe("POST /webhooks/github", () => {
     expect((await handler(await signedGithubRequest({ zen: "pong" }, { event: "ping" }))).status).toBe(401);
   });
 
+  test("closing a blocker returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      logger: (message) => logs.push(message),
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () => githubIssue(),
+          listIssueBlocks: async () => {
+            throw new Error("blocks down");
+          },
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        labeledPayload({
+          action: "closed",
+          issue: githubIssue({ number: 196, state: "closed", labels: [] }),
+        }),
+        { event: "issues" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(store.rows).toHaveLength(0);
+  });
+
   test("closing a blocker enqueues the blocked issue if it still has label jumi", async () => {
     const { handler, store } = mailbox();
     const response = await handler(
@@ -327,6 +359,107 @@ describe("POST /webhooks/github", () => {
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported action closed" });
+    expect(store.rows).toHaveLength(0);
+  });
+
+  test("closed assigned foreign PR wakes labeled issues", async () => {
+    const store = new MemoryReviewJobStore();
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          listRepoIssues: async (_owner, _repo, opts) => {
+            if (opts?.assignedBy) throw new Error("GitHub pickup is the jumi label, not assignee");
+            return [makeLinkedIssue({ number: 12, html_url: "https://github.com/kirmanak/demo/issues/12" })];
+          },
+          getIssue: async () =>
+            githubIssue({
+              number: 12,
+              title: "Slice",
+              html_url: "https://github.com/kirmanak/demo/issues/12",
+            }),
+          getRepo: async () => githubRepo,
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "closed",
+          repository: githubRepo,
+          pull_request: makePR({
+            number: 50,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate[bot]" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://github.com/kirmanak/demo/pulls/50",
+            head: {
+              label: "kirmanak:renovate/x",
+              ref: "renovate/x",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows[0]?.kind).toBe("implement");
+  });
+
+  test("closed pull_request for a disallowed org is 400 not 503", async () => {
+    const logs: string[] = [];
+    const store = new MemoryReviewJobStore();
+    const other = makeRepo({
+      owner: makeUser({ login: "other" }),
+      full_name: "other/demo",
+      html_url: "https://github.com/other/demo",
+      clone_url: "https://github.com/other/demo.git",
+    });
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      logger: (message) => logs.push(message),
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () => githubIssue(),
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "closed",
+          repository: other,
+          pull_request: makePR({
+            state: "closed",
+            merged: true,
+            html_url: "https://github.com/other/demo/pulls/7",
+            head: {
+              label: "other:feature",
+              ref: "feature",
+              sha: "headsha",
+              repo: other,
+              repo_id: other.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(400);
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
+    expect(logs.some((line) => line.includes("not allowed"))).toBe(true);
     expect(store.rows).toHaveLength(0);
   });
 

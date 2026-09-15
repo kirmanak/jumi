@@ -106,9 +106,27 @@ export function isInScopeJumiPR(pr: Pull, owner: string, repo: string, botUserna
   return extractClosingIssueNumber(pr) !== undefined;
 }
 
+export function isForeignPrIdentity(
+  pr: {
+    title: string;
+    body?: string | null;
+    draft?: boolean;
+    user?: { login?: string };
+    head?: { ref?: string; repo?: { full_name: string } | null };
+  },
+  owner: string,
+  repo: string,
+  botUsername: string
+): boolean {
+  if (isWipOrDraft(pr)) return false;
+  if (!pr.head?.repo || pr.head.repo.full_name !== `${owner}/${repo}`) return false;
+  if (isJumiPrIdentity(pr, botUsername) && extractClosingIssueNumber(pr) !== undefined) return false;
+  return true;
+}
+
 export function isAssignedForeignPR(pr: Pull, owner: string, repo: string, botUsername: string): boolean {
   if (!isEligibleWorkerPR(pr, owner, repo)) return false;
-  if (isInScopeJumiPR(pr, owner, repo, botUsername)) return false;
+  if (!isForeignPrIdentity(pr, owner, repo, botUsername)) return false;
   return isAssignedToBot(pr, botUsername);
 }
 

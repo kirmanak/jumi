@@ -402,6 +402,544 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs).toHaveLength(0);
   });
 
+  test("closed blocker issue returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        getIssue: async () => makeIssue({ number: 206 }),
+        getRepo: async () => makeRepo(),
+      },
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) }))
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("reopened blocker returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        getIssue: async () => makeIssue({ number: 206 }),
+        getRepo: async () => makeRepo(),
+      },
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "reopened", issue: makeIssue({ number: 196 }) }))
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed assigned foreign PR wakes other assigned issues in the repo", async () => {
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386, title: "stale" })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            title: "Configure",
+            body: "do it",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+            updated_at: "2026-09-15T00:00:00Z",
+          }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 4373,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#4386", queued: true });
+    expect(queue.jobs).toHaveLength(1);
+    expect(queue.jobs[0]?.issueNumber).toBe(4386);
+    expect(queue.jobs[0]?.title).toBe("Configure");
+    expect(queue.jobs[0]?.mode).toBeUndefined();
+  });
+
+  test("closed assigned foreign PR still wakes when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386, title: "stale" })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            title: "Configure",
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 4373,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#4386", queued: true });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  test("unassigned foreign PR cancels then wakes other assigned issues", async () => {
+    const queue = makeQueue();
+    const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+        getRepo: async () => repository,
+      },
+      cancel: async (owner, repo, issueNumber) => {
+        cancelled.push({ owner, repo, issueNumber });
+        return { key: `${owner}/${repo}#${issueNumber}`, cancelled: true };
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "unassigned",
+          assignee: makeUser({ login: "jumi" }),
+          pull_request: makePR({
+            number: 4373,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#4386", queued: true });
+    expect(cancelled).toEqual([{ owner: "kirmanak", repo: "demo", issueNumber: 4373 }]);
+    expect(queue.jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
+  test("Gitea unassigned foreign PR without assignee cancels then wakes other assigned issues", async () => {
+    const queue = makeQueue();
+    const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () =>
+          makeIssue({
+            number: 4386,
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/issues/4386",
+          }),
+        getRepo: async () => repository,
+      },
+      cancel: async (owner, repo, issueNumber) => {
+        cancelled.push({ owner, repo, issueNumber });
+        return { key: `${owner}/${repo}#${issueNumber}`, cancelled: true };
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "unassigned",
+          pull_request: makePR({
+            number: 4373,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#4386", queued: true });
+    expect(cancelled).toEqual([{ owner: "kirmanak", repo: "demo", issueNumber: 4373 }]);
+    expect(queue.jobs.map((job) => job.issueNumber)).toEqual([4386]);
+  });
+
+  test("closed assigned foreign PR returns 503 when listing assigned issues fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("issues down");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 4373,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("issues down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("unassigned foreign PR returns 503 when wake listing fails after cancel", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const cancelled: Array<{ owner: string; repo: string; issueNumber: number }> = [];
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listRepoIssues: async () => {
+          throw new Error("issues down");
+        },
+        getIssue: async () => makeIssue({ number: 4386 }),
+        getRepo: async () => repository,
+      },
+      cancel: async (owner, repo, issueNumber) => {
+        cancelled.push({ owner, repo, issueNumber });
+        return { key: `${owner}/${repo}#${issueNumber}`, cancelled: true };
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "unassigned",
+          assignee: makeUser({ login: "jumi" }),
+          pull_request: makePR({
+            number: 4373,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(cancelled).toEqual([{ owner: "kirmanak", repo: "demo", issueNumber: 4373 }]);
+    expect(logs.some((line) => line.includes("issues down"))).toBe(true);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed blocker PR returns 503 when listing blocks fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        listIssueBlocks: async () => {
+          throw new Error("blocks down");
+        },
+        getIssue: async () => makeIssue({ number: 206 }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 200,
+            state: "closed",
+            merged: true,
+            body: "Fixes #196",
+            user: makeUser({ login: "alice" }),
+            assignee: null,
+            assignees: [],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/200",
+            head: {
+              label: "kirmanak:fix",
+              ref: "fix",
+              sha: "abc",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("blocks down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed assigned foreign PR returns 503 when listing open pulls fails", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const repository = makeRepo();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => {
+          throw new Error("pulls down");
+        },
+        listRepoIssues: async () => [makeLinkedIssue({ number: 4386 })],
+        getIssue: async () => makeIssue({ number: 4386 }),
+        getRepo: async () => repository,
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          pull_request: makePR({
+            number: 4373,
+            state: "closed",
+            merged: true,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/4373",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+          repository,
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
+    expect(logs.some((line) => line.includes("pulls down"))).toBe(true);
+    expect(logs.some((line) => line.includes("unsupported action closed"))).toBe(false);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed pull_request with a missing pull_request is 400 not 503", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        getIssue: async () => makeIssue({ number: 4386 }),
+      },
+    });
+    const response = await handler(
+      await signedRequest({ action: "closed", repository: makeRepo() }, { event: "pull_request" })
+    );
+    expect(response.status).toBe(400);
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
+    expect(logs.some((line) => line.includes("missing pull_request"))).toBe(true);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed pull_request for a disallowed org is 400 not 503", async () => {
+    const logs: string[] = [];
+    const queue = makeQueue();
+    const other = makeRepo({ owner: makeUser({ login: "other" }), full_name: "other/demo" });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      logger: (message) => logs.push(message),
+      api: {
+        listOpenPulls: async () => [],
+        getIssue: async () => makeIssue({ number: 4386 }),
+      },
+    });
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "closed",
+          repository: other,
+          pull_request: makePR({
+            state: "closed",
+            merged: true,
+            html_url: "https://gitea.kirmanak.stream/other/demo/pulls/7",
+            head: {
+              label: "other:feature",
+              ref: "feature",
+              sha: "headsha",
+              repo: other,
+              repo_id: other.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(400);
+    expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
+    expect(logs.some((line) => line.includes("not allowed"))).toBe(true);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("closed pull_request without wait-clear API still 202-skips", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const response = await handler(
+      await signedRequest(makePayload({ action: "closed", pull_request: makePR({ state: "closed", merged: true }) }), {
+        event: "pull_request",
+      })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action closed" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
   test("reopened of a blocker enqueues the blocker and wakes assigned blocked issues", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
