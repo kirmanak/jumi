@@ -1,16 +1,7 @@
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PickupPolicy } from "./assignee.ts";
-import {
-  ciStatePath,
-  claimFilePath,
-  conflictStatePath,
-  deleteClaim,
-  followUpStatePath,
-  isPidAlive,
-  readClaim,
-  stuckStatePath,
-} from "./claim.ts";
+import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import {
   attachIssueWorktree,
   beginClaimedWorktree,
@@ -48,14 +39,14 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import {
-  appendStuckFingerprint,
-  deleteStuckState,
+  appendStuckLatchFingerprint,
   evaluateStuck,
   fingerprintError,
   isQuotaStuck,
-  markQuotaStuck,
-  readStuckState,
+  markQuotaStuckLatch,
+  readStuckLatch,
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
@@ -112,6 +103,7 @@ export interface ImplementOptions extends PickupPolicy {
   useClaim?: boolean;
   onPid?: (pid: number) => void | Promise<void>;
   jobId?: string;
+  skipLatches?: SkipLatchStore;
 }
 
 function logDefault(message: string) {
@@ -205,8 +197,9 @@ export async function implementIssue(
     };
   }
 
-  const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
-  const stuckState = await readStuckState(stuckPath);
+  const latches = skipLatchesFor(opts);
+  const latchKey = { owner, repo, issueNumber };
+  const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
     await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
     await forgetClaim();
@@ -311,7 +304,7 @@ export async function implementIssue(
         // today, but a future non-quota producer must not set the quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
           await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
-          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
         }
         throwIfEngineFailed(result);
@@ -491,7 +484,7 @@ export async function implementIssue(
         await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT).catch(
           () => undefined
         );
-        await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
         await loop.stopHeartbeat();
         await loop.forgetSerialized().catch(() => undefined);
         await loop.detachWorktree();
@@ -507,7 +500,9 @@ export async function implementIssue(
       ).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
-        await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
+        await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
+          () => undefined
+        );
       }
       await loop.stopHeartbeat();
       await loop.stampTerminalClaim(opts.api).catch(() => undefined);
@@ -525,6 +520,7 @@ export async function cancelIssueWork(opts: {
   home: string;
   pidAlive?: (pid: number) => boolean;
   killPid?: (pid: number) => void;
+  skipLatches?: SkipLatchStore;
 }): Promise<void> {
   const claimPath = claimFilePath(opts.home, opts.owner, opts.repo, opts.issueNumber);
   const claim = await readClaim(claimPath);
@@ -539,8 +535,9 @@ export async function cancelIssueWork(opts: {
   }
   await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");
   await deleteClaim(claimPath);
-  await deleteClaim(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
-  await deleteClaim(conflictStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
-  await deleteClaim(ciStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
-  await deleteStuckState(opts.home, opts.owner, opts.repo, opts.issueNumber);
+  await skipLatchesFor(opts).delete({
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: opts.issueNumber,
+  });
 }

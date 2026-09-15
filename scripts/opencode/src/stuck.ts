@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
+import { type SkipLatchKey, type SkipLatchStore, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { parseReviewOutput } from "./verdict.ts";
 
 export const SAME_ACTION_LIMIT = 4;
@@ -175,7 +176,17 @@ function parseStuckState(parsed: unknown): StuckState {
   return state;
 }
 
+export async function readStuckLatch(store: SkipLatchStore, key: SkipLatchKey): Promise<StuckState> {
+  return parseStuckState((await store.get(key)).stuck);
+}
+
+export async function writeStuckLatch(store: SkipLatchStore, key: SkipLatchKey, state: StuckState): Promise<void> {
+  await store.put(key, { stuck: state });
+}
+
 export async function readStuckState(path: string): Promise<StuckState> {
+  const latch = skipLatchStoreFromPath(path);
+  if (latch) return readStuckLatch(latch.store, latch.key);
   try {
     return parseStuckState(JSON.parse(await readFile(path, "utf8")));
   } catch (err) {
@@ -185,8 +196,26 @@ export async function readStuckState(path: string): Promise<StuckState> {
 }
 
 export async function writeStuckState(path: string, state: StuckState): Promise<void> {
+  const latch = skipLatchStoreFromPath(path);
+  if (latch) {
+    await writeStuckLatch(latch.store, latch.key, state);
+    return;
+  }
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+export async function appendStuckLatchFingerprint(
+  store: SkipLatchStore,
+  key: SkipLatchKey,
+  fingerprint: StuckFingerprint,
+  now = () => new Date()
+): Promise<void> {
+  const state = await readStuckLatch(store, key);
+  const fingerprints = [...state.fingerprints, fingerprint].slice(-STUCK_HISTORY_LIMIT);
+  const next: StuckState = { fingerprints, updatedAt: now().toISOString() };
+  if (state.quota) next.quota = state.quota;
+  await writeStuckLatch(store, key, next);
 }
 
 export async function appendStuckFingerprint(
@@ -194,6 +223,11 @@ export async function appendStuckFingerprint(
   fingerprint: StuckFingerprint,
   now = () => new Date()
 ): Promise<void> {
+  const latch = skipLatchStoreFromPath(path);
+  if (latch) {
+    await appendStuckLatchFingerprint(latch.store, latch.key, fingerprint, now);
+    return;
+  }
   const state = await readStuckState(path);
   const fingerprints = [...state.fingerprints, fingerprint].slice(-STUCK_HISTORY_LIMIT);
   const next: StuckState = { fingerprints, updatedAt: now().toISOString() };
@@ -230,7 +264,26 @@ export function quotaStuckReason(state: StuckState | undefined | null): string |
   return reason ? reason : undefined;
 }
 
+export async function markQuotaStuckLatch(
+  store: SkipLatchStore,
+  key: SkipLatchKey,
+  reason: string,
+  now = () => new Date()
+): Promise<void> {
+  const state = await readStuckLatch(store, key);
+  await writeStuckLatch(store, key, {
+    fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
+    updatedAt: now().toISOString(),
+    quota: { reason, updatedAt: now().toISOString() },
+  });
+}
+
 export async function markQuotaStuck(path: string, reason: string, now = () => new Date()): Promise<void> {
+  const latch = skipLatchStoreFromPath(path);
+  if (latch) {
+    await markQuotaStuckLatch(latch.store, latch.key, reason, now);
+    return;
+  }
   const state = await readStuckState(path);
   await writeStuckState(path, {
     fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
@@ -251,7 +304,11 @@ export async function clearQuotaStuck(path: string, now = () => new Date()): Pro
 }
 
 export async function deleteStuckState(home: string, owner: string, repo: string, issueNumber: number): Promise<void> {
-  await deleteClaim(stuckStatePath(home, owner, repo, issueNumber));
+  await skipLatchStoreFromPath(stuckStatePath(home, owner, repo, issueNumber))?.store.delete({
+    owner,
+    repo,
+    issueNumber,
+  });
 }
 
 /** Reviewer-side kill-switch: delete the per-PR quota/fingerprint file so the

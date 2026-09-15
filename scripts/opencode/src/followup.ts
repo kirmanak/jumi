@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   buildCiMarkdown,
   CI_LOG_FILE,
@@ -9,7 +9,7 @@ import {
   inspectCi,
   recordCiHandled,
 } from "./ci.ts";
-import { conflictStatePath, deleteClaim, followUpStatePath, stuckStatePath } from "./claim.ts";
+import { followUpStatePath } from "./claim.ts";
 import {
   attachPrWorktree,
   beginClaimedWorktree,
@@ -32,9 +32,9 @@ import {
   MAX_CONFLICT_ROUNDS,
   type MergeDefaultResult,
   mergeDefaultIntoWorktree,
-  readConflictState,
+  readConflictLatch,
   shouldIncrementRound,
-  writeConflictState,
+  writeConflictLatch,
 } from "./conflict.ts";
 import { throwIfEngineFailed } from "./engine.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
@@ -46,15 +46,16 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { trustedWriteLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
-  appendStuckFingerprint,
+  appendStuckLatchFingerprint,
   evaluateStuck,
   fingerprintCiChecks,
   fingerprintError,
   fingerprintFollowUpText,
   isQuotaStuck,
-  markQuotaStuck,
-  readStuckState,
+  markQuotaStuckLatch,
+  readStuckLatch,
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
@@ -103,30 +104,6 @@ function loginEquals(login: string | undefined, botUsername: string): boolean {
 
 export { followUpStatePath };
 
-export async function readFollowUpState(path: string): Promise<FollowUpState> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-    if (!parsed || typeof parsed !== "object") return emptyFollowUpState();
-    const state = parsed as FollowUpState;
-    return {
-      prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
-      round: typeof state.round === "number" ? state.round : 0,
-      lastHeadSha: typeof state.lastHeadSha === "string" ? state.lastHeadSha : "",
-      handledCommentIds: Array.isArray(state.handledCommentIds)
-        ? state.handledCommentIds.filter((id): id is number => typeof id === "number")
-        : [],
-      handledReviewIds: Array.isArray(state.handledReviewIds)
-        ? state.handledReviewIds.filter((id): id is number => typeof id === "number")
-        : [],
-      handledReviewFindings: parseHandledReviewFindings(state.handledReviewFindings),
-      updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
-    };
-  } catch (err) {
-    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return emptyFollowUpState();
-    return emptyFollowUpState();
-  }
-}
-
 function emptyFollowUpState(): FollowUpState {
   return {
     prNumber: 0,
@@ -137,6 +114,42 @@ function emptyFollowUpState(): FollowUpState {
     handledReviewFindings: [],
     updatedAt: "",
   };
+}
+
+export function parseFollowUpState(parsed: unknown): FollowUpState {
+  if (!parsed || typeof parsed !== "object") return emptyFollowUpState();
+  const state = parsed as FollowUpState;
+  return {
+    prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
+    round: typeof state.round === "number" ? state.round : 0,
+    lastHeadSha: typeof state.lastHeadSha === "string" ? state.lastHeadSha : "",
+    handledCommentIds: Array.isArray(state.handledCommentIds)
+      ? state.handledCommentIds.filter((id): id is number => typeof id === "number")
+      : [],
+    handledReviewIds: Array.isArray(state.handledReviewIds)
+      ? state.handledReviewIds.filter((id): id is number => typeof id === "number")
+      : [],
+    handledReviewFindings: parseHandledReviewFindings(state.handledReviewFindings),
+    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
+  };
+}
+
+export async function readFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey): Promise<FollowUpState> {
+  return parseFollowUpState((await store.get(key)).followup);
+}
+
+export async function writeFollowUpLatch(
+  store: SkipLatchStore,
+  key: SkipLatchKey,
+  state: FollowUpState
+): Promise<void> {
+  await store.put(key, { followup: state });
+}
+
+export async function readFollowUpState(path: string): Promise<FollowUpState> {
+  const latch = skipLatchStoreFromPath(path);
+  if (!latch) return emptyFollowUpState();
+  return readFollowUpLatch(latch.store, latch.key);
 }
 
 function parseHandledReviewFindings(value: unknown): HandledReviewFinding[] {
@@ -169,8 +182,9 @@ function uniqueReviewFindings(findings: HandledReviewFinding[]): HandledReviewFi
 }
 
 export async function writeFollowUpState(path: string, state: FollowUpState): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`);
+  const latch = skipLatchStoreFromPath(path);
+  if (!latch) return;
+  await writeFollowUpLatch(latch.store, latch.key, state);
 }
 
 export async function deleteFollowUpState(
@@ -179,7 +193,11 @@ export async function deleteFollowUpState(
   repo: string,
   issueNumber: number
 ): Promise<void> {
-  await deleteClaim(followUpStatePath(home, owner, repo, issueNumber));
+  await skipLatchStoreFromPath(followUpStatePath(home, owner, repo, issueNumber))?.store.delete({
+    owner,
+    repo,
+    issueNumber,
+  });
 }
 
 export function isInScopeHumanComment(
@@ -570,8 +588,13 @@ export async function needsFollowUp(opts: {
   home: string;
   maxFollowupRounds?: number;
   followupIgnoreLogins?: readonly string[];
+  skipLatches?: SkipLatchStore;
 }): Promise<boolean> {
-  const state = await readFollowUpState(followUpStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
+  const state = await readFollowUpLatch(skipLatchesFor(opts), {
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: opts.issueNumber,
+  });
   if (state.round >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return false;
   const items = await collectFollowUpItems(
     opts.api,
@@ -773,7 +796,8 @@ export async function implementFollowUp(
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
   const { owner, repo, issueNumber, worktree, sanitizeEnv, engine, now, forgetClaim, claim } = claimed;
-  const statePath = followUpStatePath(opts.home, owner, repo, issueNumber);
+  const latches = skipLatchesFor(opts);
+  const latchKey = { owner, repo, issueNumber };
 
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, body, { index });
@@ -798,7 +822,7 @@ export async function implementFollowUp(
     return { status: "skipped", reason: "refusing to follow up on the default branch" };
   }
 
-  const state = await readFollowUpState(statePath);
+  const state = await readFollowUpLatch(latches, latchKey);
   const pendingItems = await collectFollowUpItems(
     opts.api,
     owner,
@@ -823,6 +847,7 @@ export async function implementFollowUp(
     sha: pr.head.sha,
     home: opts.home,
     issueNumber,
+    skipLatches: latches,
   };
   let ci: CiInspection = { sha: pr.head.sha, pending: false, failed: [], unhandled: [] };
   try {
@@ -876,13 +901,13 @@ export async function implementFollowUp(
         sha: pr.head.sha,
         checks: ci.unhandled,
         now,
+        skipLatches: latches,
       });
       await forgetClaim();
       return { status: "skipped", reason: flakeSkipReason(ci.unhandled) };
     }
   }
-  const conflictPath = conflictStatePath(opts.home, owner, repo, issueNumber);
-  const previousConflict = await readConflictState(conflictPath);
+  const previousConflict = await readConflictLatch(latches, latchKey);
   if (previousConflict.round >= maxConflictRounds) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
     await forgetClaim();
@@ -906,8 +931,7 @@ export async function implementFollowUp(
     : ciHash
       ? { kind: "ci" as const, hash: ciHash }
       : undefined;
-  const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
-  const stuckState = await readStuckState(stuckPath);
+  const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
     await sticky(QUOTA_STUCK_TEXT, pr.number);
     await forgetClaim();
@@ -940,13 +964,14 @@ export async function implementFollowUp(
       sha: pr.head.sha,
       checks: ci.failed,
       now,
+      skipLatches: latches,
     });
   };
 
   const recordAttempt = async (headSha: string) => {
     const uniqueComments = [...new Set(handledCommentIds)];
     const uniqueReviews = [...new Set(handledReviewIds)];
-    await writeFollowUpState(statePath, {
+    await writeFollowUpLatch(latches, latchKey, {
       prNumber: pr.number,
       round: hasFeedback ? state.round + 1 : state.round,
       lastHeadSha: headSha,
@@ -956,7 +981,7 @@ export async function implementFollowUp(
       updatedAt: now().toISOString(),
     });
     if (currentFingerprint) {
-      await appendStuckFingerprint(stuckPath, currentFingerprint, now);
+      await appendStuckLatchFingerprint(latches, latchKey, currentFingerprint, now);
     }
     await persistCi();
   };
@@ -1031,7 +1056,7 @@ export async function implementFollowUp(
       } catch (err: unknown) {
         if (isQuotaError(err)) {
           await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
         }
         prefixMergeThrew = true;
@@ -1039,7 +1064,7 @@ export async function implementFollowUp(
       }
       const persistConflictAttempt = async (result: typeof mergeResult) => {
         if (!shouldIncrementRound(result)) return;
-        await writeConflictState(conflictPath, {
+        await writeConflictLatch(latches, latchKey, {
           prNumber: pr.number,
           round: previousConflict.round + 1,
           lastHeadSha: result.headSha,
@@ -1155,7 +1180,7 @@ export async function implementFollowUp(
         // fingerprint path instead of the human-clear quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
           await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
         }
         throwIfEngineFailed(result);
@@ -1232,7 +1257,7 @@ export async function implementFollowUp(
     async (err) => {
       if (isQuotaError(err)) {
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
-        await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
         await loop.stopHeartbeat();
         await loop.forgetSerialized().catch(() => undefined);
         await loop.detachWorktree();
@@ -1243,10 +1268,12 @@ export async function implementFollowUp(
       );
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
-        await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
+        await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
+          () => undefined
+        );
       }
       if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
-        await writeConflictState(conflictPath, {
+        await writeConflictLatch(latches, latchKey, {
           prNumber: pr.number,
           round: previousConflict.round + 1,
           lastHeadSha: attemptedHeadSha,
@@ -1254,7 +1281,7 @@ export async function implementFollowUp(
           updatedAt: now().toISOString(),
         }).catch(() => undefined);
       }
-      await writeFollowUpState(statePath, {
+      await writeFollowUpLatch(latches, latchKey, {
         prNumber: pr.number,
         round: hasFeedback ? state.round + 1 : state.round,
         lastHeadSha: pr.head.sha,

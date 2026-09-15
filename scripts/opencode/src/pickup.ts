@@ -4,6 +4,7 @@ import { type FollowUpResult, implementFollowUp, needsFollowUp } from "./followu
 import { extractClosingIssueNumber, isInScopeJumiPR } from "./gitea_issues.ts";
 import type { ImplementOptions } from "./implement.ts";
 import type { Forge, IssueApi, Pull } from "./ports.ts";
+import type { SkipLatchStore } from "./skip_latches.ts";
 import type { IssueJob } from "./types.ts";
 
 export type CloserWorkMode = "follow-up" | "conflict";
@@ -29,6 +30,7 @@ export async function classifyCloserWork(opts: {
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
   followupIgnoreLogins?: readonly string[];
+  skipLatches?: SkipLatchStore;
 }): Promise<CloserWorkMode | undefined> {
   const followUp = await needsFollowUp({
     api: opts.api,
@@ -40,6 +42,7 @@ export async function classifyCloserWork(opts: {
     home: opts.home,
     maxFollowupRounds: opts.maxFollowupRounds,
     followupIgnoreLogins: opts.followupIgnoreLogins,
+    skipLatches: opts.skipLatches,
   });
   const ci = await needsCiFollowUp({
     api: opts.api,
@@ -48,6 +51,7 @@ export async function classifyCloserWork(opts: {
     sha: opts.pr.head.sha,
     home: opts.home,
     issueNumber: opts.issueNumber,
+    skipLatches: opts.skipLatches,
   });
   const conflict = await needsConflict({
     pr: opts.pr,
@@ -57,6 +61,7 @@ export async function classifyCloserWork(opts: {
     botUsername: opts.botUsername,
     home: opts.home,
     maxConflictRounds: opts.maxConflictRounds,
+    skipLatches: opts.skipLatches,
   });
   if (conflict && !(followUp || ci)) return "conflict";
   if (followUp || ci || conflict) return "follow-up";
@@ -78,6 +83,7 @@ export async function runCloserWork(
     maxFollowupRounds: opts.maxFollowupRounds,
     maxConflictRounds: opts.maxConflictRounds,
     followupIgnoreLogins: opts.followupIgnoreLogins,
+    skipLatches: opts.skipLatches,
   });
   if (!mode) return { status: "skipped", reason: `open PR already closes #${opts.job.issueNumber}` };
   const job: IssueJob = {

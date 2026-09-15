@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-import { ciStatePath, deleteClaim } from "./claim.ts";
+import { ciStatePath } from "./claim.ts";
 import type { ActionJob, Check, CheckState, Forge } from "./ports.ts";
+import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 
 type CiApi = Pick<Forge, "listCommitStatuses" | "listActionJobs" | "getActionJobLogs">;
 
@@ -204,20 +203,28 @@ function jobIdFromTargetUrl(targetUrl: string | undefined): number | undefined {
   return Number.isFinite(id) ? id : undefined;
 }
 
+export function parseCiState(parsed: unknown): CiFollowUpState {
+  if (!parsed || typeof parsed !== "object") return emptyCiState();
+  const state = parsed as CiFollowUpState;
+  return {
+    prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
+    handled: parseHandled(state.handled),
+    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
+  };
+}
+
+export async function readCiLatch(store: SkipLatchStore, key: SkipLatchKey): Promise<CiFollowUpState> {
+  return parseCiState((await store.get(key)).ci);
+}
+
+export async function writeCiLatch(store: SkipLatchStore, key: SkipLatchKey, state: CiFollowUpState): Promise<void> {
+  await store.put(key, { ci: state });
+}
+
 export async function readCiState(path: string): Promise<CiFollowUpState> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-    if (!parsed || typeof parsed !== "object") return emptyCiState();
-    const state = parsed as CiFollowUpState;
-    return {
-      prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
-      handled: parseHandled(state.handled),
-      updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
-    };
-  } catch (err) {
-    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return emptyCiState();
-    return emptyCiState();
-  }
+  const latch = skipLatchStoreFromPath(path);
+  if (!latch) return emptyCiState();
+  return readCiLatch(latch.store, latch.key);
 }
 
 function emptyCiState(): CiFollowUpState {
@@ -242,12 +249,17 @@ function parseHandled(value: unknown): CiHandledCheck[] {
 }
 
 export async function writeCiState(path: string, state: CiFollowUpState): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`);
+  const latch = skipLatchStoreFromPath(path);
+  if (!latch) return;
+  await writeCiLatch(latch.store, latch.key, state);
 }
 
 export async function deleteCiState(home: string, owner: string, repo: string, issueNumber: number): Promise<void> {
-  await deleteClaim(ciStatePath(home, owner, repo, issueNumber));
+  await skipLatchStoreFromPath(ciStatePath(home, owner, repo, issueNumber))?.store.delete({
+    owner,
+    repo,
+    issueNumber,
+  });
 }
 
 function handledKey(sha: string, checkName: string): string {
@@ -270,9 +282,11 @@ export async function recordCiHandled(opts: {
   sha: string;
   checks: FailedCheck[];
   now?: () => Date;
+  skipLatches?: SkipLatchStore;
 }): Promise<void> {
-  const path = ciStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber);
-  const state = await readCiState(path);
+  const store = skipLatchesFor(opts);
+  const key = { owner: opts.owner, repo: opts.repo, issueNumber: opts.issueNumber };
+  const state = await readCiLatch(store, key);
   const byKey = new Map(state.handled.map((entry) => [handledKey(entry.sha, entry.checkName), entry]));
   for (const check of opts.checks) {
     byKey.set(handledKey(opts.sha, check.name), {
@@ -281,7 +295,7 @@ export async function recordCiHandled(opts: {
       logHash: check.logHash,
     });
   }
-  await writeCiState(path, {
+  await writeCiLatch(store, key, {
     prNumber: opts.prNumber,
     handled: [...byKey.values()],
     updatedAt: (opts.now?.() ?? new Date()).toISOString(),
@@ -354,6 +368,7 @@ export async function inspectCi(opts: {
   sha: string;
   home: string;
   issueNumber: number;
+  skipLatches?: SkipLatchStore;
 }): Promise<CiInspection> {
   if (!opts.sha) return emptyInspection(opts.sha);
   let statuses: Check[];
@@ -377,7 +392,11 @@ export async function inspectCi(opts: {
     jobs = [];
   }
 
-  const ciState = await readCiState(ciStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
+  const ciState = await readCiLatch(skipLatchesFor(opts), {
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: opts.issueNumber,
+  });
   const failed: FailedCheck[] = [];
   for (const status of red) {
     const name = status.context ?? "unknown";
@@ -407,6 +426,7 @@ export async function needsCiFollowUp(opts: {
   sha: string;
   home: string;
   issueNumber: number;
+  skipLatches?: SkipLatchStore;
 }): Promise<boolean> {
   try {
     const inspection = await inspectCi(opts);

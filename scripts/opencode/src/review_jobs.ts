@@ -1,6 +1,12 @@
 import { isInfraRetryMarker } from "./infra.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
+import {
+  ISSUE_SKIP_LATCHES_SCHEMA_SQL,
+  MemorySkipLatchStore,
+  PgSkipLatchStore,
+  type SkipLatchStore,
+} from "./skip_latches.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
@@ -94,6 +100,7 @@ export interface ReviewJobStore {
   countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number>;
   countByState(): Promise<Record<ReviewJobState, number>>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
+  readonly skipLatches: SkipLatchStore;
 }
 
 export const REVIEW_JOBS_SCHEMA_SQL = `
@@ -320,6 +327,7 @@ function emptyCounts(): Record<ReviewJobState, number> {
 
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
+  readonly skipLatches = new MemorySkipLatchStore();
   private nextId = 1;
   private chain = Promise.resolve();
 
@@ -763,11 +771,16 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
 }
 
 export class PgReviewJobStore implements ReviewJobStore {
-  constructor(private readonly sql: SqlClient) {}
+  readonly skipLatches: PgSkipLatchStore;
+
+  constructor(private readonly sql: SqlClient) {
+    this.skipLatches = new PgSkipLatchStore(sql);
+  }
 
   async migrate(): Promise<void> {
     try {
       await this.sql.unsafe(REVIEW_JOBS_SCHEMA_SQL);
+      await this.sql.unsafe(ISSUE_SKIP_LATCHES_SCHEMA_SQL);
     } catch (err) {
       wrapSqlError(err);
     }

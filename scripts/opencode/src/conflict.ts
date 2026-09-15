@@ -1,7 +1,7 @@
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
-import { conflictStatePath, deleteClaim, stuckStatePath } from "./claim.ts";
+import { conflictStatePath } from "./claim.ts";
 import {
   attachPrWorktree,
   beginClaimedWorktree,
@@ -26,13 +26,14 @@ import { buildTaskMarkdown, type HelmRunner, type ImplementOptions, type OpenCod
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
-  appendStuckFingerprint,
+  appendStuckLatchFingerprint,
   evaluateStuck,
   fingerprintError,
   isQuotaStuck,
-  markQuotaStuck,
-  readStuckState,
+  markQuotaStuckLatch,
+  readStuckLatch,
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
@@ -114,27 +115,40 @@ function emptyConflictState(): ConflictState {
 
 export { conflictStatePath };
 
+export function parseConflictState(parsed: unknown): ConflictState {
+  if (!parsed || typeof parsed !== "object") return emptyConflictState();
+  const state = parsed as ConflictState;
+  return {
+    prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
+    round: typeof state.round === "number" ? state.round : 0,
+    lastHeadSha: typeof state.lastHeadSha === "string" ? state.lastHeadSha : "",
+    lastBaseSha: typeof state.lastBaseSha === "string" ? state.lastBaseSha : "",
+    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
+  };
+}
+
+export async function readConflictLatch(store: SkipLatchStore, key: SkipLatchKey): Promise<ConflictState> {
+  return parseConflictState((await store.get(key)).conflict);
+}
+
+export async function writeConflictLatch(
+  store: SkipLatchStore,
+  key: SkipLatchKey,
+  state: ConflictState
+): Promise<void> {
+  await store.put(key, { conflict: state });
+}
+
 export async function readConflictState(path: string): Promise<ConflictState> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-    if (!parsed || typeof parsed !== "object") return emptyConflictState();
-    const state = parsed as ConflictState;
-    return {
-      prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
-      round: typeof state.round === "number" ? state.round : 0,
-      lastHeadSha: typeof state.lastHeadSha === "string" ? state.lastHeadSha : "",
-      lastBaseSha: typeof state.lastBaseSha === "string" ? state.lastBaseSha : "",
-      updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
-    };
-  } catch (err) {
-    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return emptyConflictState();
-    return emptyConflictState();
-  }
+  const latch = skipLatchStoreFromPath(path);
+  if (!latch) return emptyConflictState();
+  return readConflictLatch(latch.store, latch.key);
 }
 
 export async function writeConflictState(path: string, state: ConflictState): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`);
+  const latch = skipLatchStoreFromPath(path);
+  if (!latch) return;
+  await writeConflictLatch(latch.store, latch.key, state);
 }
 
 export async function deleteConflictState(
@@ -143,7 +157,11 @@ export async function deleteConflictState(
   repo: string,
   issueNumber: number
 ): Promise<void> {
-  await deleteClaim(conflictStatePath(home, owner, repo, issueNumber));
+  await skipLatchStoreFromPath(conflictStatePath(home, owner, repo, issueNumber))?.store.delete({
+    owner,
+    repo,
+    issueNumber,
+  });
 }
 
 export async function needsConflict(opts: {
@@ -154,10 +172,15 @@ export async function needsConflict(opts: {
   botUsername: string;
   home: string;
   maxConflictRounds?: number;
+  skipLatches?: SkipLatchStore;
 }): Promise<boolean> {
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
-  const state = await readConflictState(conflictStatePath(opts.home, opts.owner, opts.repo, opts.issueNumber));
+  const state = await readConflictLatch(skipLatchesFor(opts), {
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: opts.issueNumber,
+  });
   if (state.round >= (opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS)) return false;
   if (
     state.lastHeadSha &&
@@ -488,7 +511,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
   const { owner, repo, issueNumber, worktree, sanitizeEnv, engine, now, forgetClaim, claim } = claimed;
-  const statePath = conflictStatePath(opts.home, owner, repo, issueNumber);
+  const latches = skipLatchesFor(opts);
+  const latchKey = { owner, repo, issueNumber };
 
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, body, { index });
@@ -509,14 +533,13 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     return { status: "skipped", reason: "refusing to merge on the default branch" };
   }
 
-  const state = await readConflictState(statePath);
+  const state = await readConflictLatch(latches, latchKey);
   if (state.round >= maxConflictRounds) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
     await forgetClaim();
     return { status: "stuck" };
   }
-  const stuckPath = stuckStatePath(opts.home, owner, repo, issueNumber);
-  const stuckState = await readStuckState(stuckPath);
+  const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
     await sticky(QUOTA_STUCK_TEXT, pr.number);
     await forgetClaim();
@@ -532,7 +555,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const loop = openClaimedLoop(claimed, opts);
 
   const recordAttempt = async (headSha: string, baseSha: string, increment: boolean) => {
-    await writeConflictState(statePath, {
+    await writeConflictLatch(latches, latchKey, {
       prNumber: pr.number,
       round: increment ? state.round + 1 : state.round,
       lastHeadSha: headSha,
@@ -587,6 +610,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           sha: pr.head.sha,
           home: opts.home,
           issueNumber,
+          skipLatches: latches,
         });
         if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
       } catch (err) {
@@ -624,7 +648,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       } catch (err: unknown) {
         if (isQuotaError(err)) {
           await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           await loop.stopHeartbeat();
           await loop.forgetSerialized().catch(() => undefined);
           await loop.detachWorktree();
@@ -689,7 +713,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             // not set the human-clear quota flag.
             if (continued.status === "stuck" && isQuotaText(continued.message)) {
               await sticky(QUOTA_STUCK_TEXT, pr.number);
-              await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+              await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
               throw new Error(QUOTA_STUCK_TEXT);
             }
             throwIfEngineFailed(continued);
@@ -733,7 +757,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     async (err) => {
       if (isQuotaError(err)) {
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
-        await markQuotaStuck(stuckPath, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
         await loop.stopHeartbeat();
         await loop.forgetSerialized().catch(() => undefined);
         await loop.detachWorktree();
@@ -744,7 +768,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       );
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
-        await appendStuckFingerprint(stuckPath, { kind: "error", hash: errorHash }, now).catch(() => undefined);
+        await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
+          () => undefined
+        );
       }
       if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
         await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);

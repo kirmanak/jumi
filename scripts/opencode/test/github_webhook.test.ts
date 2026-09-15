@@ -255,6 +255,27 @@ describe("POST /webhooks/github", () => {
     expect(store.rows).toHaveLength(1);
   });
 
+  test("unlabel deletes skip latches even when no jobs are queued", async () => {
+    const { handler, store } = mailbox();
+    await store.skipLatches.put(
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      { followup: { round: 3 }, stuck: { fingerprints: [{ kind: "action", hash: "aaa" }] } }
+    );
+    const response = await handler(
+      await signedGithubRequest(labeledPayload({ action: "unlabeled", issue: githubIssue({ labels: [] }) }), {
+        event: "issues",
+      })
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", cancelled: true });
+    expect(await store.skipLatches.get({ owner: "kirmanak", repo: "demo", issueNumber: 12 })).toEqual({
+      followup: {},
+      conflict: {},
+      ci: {},
+      stuck: {},
+    });
+  });
+
   test("bad HMAC is 401 and ping is 200", async () => {
     const handler = createFetchHandler(githubConfig(), { queue: makeReviewQueue() });
     expect((await handler(await signedGithubRequest(labeledPayload(), { secret: "wrong" }))).status).toBe(401);

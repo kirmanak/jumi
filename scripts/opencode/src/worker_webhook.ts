@@ -160,7 +160,7 @@ async function wakeJobsFromPull(
 }
 
 export async function cancelLedgerWorkerJobs(opts: {
-  store: Pick<ReviewJobStore, "cancelQueuedForIssue">;
+  store: Pick<ReviewJobStore, "cancelQueuedForIssue" | "skipLatches">;
   api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">;
   owner: string;
   repo: string;
@@ -170,6 +170,7 @@ export async function cancelLedgerWorkerJobs(opts: {
 }): Promise<{ key: string; cancelled: true }> {
   const key = cancelKey(opts.owner, opts.repo, opts.issueNumber);
   const cancelled = await opts.store.cancelQueuedForIssue(opts.owner, opts.repo, opts.issueNumber);
+  await opts.store.skipLatches.delete({ owner: opts.owner, repo: opts.repo, issueNumber: opts.issueNumber });
   if (cancelled > 0) {
     try {
       await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");
