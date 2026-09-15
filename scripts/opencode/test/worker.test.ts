@@ -190,7 +190,15 @@ describe("handleIssueCancel", () => {
       });
       await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+      expect(await store.skipLatches.get({ owner: "kirmanak", repo: "demo", issueNumber: 12 })).toEqual({
+        followup: {},
+        conflict: {},
+        ci: {},
+        stuck: {},
+      });
       expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 2, skipReason: null });
     } finally {
       await rm(home, { recursive: true, force: true });
     }

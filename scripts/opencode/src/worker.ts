@@ -173,8 +173,10 @@ export async function handleIssueCancel(
   }
   abortLocalJob(aborts, pids, key);
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
-  await latches.delete({ owner, repo, issueNumber });
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
+  if (!store || latches !== store.skipLatches) {
+    await latches.delete({ owner, repo, issueNumber });
+  }
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
   const claim = await readClaim(claimPath);

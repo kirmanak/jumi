@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { followUpStatePath, stuckStatePath } from "../src/claim.ts";
 import { readFollowUpState, writeFollowUpState } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
-import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { MemoryReviewJobStore, PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { MemorySkipLatchStore, parseWorkerLatchPath, skipLatchesFor } from "../src/skip_latches.ts";
 import { readStuckState, writeStuckState } from "../src/stuck.ts";
 import { handleIssueCancel } from "../src/worker.ts";
@@ -103,7 +103,67 @@ describe("kill switch deletes skip latches", () => {
       botUsername: "jumi",
     });
     expect(await store.skipLatches.get(key)).toEqual({ followup: {}, conflict: {}, ci: {}, stuck: {} });
+    expect(await store.readIssueSkipLatch(key.owner, key.repo, key.issueNumber)).toEqual({
+      generation: 1,
+      skipReason: null,
+    });
     expect(comments).toEqual([]);
+    await cancelLedgerWorkerJobs({
+      store,
+      api: {
+        findStickyIssueComment: async () => undefined,
+        createIssueComment: async (_o, _r, _i, body) => {
+          comments.push(body);
+          return makeComment({ body });
+        },
+        updateIssueComment: async (_o, _r, _id, body) => {
+          comments.push(body);
+          return makeComment({ body });
+        },
+      },
+      owner: key.owner,
+      repo: key.repo,
+      issueNumber: key.issueNumber,
+      botUsername: "jumi",
+    });
+    expect(await store.readIssueSkipLatch(key.owner, key.repo, key.issueNumber)).toEqual({
+      generation: 2,
+      skipReason: null,
+    });
+  });
+
+  test("cancelLedgerWorkerJobs bumps generation without deleting the Postgres row", async () => {
+    const captured: string[] = [];
+    const sql = {
+      async unsafe(query: string) {
+        captured.push(query);
+        if (query.includes("RETURNING")) return [{ generation: 2, skip_reason: null }];
+        return [];
+      },
+      async begin<T>(fn: (tx: typeof sql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    await cancelLedgerWorkerJobs({
+      store,
+      api: {
+        findStickyIssueComment: async () => undefined,
+        createIssueComment: async () => makeComment({ body: "stopped" }),
+        updateIssueComment: async () => makeComment({ body: "stopped" }),
+      },
+      owner: key.owner,
+      repo: key.repo,
+      issueNumber: key.issueNumber,
+      botUsername: "jumi",
+    });
+    expect(captured.some((query) => query.includes("DELETE FROM issue_skip_latches"))).toBe(false);
+    expect(
+      captured.some(
+        (query) =>
+          query.includes("generation = issue_skip_latches.generation + 1") && query.includes("followup = '{}'::jsonb")
+      )
+    ).toBe(true);
   });
 
   test("handleIssueCancel deletes skip latches so a later follow-up is not stuck", async () => {

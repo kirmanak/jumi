@@ -700,11 +700,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   }
 
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
-    return this.locked(() => {
+    return this.locked(async () => {
       const key = issueSkipLatchKey(owner, repo, issueNumber);
       const current = this.issueSkipLatches.get(key);
       const next: IssueSkipLatch = { generation: (current?.generation ?? 0) + 1, skipReason: null };
       this.issueSkipLatches.set(key, next);
+      await this.skipLatches.delete({ owner, repo, issueNumber });
       return { ...next };
     });
   }
@@ -1299,7 +1300,9 @@ export class PgReviewJobStore implements ReviewJobStore {
         `INSERT INTO issue_skip_latches (owner, repo, issue_number, generation, skip_reason, updated_at)
          VALUES ($1, $2, $3, 1, NULL, NOW())
          ON CONFLICT (owner, repo, issue_number)
-         DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL, updated_at = NOW()
+         DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL,
+           followup = '{}'::jsonb, conflict = '{}'::jsonb, ci = '{}'::jsonb, stuck = '{}'::jsonb,
+           updated_at = NOW()
          RETURNING generation, skip_reason`,
         [owner, repo, issueNumber]
       )
