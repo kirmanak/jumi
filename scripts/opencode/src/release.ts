@@ -766,7 +766,7 @@ export async function publishGitHubRelease(opts: {
   }
   const createdRelease = await request("POST", "/releases", {
     tag_name: opts.version,
-    target_commitish: opts.sha,
+    ...(tagCreated ? { target_commitish: opts.sha } : {}),
     name: opts.version,
     body: opts.body,
     draft: false,
@@ -874,27 +874,8 @@ async function main(args: string[]): Promise<void> {
     }
     if (touchesGitHubWorkflows(root, sha)) {
       console.log(
-        `Skipping new version ${plan.version} on ${sha} because it touches .github/workflows; backfilling latest tag if needed`
+        `Skipping new version ${plan.version} on ${sha} because it touches .github/workflows; not backfilling ${latest ?? "latest"} this run so the next non-workflow main push can create that Release`
       );
-      if (latest) {
-        const tagCommit = peeledCommitForTag(root, latest);
-        if (tagCommit) {
-          const backfill = await publishGitHubRelease({
-            apiUrl,
-            token,
-            owner,
-            repo,
-            sha: tagCommit,
-            version: latest,
-            body: releaseBodyForTag(root, latest),
-            makeLatest: false,
-            skipMissingRelease: true,
-          });
-          console.log(
-            `Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`
-          );
-        }
-      }
       return;
     }
     const result = await publishGitHubRelease({
@@ -921,7 +902,6 @@ async function main(args: string[]): Promise<void> {
           version: latest,
           body: releaseBodyForTag(root, latest),
           makeLatest: false,
-          skipMissingRelease: true,
         });
         console.log(`Backfilled ${latest} tagCreated=${backfill.tagCreated} releaseCreated=${backfill.releaseCreated}`);
       }

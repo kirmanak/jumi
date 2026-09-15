@@ -622,7 +622,7 @@ describe("publishGitHubRelease", () => {
     body: "## GitOps\nnone\n",
   };
 
-  test("peels annotated refs and posts target_commitish, generate_release_notes false, make_latest true", async () => {
+  test("peels annotated refs and omits target_commitish, generate_release_notes false, make_latest true", async () => {
     const calls: { method: string; url: string; body?: unknown }[] = [];
     const fetchImpl = async (input: string, init?: RequestInit) => {
       const url = String(input);
@@ -648,10 +648,10 @@ describe("publishGitHubRelease", () => {
     const created = calls.find((call) => call.method === "POST" && call.url.endsWith("/releases"));
     expect(created?.body).toMatchObject({
       tag_name: "v1.0.0",
-      target_commitish: "abc",
       generate_release_notes: false,
       make_latest: "true",
     });
+    expect(created?.body).not.toHaveProperty("target_commitish");
   });
 
   test("creates tag object then ref when the tag is missing", async () => {
@@ -688,6 +688,13 @@ describe("publishGitHubRelease", () => {
     const refIdx = calls.findIndex((call) => call.method === "POST" && call.url.endsWith("/git/refs"));
     expect(tagIdx).toBeGreaterThanOrEqual(0);
     expect(refIdx).toBeGreaterThan(tagIdx);
+    const created = calls.find((call) => call.method === "POST" && call.url.endsWith("/releases"));
+    expect(created?.body).toMatchObject({
+      tag_name: "v1.0.0",
+      target_commitish: "abc",
+      generate_release_notes: false,
+      make_latest: "true",
+    });
   });
 
   test("refuses to move an immutable tag", async () => {
@@ -709,7 +716,7 @@ describe("publishGitHubRelease", () => {
     await expect(publishGitHubRelease({ ...baseOpts, fetchImpl })).rejects.toThrow("Do not add a PAT");
   });
 
-  test("backfill sets make_latest false and skips POST /releases 404", async () => {
+  test("existing-tag backfill defaults make_latest true and POST /releases 404 fails the job", async () => {
     const calls: { method: string; url: string; body?: unknown }[] = [];
     const fetchImpl = async (input: string, init?: RequestInit) => {
       const url = String(input);
@@ -727,19 +734,45 @@ describe("publishGitHubRelease", () => {
       }
       return new Response("unexpected", { status: 500 });
     };
+    await expect(publishGitHubRelease({ ...baseOpts, fetchImpl })).rejects.toThrow("GitHub API POST /releases → 404");
+    const created = calls.find((call) => call.method === "POST" && call.url.endsWith("/releases"));
+    expect(created?.body).toMatchObject({
+      generate_release_notes: false,
+      make_latest: "true",
+    });
+    expect(created?.body).not.toHaveProperty("target_commitish");
+  });
+
+  test("makeLatest false is posted only when a newer version was published", async () => {
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const fetchImpl = async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, url, body });
+      if (url.endsWith("/git/ref/tags/v1.0.0") && method === "GET") {
+        return new Response(JSON.stringify({ object: { sha: "abc", type: "commit" } }), { status: 200 });
+      }
+      if (url.endsWith("/releases/tags/v1.0.0") && method === "GET") {
+        return new Response("Not Found", { status: 404 });
+      }
+      if (url.endsWith("/releases") && method === "POST") {
+        return new Response("{}", { status: 201 });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
     const result = await publishGitHubRelease({
       ...baseOpts,
       makeLatest: false,
-      skipMissingRelease: true,
       fetchImpl,
     });
-    expect(result).toEqual({ tagCreated: false, releaseCreated: false });
+    expect(result).toEqual({ tagCreated: false, releaseCreated: true });
     const created = calls.find((call) => call.method === "POST" && call.url.endsWith("/releases"));
     expect(created?.body).toMatchObject({
-      target_commitish: "abc",
       generate_release_notes: false,
       make_latest: "false",
     });
+    expect(created?.body).not.toHaveProperty("target_commitish");
   });
 });
 
