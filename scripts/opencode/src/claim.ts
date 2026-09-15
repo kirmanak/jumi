@@ -35,6 +35,10 @@ export function stuckStatePath(home: string, owner: string, repo: string, issueN
   return join(home, "worker", "jobs", owner, repo, `${issueNumber}.stuck.json`);
 }
 
+export function skipLatchGenerationPath(home: string, owner: string, repo: string, issueNumber: number): string {
+  return join(home, "worker", "jobs", owner, repo, `${issueNumber}.latch.json`);
+}
+
 export function reviewStuckStatePath(home: string, owner: string, repo: string, prNumber: number): string {
   return join(home, "reviewer", "jobs", owner, repo, `${prNumber}.stuck.json`);
 }
@@ -87,6 +91,40 @@ export async function deleteClaim(path: string): Promise<void> {
     if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return;
     throw err;
   }
+}
+
+export async function readSkipLatchGeneration(path: string): Promise<number> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (parsed && typeof parsed === "object" && typeof (parsed as { generation?: unknown }).generation === "number") {
+      return (parsed as { generation: number }).generation;
+    }
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return 0;
+  }
+  return 0;
+}
+
+export async function writeSkipLatchGeneration(path: string, generation: number): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify({ generation }, null, 2)}\n`);
+}
+
+export async function syncHomeSkipLatch(
+  home: string,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  generation: number
+): Promise<void> {
+  const path = skipLatchGenerationPath(home, owner, repo, issueNumber);
+  const current = await readSkipLatchGeneration(path);
+  if (current === generation) return;
+  await deleteClaim(followUpStatePath(home, owner, repo, issueNumber));
+  await deleteClaim(conflictStatePath(home, owner, repo, issueNumber));
+  await deleteClaim(ciStatePath(home, owner, repo, issueNumber));
+  await deleteClaim(stuckStatePath(home, owner, repo, issueNumber));
+  await writeSkipLatchGeneration(path, generation);
 }
 
 export async function acquireClaim(

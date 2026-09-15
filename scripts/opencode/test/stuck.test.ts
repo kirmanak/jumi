@@ -10,6 +10,7 @@ import {
   fingerprintError,
   fingerprintFollowUpText,
   fingerprintReviewArtifact,
+  isSkipLatchReason,
   readStuckState,
   stuckComment,
   writeStuckState,
@@ -163,6 +164,17 @@ describe("stuckComment", () => {
     expect(stuckComment("repeated-action")).toBe("stuck: repeated action");
     expect(stuckComment("repeated-error")).toBe("stuck: repeated error");
     expect(stuckComment("ping-pong")).toBe("stuck: ping-pong");
+  });
+});
+
+describe("isSkipLatchReason", () => {
+  test("matches stuck: skip latches and ignores per-job skips", () => {
+    expect(isSkipLatchReason("stuck: cannot resolve conflicts")).toBe(true);
+    expect(isSkipLatchReason("stuck: repeated error")).toBe(true);
+    expect(isSkipLatchReason("stuck: usage limit exceeded")).toBe(true);
+    expect(isSkipLatchReason("same head and base already attempted")).toBe(false);
+    expect(isSkipLatchReason("no unhandled feedback")).toBe(false);
+    expect(isSkipLatchReason(undefined)).toBe(false);
   });
 });
 
