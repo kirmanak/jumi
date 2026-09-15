@@ -1223,7 +1223,33 @@ describe("processWorkerTick", () => {
     expect(
       await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message))
     ).toBe("idle");
-    expect(logs.some((line) => line === "quota cooldown")).toBe(true);
+    expect(logs.filter((line) => line === "quota cooldown")).toEqual(["quota cooldown"]);
+  });
+
+  test("quota cooldown does not log on every poll tick", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await store.enqueueIssue(makeIssueJob({ issueNumber: 13, delivery: "d-13" }));
+    const cooldown = new QuotaCooldown();
+    const extras = {
+      breaker: new InfraCircuitBreaker(),
+      quotaCooldown: cooldown,
+      implement: async () => {
+        const decision = decideQuotaRetry(null, Date.now(), undefined, () => 0);
+        if (decision.action !== "requeue") throw new Error("expected requeue");
+        throw new QuotaWaitError(decision);
+      },
+    };
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    const logs: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      expect(
+        await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) =>
+          logs.push(message)
+        )
+      ).toBe("idle");
+    }
+    expect(logs.filter((line) => line === "quota cooldown")).toEqual(["quota cooldown"]);
   });
 
   test("unlabel cancel drops a job sitting in the quota wait", async () => {

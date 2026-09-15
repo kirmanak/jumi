@@ -442,4 +442,17 @@ describe("QuotaCooldown", () => {
     expect(cool.canLease(999)).toBe(false);
     expect(cool.canLease(1_000)).toBe(true);
   });
+
+  test("takeLog fires once per wait window", () => {
+    const cool = new QuotaCooldown();
+    expect(cool.takeLog(0)).toBe(false);
+    cool.recordWaitUntil(1_000);
+    expect(cool.takeLog(0)).toBe(true);
+    expect(cool.takeLog(0)).toBe(false);
+    expect(cool.takeLog(999)).toBe(false);
+    expect(cool.takeLog(1_000)).toBe(false);
+    cool.recordWaitUntil(2_000);
+    expect(cool.takeLog(1_000)).toBe(true);
+    expect(cool.takeLog(1_500)).toBe(false);
+  });
 });

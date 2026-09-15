@@ -294,7 +294,7 @@ export async function processWorkerTick(
   }
   const quotaCooldown = extras.quotaCooldown ?? workerQuotaCooldown;
   if (!quotaCooldown.canLease()) {
-    logger("quota cooldown");
+    if (quotaCooldown.takeLog()) logger("quota cooldown");
     return "idle";
   }
   const row = await store.lease(leasedBy, config.leaseMs, undefined, WORKER_JOB_KINDS);

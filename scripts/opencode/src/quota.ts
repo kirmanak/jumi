@@ -461,6 +461,7 @@ export function isQuotaWaitError(err: unknown): err is QuotaWaitError {
 
 export class QuotaCooldown {
   private until = 0;
+  private loggedUntil = 0;
 
   canLease(now = Date.now()): boolean {
     return now >= this.until;
@@ -471,8 +472,16 @@ export class QuotaCooldown {
     this.until = Math.max(this.until, untilMs);
   }
 
+  takeLog(now = Date.now()): boolean {
+    if (now >= this.until) return false;
+    if (this.loggedUntil === this.until) return false;
+    this.loggedUntil = this.until;
+    return true;
+  }
+
   reset(): void {
     this.until = 0;
+    this.loggedUntil = 0;
   }
 }
 
