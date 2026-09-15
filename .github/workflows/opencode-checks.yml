@@ -1,0 +1,119 @@
+name: OpenCode Checks
+
+on:
+  # Default pull_request types are opened, synchronize, reopened.
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Load tool versions
+        run: grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: scripts/opencode
+
+      - name: Run lint, typecheck, and tests
+        run: bun run ci
+        working-directory: scripts/opencode
+
+  image-build:
+    runs-on: ubuntu-latest
+    needs: checks
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Load tool versions
+        run: grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Build reviewer image without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          load: true
+          tags: jumi-reviewer:ci
+          build-args: |
+            BUN_VERSION=${{ env.BUN_VERSION }}
+            OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            HELM_VERSION=${{ env.HELM_VERSION }}
+
+      - name: Verify reviewer image
+        run: |
+          set -euo pipefail
+          test "$(docker inspect --format '{{.Config.User}}' jumi-reviewer:ci)" = "10001:10001"
+          if docker run --rm jumi-reviewer:ci sh -c 'command -v java >/dev/null 2>&1'; then
+            echo "reviewer image must not ship a JVM" >&2
+            exit 1
+          fi
+          docker run --rm jumi-reviewer:ci python3 --version
+          docker run --rm jumi-reviewer:ci helm version --short
+          docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
+          config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-reviewer:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
+          printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
+
+  worker-image-build:
+    runs-on: ubuntu-latest
+    needs: checks
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Load tool versions
+        run: grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Build worker image without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: worker
+          load: true
+          tags: jumi-worker:ci
+          build-args: |
+            BUN_VERSION=${{ env.BUN_VERSION }}
+            OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            HELM_VERSION=${{ env.HELM_VERSION }}
+            TEMURIN_TAG=${{ env.TEMURIN_TAG }}
+
+      - name: Verify worker image
+        run: |
+          set -euo pipefail
+          test "$(docker inspect --format '{{.Config.User}}' jumi-worker:ci)" = "10001:10001"
+          test "$(docker run --rm jumi-worker:ci printenv JAVA_HOME)" = "/opt/java/openjdk"
+          java_version="$(docker run --rm jumi-worker:ci java -version 2>&1)"
+          printf '%s\n' "$java_version" | grep -E 'version "21(\.|$)'
+          printf '%s\n' "$java_version" | grep -F Temurin
+          docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md
+          config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-worker:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
+          printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
