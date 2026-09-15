@@ -244,7 +244,7 @@ describe("implementIssue", () => {
     });
   });
 
-  test("skips first-run implement when an assigned foreign PR is the job for this repo", async () => {
+  test("first-run implement proceeds when an assigned foreign PR exists in the repo", async () => {
     await withDirs(async (home, workdir) => {
       const repo = makeRepo();
       const api = makeApi({
@@ -257,27 +257,26 @@ describe("implementIssue", () => {
           }),
         ],
       });
-      const result = await implementIssue({
-        api,
-        job: makeIssueJob(),
-        giteaUrl: "https://gitea.kirmanak.stream",
-        giteaToken: "bot-token",
-        botUsername: "jumi",
-        model: "openai/gpt-5.5",
-        home,
-        workdir,
-        heartbeatIntervalMs: 0,
-        gitRunner: async () => {
-          throw new Error("git should not run");
-        },
-        openCodeRunner: async () => {
-          throw new Error("opencode should not run");
-        },
-        logger: () => undefined,
-      });
-      expect(result).toEqual({ status: "skipped", reason: "assigned PR is the job for this repo" });
-      const claim = await readClaim(claimFilePath(home, "kirmanak", "demo", 12));
-      expect(claim).toBeUndefined();
+      await expect(
+        implementIssue({
+          api,
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async () => {
+            throw new Error("first-run git");
+          },
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run before git");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("first-run git");
     });
   });
 

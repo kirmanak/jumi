@@ -43,12 +43,7 @@ import {
 import { type Engine, throwIfEngineFailed } from "./engine.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, openCodeEngine } from "./git.ts";
-import {
-  closesIssuePattern,
-  isAssignedForeignPR,
-  pullRequestClosesIssue,
-  upsertWorkerComment,
-} from "./gitea_issues.ts";
+import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
@@ -184,10 +179,6 @@ export async function implementIssue(
   if (pulls.some((pr) => pullRequestClosesIssue(pr, issueNumber))) {
     await forgetClaim();
     return { status: "skipped", reason: `open PR already closes #${issueNumber}` };
-  }
-  if (pulls.some((pr) => isAssignedForeignPR(pr, owner, repo, opts.botUsername))) {
-    await forgetClaim();
-    return { status: "skipped", reason: "assigned PR is the job for this repo" };
   }
 
   const assigned = await recheckAssignedAndOpen(claimed, opts);
