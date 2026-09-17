@@ -470,6 +470,7 @@ describe("GiteaAPI", () => {
     await expect(api.listCommitStatuses("owner", "repo", "sha/1")).resolves.toEqual([
       { id: 1, context: "build", status: "failure" },
     ]);
+    await expect(api.listCheckRuns("owner", "repo", "sha/1")).resolves.toEqual([]);
     await expect(api.listActionJobs("owner", "repo", { status: "failure" })).resolves.toEqual([
       { id: 9, name: "build" },
     ]);

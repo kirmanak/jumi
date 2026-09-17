@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build jumi-reviewer with Buildah on GARM (ubuntu-latest).
-# Env: BUN_VERSION, OPENCODE_VERSION required.
+# Env: BUN_VERSION, OPENCODE_VERSION, CLAUDE_VERSION required.
 #      PUSH_IMAGE=true enables registry push (needs REGISTRY + CONTAINER_REGISTRY_*).
 # Isolation defaults: BUILDAH_ISOLATION=chroot, STORAGE_DRIVER=vfs (no --layers).
 set -euo pipefail
@@ -12,6 +12,7 @@ fi
 
 : "${BUN_VERSION:?BUN_VERSION is required}"
 : "${OPENCODE_VERSION:?OPENCODE_VERSION is required}"
+: "${CLAUDE_VERSION:?CLAUDE_VERSION is required}"
 : "${HELM_VERSION:?HELM_VERSION is required}"
 
 primary_tag="$1"
@@ -45,6 +46,7 @@ buildah bud \
   "${tag_args[@]}" \
   --build-arg "BUN_VERSION=${BUN_VERSION}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
+  --build-arg "CLAUDE_VERSION=${CLAUDE_VERSION}" \
   --build-arg "HELM_VERSION=${HELM_VERSION}" \
   --build-arg "VERSION=${VERSION}" \
   --build-arg "REVISION=${REVISION}" \
@@ -113,7 +115,12 @@ verify_reviewer_runtime() {
     echo "opencode debug config did not load skills.paths /app/review-skills" >&2
     exit 1
   fi
-  echo "Verified python3, helm, gitops-apply-review skill, and opencode debug config"
+  if ! buildah run "${ctr}" -- claude --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "claude missing in reviewer image" >&2
+    exit 1
+  fi
+  echo "Verified python3, helm, claude, gitops-apply-review skill, and opencode debug config"
   buildah rm "${ctr}" >/dev/null
 }
 

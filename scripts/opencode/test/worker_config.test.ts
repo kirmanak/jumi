@@ -101,6 +101,21 @@ describe("loadWorkerConfig", () => {
     expect(config.chain).toEqual(["first", "second"]);
     expect(config.model).toBe("provider-a/one");
     expect(config.fallbackModel).toBe("provider-b/two");
+
+    const claudeFile = join(dir, "claude.json");
+    writeFileSync(
+      claudeFile,
+      JSON.stringify({
+        runners: {
+          spark: { type: "claude", model: "opus" },
+          grok: { type: "opencode", model: "opencode/grok-4.6" },
+        },
+        chain: ["spark", "grok"],
+      })
+    );
+    const claudeConfig = loadWorkerConfig({ ...required, [RUNNERS_FILE_ENV]: claudeFile });
+    expect(claudeConfig.chain).toEqual(["spark", "grok"]);
+    expect(claudeConfig.runners.spark).toEqual({ type: "claude", model: "opus" });
   });
 
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {

@@ -2,18 +2,25 @@ import { readFileSync } from "node:fs";
 
 export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
 export const OPENCODE_RUNNER_TYPE = "opencode";
+export const CLAUDE_RUNNER_TYPE = "claude";
 export const SYNTHESIZED_PRIMARY = "primary";
 export const SYNTHESIZED_FALLBACK = "fallback";
 
-export interface RunnerConfig {
+export interface OpenCodeRunnerConfig {
   type: typeof OPENCODE_RUNNER_TYPE;
   model: string;
   variant?: string;
 }
 
-export interface NamedRunner extends RunnerConfig {
-  name: string;
+export interface ClaudeRunnerConfig {
+  type: typeof CLAUDE_RUNNER_TYPE;
+  model: string;
+  effort?: string;
 }
+
+export type RunnerConfig = OpenCodeRunnerConfig | ClaudeRunnerConfig;
+
+export type NamedRunner = RunnerConfig & { name: string };
 
 export interface RunnersCatalog {
   runners: Record<string, RunnerConfig>;
@@ -39,17 +46,30 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
+function claudeRunner(model: string, effort?: string): ClaudeRunnerConfig {
+  return effort ? { type: CLAUDE_RUNNER_TYPE, model, effort } : { type: CLAUDE_RUNNER_TYPE, model };
+}
+
 function parseRunner(name: string, spec: unknown): RunnerConfig {
   if (!isPlainObject(spec)) fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} must be an object`);
-  if (spec.type !== OPENCODE_RUNNER_TYPE) fail(`Unknown runner type: ${String(spec.type)}`);
   if (typeof spec.model !== "string" || !spec.model) {
     fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} missing model`);
   }
-  const variant = spec.variant;
-  if (variant != null && typeof variant !== "string") {
-    fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid variant`);
+  if (spec.type === OPENCODE_RUNNER_TYPE) {
+    const variant = spec.variant;
+    if (variant != null && typeof variant !== "string") {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid variant`);
+    }
+    return opencodeRunner(spec.model, typeof variant === "string" && variant ? variant : undefined);
   }
-  return opencodeRunner(spec.model, typeof variant === "string" && variant ? variant : undefined);
+  if (spec.type === CLAUDE_RUNNER_TYPE) {
+    const effort = spec.effort;
+    if (effort != null && typeof effort !== "string") {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid effort`);
+    }
+    return claudeRunner(spec.model, typeof effort === "string" && effort ? effort : undefined);
+  }
+  fail(`Unknown runner type: ${String(spec.type)}`);
 }
 
 export function parseRunnersCatalog(raw: unknown): RunnersCatalog {
@@ -117,8 +137,8 @@ export function modelsFromCatalog(catalog: RunnersCatalog): SynthesizeRunnersInp
   const second = ordered[1];
   return {
     model: primary.model,
-    variant: primary.variant,
+    variant: primary.type === OPENCODE_RUNNER_TYPE ? primary.variant : undefined,
     fallbackModel: second?.model,
-    fallbackVariant: second?.variant,
+    fallbackVariant: second?.type === OPENCODE_RUNNER_TYPE ? second.variant : undefined,
   };
 }

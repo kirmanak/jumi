@@ -558,6 +558,10 @@ export class GiteaAPI {
     return statuses.map(toCheck);
   }
 
+  async listCheckRuns(_owner: string, _repo: string, _sha: string): Promise<Check[]> {
+    return [];
+  }
+
   async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]> {
     const results: ActionJob[] = [];
     let page = 1;

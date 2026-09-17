@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  checkRunState,
   GithubAPI,
+  toCheckFromCheckRun,
   toGiteaReviewState,
   toGithubReviewEvent,
   toInlineComment,
@@ -723,6 +725,109 @@ describe("GithubAPI", () => {
     expect(authed[4]).toBe(false);
   });
 
+  test("lists check-runs for a SHA and maps conclusions", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("/check-runs")) {
+        return Response.json({
+          total_count: 2,
+          check_runs: [
+            {
+              id: 4,
+              name: "checks",
+              status: "completed",
+              conclusion: "failure",
+              html_url: "https://github.com/owner/repo/actions/runs/9/job/4",
+              output: { title: "Process completed with exit code 1." },
+            },
+            {
+              id: 5,
+              name: "image",
+              status: "completed",
+              conclusion: "skipped",
+              html_url: "https://github.com/owner/repo/actions/runs/9/job/5",
+            },
+          ],
+        });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listCheckRuns("owner", "repo", "sha/1")).resolves.toEqual([
+      {
+        id: 4,
+        context: "checks",
+        state: "failure",
+        status: "failure",
+        description: "Process completed with exit code 1.",
+        target_url: "https://github.com/owner/repo/actions/runs/9/job/4",
+        created_at: undefined,
+        updated_at: undefined,
+        url: "https://github.com/owner/repo/actions/runs/9/job/4",
+        jobId: 4,
+      },
+      {
+        id: 5,
+        context: "image",
+        state: "success",
+        status: "success",
+        description: "skipped",
+        target_url: "https://github.com/owner/repo/actions/runs/9/job/5",
+        created_at: undefined,
+        updated_at: undefined,
+        url: "https://github.com/owner/repo/actions/runs/9/job/5",
+        jobId: 5,
+      },
+    ]);
+    expect(urls[0]).toContain("/commits/sha%2F1/check-runs?filter=latest&per_page=50&page=1");
+  });
+
+  test("falls back to Actions jobs by head SHA when check-runs are forbidden", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.includes("/check-runs")) return new Response("nope", { status: 403 });
+      if (href.includes("/actions/runs/") && href.includes("/jobs")) {
+        return Response.json({
+          jobs: [
+            { id: 4, name: "checks", status: "completed", conclusion: "failure" },
+            { id: 5, name: "image", status: "completed", conclusion: "skipped" },
+          ],
+        });
+      }
+      if (href.includes("/actions/runs")) {
+        return Response.json({ workflow_runs: [{ id: 9, head_sha: "sha/1" }], total_count: 1 });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listCheckRuns("owner", "repo", "sha/1")).resolves.toEqual([
+      {
+        id: 4,
+        context: "checks",
+        state: "failure",
+        status: "failure",
+        description: "failure",
+        target_url: undefined,
+        jobId: 4,
+      },
+      {
+        id: 5,
+        context: "image",
+        state: "success",
+        status: "success",
+        description: "skipped",
+        target_url: undefined,
+        jobId: 5,
+      },
+    ]);
+    expect(urls[0]).toContain("/check-runs");
+    expect(urls[1]).toContain("/actions/runs?head_sha=sha%2F1");
+    expect(urls[2]).toContain("/actions/runs/9/jobs");
+  });
+
   test("throws useful errors for non-2xx responses", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 
@@ -914,5 +1019,24 @@ describe("GithubAPI", () => {
 
     expect(info.permission).toBe("write");
     expect(urls[0]).toContain("/repos/owner/repo/collaborators/alice/permission");
+  });
+});
+
+describe("checkRunState", () => {
+  test("maps GitHub Actions conclusions", () => {
+    expect(checkRunState("in_progress", null)).toBe("pending");
+    expect(checkRunState("queued", null)).toBe("pending");
+    expect(checkRunState("completed", "failure")).toBe("failure");
+    expect(checkRunState("completed", "timed_out")).toBe("failure");
+    expect(checkRunState("completed", "startup_failure")).toBe("failure");
+    expect(checkRunState("completed", "action_required")).toBe("pending");
+    expect(checkRunState("completed", "skipped")).toBe("success");
+    expect(checkRunState("completed", "success")).toBe("success");
+    expect(checkRunState("completed", "cancelled")).toBe("success");
+    expect(toCheckFromCheckRun({ id: 4, name: "checks", status: "completed", conclusion: "failure" })).toMatchObject({
+      context: "checks",
+      status: "failure",
+      jobId: 4,
+    });
   });
 });

@@ -32,8 +32,9 @@ import {
   validateYield,
 } from "./dependencies.ts";
 import { type Engine, throwIfEngineFailed } from "./engine.ts";
+import { registeredEngine } from "./engine_dispatch.ts";
 import type { FollowUpResult } from "./followup.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, openCodeEngine } from "./git.ts";
+import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
@@ -160,7 +161,7 @@ export async function implementIssue(
   const branch = issueBranchName(opts.job.issueNumber, opts.job.title);
   const claimed = await beginClaimedWorktree({
     ...opts,
-    fallbackEngine: openCodeEngine,
+    fallbackEngine: registeredEngine,
     branch,
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
