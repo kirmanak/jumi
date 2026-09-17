@@ -8,10 +8,28 @@ describe("parseRunnersCatalog", () => {
   test("unknown type fails closed", () => {
     expect(() =>
       parseRunnersCatalog({
-        runners: { x: { type: "claude", model: "claude-opus" } },
+        runners: { x: { type: "hermes", model: "claude-opus" } },
         chain: ["x"],
       })
-    ).toThrow("Unknown runner type: claude");
+    ).toThrow("Unknown runner type: hermes");
+  });
+
+  test("registers type claude with model and optional effort", () => {
+    expect(
+      parseRunnersCatalog({
+        runners: {
+          spark: { type: "claude", model: "opus", effort: "high" },
+          grok: { type: "opencode", model: "opencode/grok-4.6" },
+        },
+        chain: ["spark", "grok"],
+      })
+    ).toEqual({
+      runners: {
+        spark: { type: "claude", model: "opus", effort: "high" },
+        grok: { type: "opencode", model: "opencode/grok-4.6" },
+      },
+      chain: ["spark", "grok"],
+    });
   });
 
   test("empty chain, missing runner, and duplicate chain fail closed", () => {

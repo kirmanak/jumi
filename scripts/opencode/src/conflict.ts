@@ -19,8 +19,8 @@ import {
   worktreePorcelain,
 } from "./claimed_worktree.ts";
 import { throwIfEngineFailed } from "./engine.ts";
+import { registeredEngine } from "./engine_dispatch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
-import { openCodeEngine } from "./git.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, type HelmRunner, type ImplementOptions, type OpenCodeRunner } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
@@ -494,7 +494,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const timeoutMs = opts.timeoutMs ?? CONFLICT_TIMEOUT_MS;
   const claimed = await beginClaimedWorktree({
     ...opts,
-    fallbackEngine: openCodeEngine,
+    fallbackEngine: registeredEngine,
     forgetTerminal: true,
   });
   if (isClaimedEarlyResult(claimed)) return claimed;

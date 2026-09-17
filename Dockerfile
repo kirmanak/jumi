@@ -6,6 +6,7 @@ FROM public.ecr.aws/docker/library/debian:bookworm-slim@sha256:88200866dfff7ea7f
 
 ARG BUN_VERSION
 ARG OPENCODE_VERSION=1.15.5
+ARG CLAUDE_VERSION=2.1.274
 ARG HELM_VERSION=3.18.6
 ARG BUN_VERSION=1.2.5
 ARG TARGETARCH
@@ -23,6 +24,16 @@ RUN set -eu; \
     curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-${platform}.tar.gz" -o "${tmp_dir}/opencode.tar.gz"; \
     tar -xzf "${tmp_dir}/opencode.tar.gz" -C "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/opencode" /usr/local/bin/opencode; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) platform="linux-x64" ;; \
+      arm64) platform="linux-arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/${platform}/claude" -o "${tmp_dir}/claude"; \
+    install -m 755 "${tmp_dir}/claude" /usr/local/bin/claude; \
     rm -rf "${tmp_dir}"
 RUN set -eu; \
     case "${TARGETARCH:-amd64}" in \
@@ -71,6 +82,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=tools /usr/local/bin/opencode /usr/local/bin/opencode
+COPY --from=tools /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 RUN git --version \
   && rg --version \
@@ -79,7 +91,8 @@ RUN git --version \
   && python3 --version \
   && helm version --short \
   && bun --version \
-  && /usr/local/bin/opencode version
+  && /usr/local/bin/opencode version \
+  && /usr/local/bin/claude --version
 
 WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./

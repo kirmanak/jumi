@@ -477,6 +477,44 @@ describe("withEngineChain", () => {
     expect(models).toEqual([spark.model, grok.model]);
   });
 
+  test("claude then grok hops on auth then unavailable", async () => {
+    const claude = {
+      name: "claude",
+      type: "claude" as const,
+      model: "opus",
+      effort: "high",
+    };
+    const grok = {
+      name: "grok",
+      type: "opencode" as const,
+      model: "opencode/grok-4.6",
+      variant: "high",
+    };
+    const calls: Array<{ type?: string; model: string; variant?: string; effort?: string; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({
+        type: opts.type,
+        model: opts.model,
+        variant: opts.variant,
+        effort: opts.effort,
+        hop: opts.hop,
+      });
+      if (opts.type === "claude") {
+        return { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true };
+      }
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [claude, grok] })({
+      model: claude.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(grok.model));
+    expect(calls).toEqual([
+      { type: "claude", model: claude.model, variant: undefined, effort: "high", hop: undefined },
+      { type: "opencode", model: grok.model, variant: "high", effort: undefined, hop: true },
+    ]);
+  });
+
   test("exhausting the chain fails closed", async () => {
     const models: string[] = [];
     const engine: Engine = async (opts) => {

@@ -3,7 +3,7 @@ import { EngineFailedError } from "./engine.ts";
 
 export const AUTH_DEATH_REASON = "provider auth death";
 
-const AUTH_STDERR_RE = /invalid_grant|missing API key|API key not/i;
+const AUTH_STDERR_RE = /invalid_grant|missing API key|API key not|not logged in|authentication_failed/i;
 
 export function looksLikeProviderAuthDeath(text: string): boolean {
   return AUTH_STDERR_RE.test(text) || text.includes(AUTH_DEATH_REASON);

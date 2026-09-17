@@ -76,6 +76,7 @@ jobs:
           build-args: |
             BUN_VERSION=${{ env.BUN_VERSION }}
             OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            CLAUDE_VERSION=${{ env.CLAUDE_VERSION }}
             HELM_VERSION=${{ env.HELM_VERSION }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
             VERSION=${{ env.VERSION }}
@@ -129,6 +130,7 @@ jobs:
           fi
           echo "Verified worker env: ${config} ${instance}"
 
+          docker run --rm "${TEST_TAG}" claude --version
           docker run --rm "${TEST_TAG}" test -f /app/review-skills/gitea-pull-review/SKILL.md
           echo "Verified gitea-pull-review skill"
 
@@ -175,6 +177,7 @@ jobs:
           build-args: |
             BUN_VERSION=${{ env.BUN_VERSION }}
             OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            CLAUDE_VERSION=${{ env.CLAUDE_VERSION }}
             HELM_VERSION=${{ env.HELM_VERSION }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
             VERSION=${{ env.VERSION }}

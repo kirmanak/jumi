@@ -37,8 +37,8 @@ import {
   writeConflictLatch,
 } from "./conflict.ts";
 import { throwIfEngineFailed } from "./engine.ts";
+import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
-import { openCodeEngine } from "./git.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { buildTaskMarkdown, type ImplementOptions } from "./implement.ts";
@@ -779,7 +779,7 @@ export async function implementFollowUp(
   const conflictTimeoutMs = opts.conflictTimeoutMs ?? CONFLICT_TIMEOUT_MS;
   const claimed = await beginClaimedWorktree({
     ...opts,
-    fallbackEngine: openCodeEngine,
+    fallbackEngine: registeredEngine,
     forgetTerminal: true,
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
