@@ -2,6 +2,12 @@ import { isInfraRetryMarker } from "./infra.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
+import {
+  ISSUE_SKIP_LATCHES_SCHEMA_SQL,
+  MemorySkipLatchStore,
+  PgSkipLatchStore,
+  type SkipLatchStore,
+} from "./skip_latches.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
@@ -97,6 +103,7 @@ export interface ReviewJobStore {
   countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>>;
   oldestQueuedAgeSeconds(now?: Date): Promise<Record<JobKind, number>>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
+  readonly skipLatches: SkipLatchStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -178,16 +185,6 @@ WHERE id IN (
 CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
   ON review_jobs (owner, repo, issue_number)
   WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS issue_skip_latches (
-  owner TEXT NOT NULL,
-  repo TEXT NOT NULL,
-  issue_number INTEGER NOT NULL,
-  generation INTEGER NOT NULL DEFAULT 0,
-  skip_reason TEXT,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (owner, repo, issue_number)
-);
 `;
 
 function isBackoffMarker(error: string | null | undefined): boolean {
@@ -373,9 +370,10 @@ function mapIssueSkipLatch(row: { generation: unknown; skip_reason: unknown }): 
 
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
+  readonly skipLatches = new MemorySkipLatchStore();
   private nextId = 1;
   private chain = Promise.resolve();
-  private readonly skipLatches = new Map<string, IssueSkipLatch>();
+  private readonly issueSkipLatches = new Map<string, IssueSkipLatch>();
 
   private locked<T>(fn: () => T | Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);
@@ -740,17 +738,18 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
     return this.locked(() => {
-      const latch = this.skipLatches.get(issueSkipLatchKey(owner, repo, issueNumber));
+      const latch = this.issueSkipLatches.get(issueSkipLatchKey(owner, repo, issueNumber));
       return latch ? { ...latch } : emptyIssueSkipLatch();
     });
   }
 
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {
-    return this.locked(() => {
+    return this.locked(async () => {
       const key = issueSkipLatchKey(owner, repo, issueNumber);
-      const current = this.skipLatches.get(key);
+      const current = this.issueSkipLatches.get(key);
       const next: IssueSkipLatch = { generation: (current?.generation ?? 0) + 1, skipReason: null };
-      this.skipLatches.set(key, next);
+      this.issueSkipLatches.set(key, next);
+      await this.skipLatches.delete({ owner, repo, issueNumber });
       return { ...next };
     });
   }
@@ -758,8 +757,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void> {
     return this.locked(() => {
       const key = issueSkipLatchKey(owner, repo, issueNumber);
-      const current = this.skipLatches.get(key);
-      this.skipLatches.set(key, { generation: current?.generation ?? 0, skipReason: reason });
+      const current = this.issueSkipLatches.get(key);
+      this.issueSkipLatches.set(key, { generation: current?.generation ?? 0, skipReason: reason });
     });
   }
 }
@@ -871,11 +870,16 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
 }
 
 export class PgReviewJobStore implements ReviewJobStore {
-  constructor(private readonly sql: SqlClient) {}
+  readonly skipLatches: PgSkipLatchStore;
+
+  constructor(private readonly sql: SqlClient) {
+    this.skipLatches = new PgSkipLatchStore(sql);
+  }
 
   async migrate(): Promise<void> {
     try {
       await this.sql.unsafe(REVIEW_JOBS_SCHEMA_SQL);
+      await this.sql.unsafe(ISSUE_SKIP_LATCHES_SCHEMA_SQL);
     } catch (err) {
       wrapSqlError(err);
     }
@@ -1369,7 +1373,9 @@ export class PgReviewJobStore implements ReviewJobStore {
         `INSERT INTO issue_skip_latches (owner, repo, issue_number, generation, skip_reason, updated_at)
          VALUES ($1, $2, $3, 1, NULL, NOW())
          ON CONFLICT (owner, repo, issue_number)
-         DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL, updated_at = NOW()
+         DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL,
+           followup = '{}'::jsonb, conflict = '{}'::jsonb, ci = '{}'::jsonb, stuck = '{}'::jsonb,
+           updated_at = NOW()
          RETURNING generation, skip_reason`,
         [owner, repo, issueNumber]
       )

@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
-import { CONFLICT_TIMEOUT_MS, implementConflict, writeConflictState } from "../src/conflict.ts";
+import { CONFLICT_TIMEOUT_MS, implementConflict, readConflictState, writeConflictState } from "../src/conflict.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -220,7 +220,7 @@ describe("implementConflict", () => {
       });
       expect(result).toEqual({ status: "up-to-date" });
       expect(api.comments).toEqual([]);
-      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+      expect(await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12))).toMatchObject({ round: 0 });
     });
   });
 
@@ -262,7 +262,7 @@ describe("implementConflict", () => {
         gitCalls.some((args) => args[0] === "merge" && args.includes("--no-ff") && args.includes("origin/main"))
       ).toBe(true);
       expect(gitCalls.some((args) => args[0] === "merge" && args.includes("--abort"))).toBe(true);
-      expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+      expect(await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12))).toMatchObject({ round: 0 });
     });
   });
 
@@ -655,7 +655,7 @@ describe("implementConflict", () => {
       expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
       expect(api.comments.at(-1)).toContain("Pushed merge of main.");
       expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
-      const state = JSON.parse(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
       expect(state.lastHeadSha).toBe("headsha");
       expect(state.lastBaseSha).toBe("basesha");
       expect(state.round).toBe(1);
@@ -995,7 +995,7 @@ describe("implementConflict", () => {
             logger: () => undefined,
           })
         ).rejects.toThrow();
-        expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
+        expect(await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12))).toMatchObject({ round: 0 });
         expect(api.comments.at(-1)).toContain("Jumi failed:");
         expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
       });
@@ -1030,7 +1030,7 @@ describe("implementConflict", () => {
           logger: () => undefined,
         })
       ).rejects.toThrow("opencode crashed");
-      const state = JSON.parse(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
       expect(state.lastHeadSha).toBe("headsha");
       expect(state.lastBaseSha).toBe("basesha");
       expect(state.round).toBe(1);

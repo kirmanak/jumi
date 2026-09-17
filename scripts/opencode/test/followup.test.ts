@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { readCiState } from "../src/ci.ts";
 import {
   ciStatePath,
@@ -25,6 +25,7 @@ import {
   parsePrHeadChangedReason,
   pickLatestJumiFinding,
   pickLatestJumiReview,
+  readFollowUpState,
   writeFollowUpState,
 } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
@@ -259,9 +260,7 @@ describe("implementFollowUp", () => {
         from: "oldsha",
         to: "newsha",
       });
-      await expect(readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
+      expect(await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12))).toMatchObject({ round: 0 });
     });
   });
 
@@ -884,6 +883,50 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("leftover HOME follow-up files are unset, not a second source of truth", async () => {
+    await withDirs(async (home, workdir) => {
+      const path = followUpStatePath(home, "kirmanak", "demo", 12);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(
+        path,
+        `${JSON.stringify({
+          prNumber: 127,
+          round: 3,
+          lastHeadSha: "abc",
+          handledCommentIds: [],
+          handledReviewIds: [],
+          handledReviewFindings: [],
+          updatedAt: "2026-05-23T00:00:00Z",
+        })}\n`
+      );
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api: makeApi(),
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return " M src/demo.ts";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
+    });
+  });
+
   test("same finding 4× → stuck sticky, no OpenCode, assignment stays", async () => {
     await withDirs(async (home, workdir) => {
       const hash = fingerprintFollowUpText("please fix the tests")!;
@@ -1293,7 +1336,7 @@ describe("implementFollowUp", () => {
       expect(openCode).toBe(1);
       expect(api.comments.some((body) => body.includes("Jumi is addressing CI failure."))).toBe(true);
       expect(api.comments.some((body) => body.includes("stuck: too many follow-up rounds"))).toBe(false);
-      const followState = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const followState = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
       expect(followState.round).toBe(3);
       expect(followState.handledCommentIds).not.toContain(55);
     });
@@ -1521,7 +1564,7 @@ describe("implementFollowUp", () => {
       ).rejects.toThrow("opencode exploded");
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
       expect(api.comments.at(-1)).toContain("Jumi failed");
-      const state = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const state = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
       expect(state.round).toBe(1);
       expect(state.handledCommentIds).not.toContain(55);
     });
@@ -1677,7 +1720,7 @@ describe("implementFollowUp", () => {
       expect(conflict.round).toBe(1);
       expect(conflict.lastHeadSha).toBe("headsha");
       expect(conflict.lastBaseSha).toBe("basesha");
-      const followup = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const followup = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
       expect(followup.round).toBe(1);
     });
   });
@@ -1962,7 +2005,7 @@ describe("implementFollowUp", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "no-changes" });
-      const state = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const state = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
       expect(state.handledCommentIds).not.toContain(38022);
       expect(state.handledReviewFindings).toEqual([{ id: 38022, sha }]);
     });
@@ -2009,7 +2052,7 @@ describe("implementFollowUp", () => {
       expect(kind).toBe("follow-up");
       expect(result.status).toBe("no-changes");
       expect(api.comments.some((body) => body.includes("Jumi is addressing CI failure."))).toBe(true);
-      const followState = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const followState = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
       expect(followState.round).toBe(0);
     });
   });
@@ -2069,7 +2112,7 @@ describe("implementFollowUp", () => {
       expect(result.status).toBe("no-changes");
       expect(openCode).toBe(1);
       expect(api.comments.some((body) => body.includes("Jumi is addressing CI failure."))).toBe(true);
-      const followState = JSON.parse(await readFile(followUpStatePath(home, "kirmanak", "demo", 12), "utf8"));
+      const followState = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
       expect(followState.round).toBe(1);
     });
   });
