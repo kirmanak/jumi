@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
@@ -793,6 +794,41 @@ describe("processEngineTick", () => {
       expect(store.rows[0]?.leasedUntil).toBeGreaterThan(Date.now());
       expect(logs.some((line) => line.includes("infra-retry") && line.includes("n=1"))).toBe(true);
       expect(logs.some((line) => line.includes("requeued") && line.includes("attempt="))).toBe(false);
+    });
+  });
+
+  test("auth death does not infra-retry", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const logs: string[] = [];
+      const api = makeApi();
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        api,
+        "engine-1",
+        {
+          gitRunner: frozenGit(),
+          workspacePreparer: async () => undefined,
+          breaker: new InfraCircuitBreaker(),
+          openCodeRunner: async () => ({
+            status: "exit",
+            exitCode: 1,
+            auth: true,
+            message: providerAuthDeathMessage(),
+          }),
+        },
+        (message) => logs.push(message)
+      );
+      expect(logs.some((line) => line.includes("infra-retry"))).toBe(false);
+      expect(store.rows[0]?.state).toBe("failed");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(api.statuses.at(-1)).toMatchObject({
+        state: "failure",
+        description: `Jumi review failed: ${providerAuthDeathMessage()}`,
+      });
+      expect(api.statuses.at(-1)?.description).not.toContain("invalid_grant");
     });
   });
 

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, SECRET_ENV_KEYS, SECRETS_FILE_ENV, scrubSecretEnv } from "../src/config.ts";
+import { RUNNERS_FILE_ENV } from "../src/runners.ts";
 import { validateCloneUrl } from "../src/workspace.ts";
 
 describe("loadConfig", () => {
@@ -82,6 +83,67 @@ describe("loadConfig", () => {
       "anthropic/claude-sonnet-4-6"
     );
     expect(loadConfig({ ...required, OPENCODE_FALLBACK_VARIANT: "high" }).fallbackVariant).toBe("high");
+  });
+
+  test("synthesizes a 1-entry OpenCode chain from OPENCODE_MODEL when fallback is unset", () => {
+    const config = loadConfig(required);
+    expect(config.chain).toEqual(["primary"]);
+    expect(config.runners).toEqual({ primary: { type: "opencode", model: "openai/gpt-5.5" } });
+    expect(config.model).toBe("openai/gpt-5.5");
+    expect(config.fallbackModel).toBeUndefined();
+  });
+
+  test("synthesizes a 2-entry OpenCode chain from OPENCODE_MODEL and FALLBACK_*", () => {
+    const config = loadConfig({
+      ...required,
+      OPENCODE_MODEL: "provider-a/model-one",
+      OPENCODE_VARIANT: "xhigh",
+      OPENCODE_FALLBACK_MODEL: "provider-b/model-two",
+      OPENCODE_FALLBACK_VARIANT: "high",
+    });
+    expect(config.chain).toEqual(["primary", "fallback"]);
+    expect(config.runners).toEqual({
+      primary: { type: "opencode", model: "provider-a/model-one", variant: "xhigh" },
+      fallback: { type: "opencode", model: "provider-b/model-two", variant: "high" },
+    });
+    expect(config.model).toBe("provider-a/model-one");
+    expect(config.variant).toBe("xhigh");
+    expect(config.fallbackModel).toBe("provider-b/model-two");
+    expect(config.fallbackVariant).toBe("high");
+  });
+
+  test("JUMI_RUNNERS_FILE named runners override OPENCODE_* and unknown type fails closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jumi-runners-"));
+    const file = join(dir, "runners.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        runners: {
+          first: { type: "opencode", model: "provider-a/one", variant: "xhigh" },
+          second: { type: "opencode", model: "provider-b/two", variant: "high" },
+        },
+        chain: ["first", "second"],
+      })
+    );
+    const config = loadConfig({
+      ...required,
+      OPENCODE_MODEL: "openai/gpt-5.5",
+      OPENCODE_FALLBACK_MODEL: "ignored/fallback",
+      [RUNNERS_FILE_ENV]: file,
+    });
+    expect(config.chain).toEqual(["first", "second"]);
+    expect(config.model).toBe("provider-a/one");
+    expect(config.variant).toBe("xhigh");
+    expect(config.fallbackModel).toBe("provider-b/two");
+    expect(config.fallbackVariant).toBe("high");
+    expect(config.runners).toEqual({
+      first: { type: "opencode", model: "provider-a/one", variant: "xhigh" },
+      second: { type: "opencode", model: "provider-b/two", variant: "high" },
+    });
+
+    const bad = join(dir, "bad.json");
+    writeFileSync(bad, JSON.stringify({ runners: { x: { type: "claude", model: "claude" } }, chain: ["x"] }));
+    expect(() => loadConfig({ ...required, [RUNNERS_FILE_ENV]: bad })).toThrow("Unknown runner type");
   });
 
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {

@@ -22,6 +22,7 @@ import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
+import { orderedRunners } from "./runners.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { isSkipLatchReason } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
@@ -74,6 +75,7 @@ export function createIssueQueue(
           variant: config.variant,
           fallbackModel: config.fallbackModel,
           fallbackVariant: config.fallbackVariant,
+          chain: orderedRunners(config),
           home: config.home,
           skipLatches,
           workdir: config.workdir,
@@ -363,6 +365,7 @@ export async function processWorkerTick(
       variant: config.variant,
       fallbackModel: config.fallbackModel,
       fallbackVariant: config.fallbackVariant,
+      chain: orderedRunners(config),
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;

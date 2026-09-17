@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
+import type { NamedRunner } from "./runners.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 
@@ -15,6 +16,10 @@ export interface ModelHopOptions {
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   logger?: (message: string) => void;
+}
+
+export interface EngineChainOptions extends ModelHopOptions {
+  chain?: NamedRunner[];
 }
 
 export function looksLikeProviderUnavailable(text: string): boolean {
@@ -38,6 +43,7 @@ export function shouldHopInsteadOfQuotaStuck(primaryModel: string, fallbackModel
 export function isProviderUnavailableResult(result: EngineResult): boolean {
   if (result.status !== "exit") return false;
   if (result.infra === true) return false;
+  if (result.auth === true) return false;
   if (result.exitCode === 143) return false;
   return looksLikeProviderUnavailable(result.message ?? "");
 }
@@ -74,66 +80,106 @@ function isQuotaStuckResult(result: EngineResult): boolean {
   return result.status === "stuck" && isQuotaText(result.message);
 }
 
-function shouldHopFromResult(result: EngineResult, opts: EngineRunOptions, fallbackModel: string): boolean {
+function shouldHopFromResult(
+  result: EngineResult,
+  opts: EngineRunOptions,
+  currentModel: string,
+  nextModel: string
+): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted) return false;
+  if (result.auth === true) return true;
   if (isProviderUnavailableResult(result)) return true;
-  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(opts.model, fallbackModel);
+  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
 }
 
-function shouldHopFromError(err: unknown, opts: EngineRunOptions, fallbackModel: string): boolean {
+function shouldHopFromError(err: unknown, opts: EngineRunOptions, currentModel: string, nextModel: string): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted || isAbortError(err)) return false;
   if (!(err instanceof EngineFailedError) || err.infra) return false;
-  if (isQuotaError(err)) return shouldHopInsteadOfQuotaStuck(opts.model, fallbackModel);
+  if (err.auth) return true;
+  if (isQuotaError(err)) return shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
   return looksLikeProviderUnavailable(err.message);
 }
 
-export function withModelHop(engine: Engine, hop: ModelHopOptions): Engine {
-  const fallbackModel = hop.fallbackModel;
-  if (!fallbackModel) return engine;
-
-  let hopped = false;
-
-  const spawnFallback = async (opts: EngineRunOptions): Promise<EngineResult> => {
-    const log = hop.logger ?? opts.logger;
-    if (log) {
-      logDiagnostic(log, "opencode_hop", {
-        review: opts.reviewLabel ?? null,
-        from_model: opts.model,
-        to_model: fallbackModel,
-        hop: true,
-      });
-    }
-    await clearOpenCodeSession(opts.workdir);
-    hopped = true;
-    return engine({
-      ...opts,
-      model: fallbackModel,
-      variant: hop.fallbackVariant,
-      continueSession: false,
+async function beginHop(
+  hop: EngineChainOptions,
+  opts: EngineRunOptions,
+  from: NamedRunner,
+  to: NamedRunner
+): Promise<void> {
+  const log = hop.logger ?? opts.logger;
+  if (log) {
+    logDiagnostic(log, "opencode_hop", {
+      review: opts.reviewLabel ?? null,
+      from_model: from.model,
+      to_model: to.model,
       hop: true,
     });
+  }
+  await clearOpenCodeSession(opts.workdir);
+}
+
+function lazyChain(opts: EngineRunOptions, hop: EngineChainOptions): NamedRunner[] {
+  return [
+    { name: "primary", type: "opencode", model: opts.model, variant: opts.variant },
+    { name: "fallback", type: "opencode", model: hop.fallbackModel!, variant: hop.fallbackVariant },
+  ];
+}
+
+export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
+  if ((!hop.chain || hop.chain.length <= 1) && !hop.fallbackModel) return engine;
+
+  let chain = hop.chain && hop.chain.length >= 2 ? hop.chain : undefined;
+  let index = 0;
+
+  const runnersFor = (opts: EngineRunOptions): NamedRunner[] => {
+    if (chain) return chain;
+    chain = lazyChain(opts, hop);
+    return chain;
   };
 
   return async (opts: EngineRunOptions): Promise<EngineResult> => {
-    if (hopped) {
+    const runners = runnersFor(opts);
+    const current = runners[index]!;
+
+    if (index > 0) {
       return engine({
         ...opts,
-        model: fallbackModel,
-        variant: hop.fallbackVariant,
+        model: current.model,
+        variant: current.variant,
       });
     }
 
-    let result: EngineResult;
-    try {
-      result = await engine(opts);
-    } catch (err) {
-      if (!shouldHopFromError(err, opts, fallbackModel)) throw err;
-      if (!(await leaseAllowsHop(hop, opts.timeoutMs))) throw err;
-      return spawnFallback(opts);
-    }
+    while (true) {
+      const runner = runners[index]!;
+      const hopSpawn = index > 0;
+      const runOpts: EngineRunOptions = {
+        ...opts,
+        model: runner.model,
+        variant: runner.variant,
+        ...(hopSpawn ? { continueSession: false, hop: true } : {}),
+      };
 
-    if (!shouldHopFromResult(result, opts, fallbackModel)) return result;
-    if (!(await leaseAllowsHop(hop, opts.timeoutMs))) return result;
-    return spawnFallback(opts);
+      let result: EngineResult;
+      try {
+        result = await engine(runOpts);
+      } catch (err) {
+        const next = runners[index + 1];
+        if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) throw err;
+        if (!(await leaseAllowsHop(hop, opts.timeoutMs))) throw err;
+        await beginHop(hop, opts, runner, next);
+        index++;
+        continue;
+      }
+
+      const next = runners[index + 1];
+      if (!next || !shouldHopFromResult(result, opts, runner.model, next.model)) return result;
+      if (!(await leaseAllowsHop(hop, opts.timeoutMs))) return result;
+      await beginHop(hop, opts, runner, next);
+      index++;
+    }
   };
+}
+
+export function withModelHop(engine: Engine, hop: ModelHopOptions): Engine {
+  return withEngineChain(engine, hop);
 }

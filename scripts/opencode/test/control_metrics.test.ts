@@ -24,11 +24,15 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 describe("classifyOpenCodeExit", () => {
-  test("maps timeout, infra, 143, ok, and the rest to incomplete", () => {
+  test("maps timeout, infra, 143, ok, auth, and the rest to incomplete", () => {
     expect(classifyOpenCodeExit({ status: "timeout", exitCode: 143 })).toBe("timeout");
     expect(classifyOpenCodeExit({ status: "exit", exitCode: 7, infra: true })).toBe("infra");
     expect(classifyOpenCodeExit({ status: "exit", exitCode: 143 })).toBe("143");
     expect(classifyOpenCodeExit({ status: "ok", exitCode: 0 })).toBe("ok");
+    expect(classifyOpenCodeExit({ status: "exit", exitCode: 1, auth: true })).toBe("auth");
+    expect(classifyOpenCodeExit({ status: "timeout", auth: true })).toBe("timeout");
+    expect(classifyOpenCodeExit({ status: "exit", exitCode: 143, auth: true })).toBe("143");
+    expect(classifyOpenCodeExit({ status: "stuck", auth: true, quota: "resetting" })).toBe("incomplete");
     expect(classifyOpenCodeExit({ status: "stuck" })).toBe("incomplete");
     expect(classifyOpenCodeExit({ status: "exit", exitCode: 1 })).toBe("incomplete");
   });
@@ -77,6 +81,7 @@ describe("run metrics", () => {
     expect(text).toContain('jumi_jobs_completed_total{kind="conflict",result="failed"} 0');
     expect(text).toContain('jumi_opencode_exits_total{kind="review",class="ok"} 0');
     expect(text).toContain('jumi_opencode_exits_total{kind="implement",class="143"} 0');
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 0');
     expect(text).not.toContain("jumi_job_duration_seconds_bucket");
     expect(text).not.toContain("owner=");
     expect(text).not.toContain("repo=");
@@ -86,6 +91,7 @@ describe("run metrics", () => {
     recordOpenCodeRun("review", { status: "ok", exitCode: 0, durationMs: 90_000 });
     recordOpenCodeRun("review", { status: "timeout", exitCode: 143, durationMs: 1_200_000 });
     recordOpenCodeRun("follow-up", { status: "exit", exitCode: 1, infra: true, durationMs: 400 });
+    recordOpenCodeRun("review", { status: "exit", exitCode: 1, auth: true, durationMs: 8_000 });
     recordJobCompleted("review", "succeeded");
     recordJobCompleted("implement", "skipped");
 
@@ -95,6 +101,9 @@ describe("run metrics", () => {
     expect(text).toContain('jumi_opencode_exits_total{kind="review",class="ok"} 1');
     expect(text).toContain('jumi_opencode_exits_total{kind="review",class="timeout"} 1');
     expect(text).toContain('jumi_opencode_exits_total{kind="follow-up",class="infra"} 1');
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
+    expect(text).not.toContain("hostname=");
+    expect(text).not.toContain("invalid_grant");
     expect(text).toContain('jumi_job_duration_seconds_bucket{kind="review",result="ok",le="60"} 0');
     expect(text).toContain('jumi_job_duration_seconds_bucket{kind="review",result="ok",le="120"} 1');
     expect(text).toContain('jumi_job_duration_seconds_count{kind="review",result="ok"} 1');

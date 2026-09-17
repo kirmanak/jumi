@@ -168,8 +168,12 @@ describe("reviewer image permissions", () => {
   });
 
   test("does not pull base images from Docker Hub", () => {
-    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim AS tools/);
-    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim AS runtime/);
+    expect(dockerfile).toMatch(
+      /FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS tools/
+    );
+    expect(dockerfile).toMatch(
+      /FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS runtime/
+    );
     expect(dockerfile).toMatch(/github\.com\/oven-sh\/bun\/releases\/download\/bun-v\$\{BUN_VERSION\}/);
     expect(dockerfile).not.toMatch(/oven\/bun/);
     expect(dockerfile).not.toMatch(/docker\.io/);
@@ -206,7 +210,9 @@ describe("worker image JDK", () => {
     expect(dockerfile).not.toMatch(/^FROM debian:/m);
     expect(dockerfile).not.toMatch(/^FROM oven\/bun:/m);
     expect(dockerfile).not.toMatch(/^FROM eclipse-temurin:/m);
-    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim AS tools/);
+    expect(dockerfile).toMatch(
+      /FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS tools/
+    );
     expect(dockerfile).toMatch(/bun-v\$\{BUN_VERSION\}\/bun-\$\{bun_platform\}\.zip/);
   });
 });

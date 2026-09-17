@@ -66,6 +66,25 @@ describe("classifyOpenCodeInfra", () => {
       })
     ).toBe(false);
   });
+
+  test("auth death is not infra even when short or slow", () => {
+    expect(
+      classifyOpenCodeInfra({
+        durationMs: 400,
+        stderr: "missing API key",
+        dbBefore: null,
+        dbAfter: null,
+      })
+    ).toBe(false);
+    expect(
+      classifyOpenCodeInfra({
+        durationMs: 8_000,
+        stderr: 'oauth token refresh failed: {"error":"invalid_grant"}',
+        dbBefore: null,
+        dbAfter: null,
+      })
+    ).toBe(false);
+  });
 });
 
 describe("isInfraFailure", () => {
@@ -77,11 +96,17 @@ describe("isInfraFailure", () => {
     expect(isInfraFailure(new Error("cannot save result for job 1"))).toBe(false);
   });
 
-  test("looksLikeInfraStderr matches spawn and missing API key", () => {
+  test("looksLikeInfraStderr matches spawn and not auth", () => {
     expect(looksLikeInfraStderr("spawn opencode ENOENT")).toBe(true);
     expect(looksLikeInfraStderr('Executable not found in $PATH: "opencode"')).toBe(true);
-    expect(looksLikeInfraStderr("missing API key")).toBe(true);
+    expect(looksLikeInfraStderr("missing API key")).toBe(false);
+    expect(looksLikeInfraStderr("invalid_grant")).toBe(false);
     expect(looksLikeInfraStderr("opencode exited with code 1:\nbad things")).toBe(false);
+  });
+
+  test("raw missing-key errors are not infra", () => {
+    expect(isInfraFailure(new Error("missing API key"))).toBe(false);
+    expect(isInfraFailure(new EngineFailedError("missing API key", false, { auth: true }))).toBe(false);
   });
 });
 
