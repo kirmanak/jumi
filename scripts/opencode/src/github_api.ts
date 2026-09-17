@@ -152,9 +152,22 @@ type GithubJob = {
   run_id?: number;
 };
 
+type GithubCheckRun = {
+  id: number;
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  html_url?: string;
+  details_url?: string;
+  started_at?: string;
+  completed_at?: string;
+  output?: { title?: string | null; summary?: string | null };
+};
+
 type GithubWorkflowRun = {
   id: number;
   head_branch?: string;
+  head_sha?: string;
 };
 
 type ReviewThreadNode = {
@@ -317,6 +330,21 @@ export function toPullFile(file: GithubFile): PullFile {
   };
 }
 
+export function checkRunState(status?: string, conclusion?: string | null): CheckState {
+  const runStatus = (status ?? "").toLowerCase();
+  if (runStatus && runStatus !== "completed") return "pending";
+  switch ((conclusion ?? "").toLowerCase()) {
+    case "failure":
+    case "timed_out":
+    case "startup_failure":
+      return "failure";
+    case "action_required":
+      return "pending";
+    default:
+      return "success";
+  }
+}
+
 export function toCheck(status: GithubStatus): Check {
   return {
     id: status.id,
@@ -328,6 +356,35 @@ export function toCheck(status: GithubStatus): Check {
     created_at: status.created_at,
     updated_at: status.updated_at,
     url: status.url,
+  };
+}
+
+export function toCheckFromCheckRun(run: GithubCheckRun): Check {
+  const state = checkRunState(run.status, run.conclusion);
+  return {
+    id: run.id,
+    context: run.name,
+    state,
+    status: state,
+    description: run.output?.title ?? run.output?.summary ?? run.conclusion ?? "",
+    target_url: run.html_url ?? run.details_url,
+    created_at: run.started_at,
+    updated_at: run.completed_at ?? run.started_at,
+    url: run.html_url,
+    jobId: run.id,
+  };
+}
+
+function toCheckFromActionJob(job: GithubJob): Check {
+  const state = checkRunState(job.status, job.conclusion);
+  return {
+    id: job.id,
+    context: job.name,
+    state,
+    status: state,
+    description: job.conclusion ?? job.status ?? "",
+    target_url: job.html_url,
+    jobId: job.id,
   };
 }
 
@@ -889,6 +946,47 @@ export class GithubAPI {
       `/repos/${this.repoPath(owner, repo)}/commits/${encodeURIComponent(sha)}/statuses`
     );
     return statuses.map(toCheck);
+  }
+
+  async listCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]> {
+    try {
+      return await this.listGithubCheckRuns(owner, repo, sha);
+    } catch {
+      return this.checkRunsFromActionJobs(owner, repo, sha);
+    }
+  }
+
+  private async listGithubCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]> {
+    const results: Check[] = [];
+    let page = 1;
+    while (page <= MAX_PAGES) {
+      const body = await this.get<{ check_runs?: GithubCheckRun[] }>(
+        `/repos/${this.repoPath(owner, repo)}/commits/${encodeURIComponent(sha)}/check-runs?filter=latest&per_page=${PAGE_SIZE}&page=${page}`
+      );
+      const batch = Array.isArray(body?.check_runs) ? body.check_runs : [];
+      results.push(...batch.map(toCheckFromCheckRun));
+      if (batch.length !== PAGE_SIZE) break;
+      page += 1;
+    }
+    return results;
+  }
+
+  private async checkRunsFromActionJobs(owner: string, repo: string, sha: string): Promise<Check[]> {
+    const body = await this.get<{ workflow_runs?: GithubWorkflowRun[] }>(
+      `/repos/${this.repoPath(owner, repo)}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=${PAGE_SIZE}&page=1`
+    );
+    const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
+    const checks: Check[] = [];
+    for (const run of runs) {
+      const page = await this.get<{ jobs?: GithubJob[] }>(
+        `/repos/${this.repoPath(owner, repo)}/actions/runs/${run.id}/jobs?per_page=100`
+      );
+      const batch = Array.isArray(page?.jobs) ? page.jobs : [];
+      for (const job of batch) {
+        checks.push(toCheckFromActionJob(job));
+      }
+    }
+    return checks;
   }
 
   async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]> {

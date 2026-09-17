@@ -136,6 +136,7 @@ export interface Check {
   created_at?: string;
   updated_at?: string;
   url?: string;
+  jobId?: number;
 }
 
 export interface CheckPayload {
@@ -227,6 +228,7 @@ export interface Forge {
   ): Promise<PullReview>;
   createCommitStatus(owner: string, repo: string, sha: string, status: CheckPayload): Promise<CheckPayload>;
   listCommitStatuses(owner: string, repo: string, sha: string): Promise<Check[]>;
+  listCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]>;
   listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]>;
   getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
 }
@@ -263,6 +265,7 @@ export type IssueApi = Tracker &
     | "listPullReviewComments"
     | "listPullReviews"
     | "listCommitStatuses"
+    | "listCheckRuns"
     | "listActionJobs"
     | "getActionJobLogs"
     | "getCollaboratorPermission"
