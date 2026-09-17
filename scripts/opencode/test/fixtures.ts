@@ -193,6 +193,7 @@ export function makeLinkedIssue(overrides: Partial<LinkedIssue> = {}): LinkedIss
 
 export function emptyCiMethods(): {
   listCommitStatuses: () => Promise<GiteaCommitStatus[]>;
+  listCheckRuns: () => Promise<GiteaCommitStatus[]>;
   listActionJobs: () => Promise<GiteaActionJob[]>;
   getActionJobLogs: () => Promise<string>;
   listIssueDependencies: () => Promise<LinkedIssue[]>;
@@ -202,6 +203,7 @@ export function emptyCiMethods(): {
 } {
   return {
     listCommitStatuses: async () => [],
+    listCheckRuns: async () => [],
     listActionJobs: async () => [],
     getActionJobLogs: async () => "",
     listIssueDependencies: async () => [],

@@ -456,6 +456,138 @@ describe("inspectCi", () => {
     }
   });
 
+  test("GitHub failed check-run is unhandled when statuses are only jumi/opencode-review", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const requested: number[] = [];
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
+          listCheckRuns: async () => [
+            {
+              id: 4,
+              context: "checks",
+              status: "failure",
+              description: "Process completed with exit code 1.",
+              target_url: "https://github.com/kirmanak/jumi/actions/runs/9/job/4",
+              jobId: 4,
+            },
+            { id: 5, context: "image", status: "success" },
+          ],
+          getActionJobLogs: async (_owner, _repo, jobId) => {
+            requested.push(jobId);
+            return "##[error]lint/typecheck/tests, exit 1\n";
+          },
+        }),
+        owner: "kirmanak",
+        repo: "jumi",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.unhandled.map((c) => c.name)).toEqual(["checks"]);
+      expect(inspection.unhandled[0]?.capped).toContain("lint/typecheck/tests");
+      expect(requested).toEqual([4]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("log fetch failure still treats a failed GitHub check-run as unhandled", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
+          listCheckRuns: async () => [
+            {
+              id: 4,
+              context: "checks",
+              status: "failure",
+              description: "Process completed with exit code 1.",
+              target_url: "https://github.com/kirmanak/jumi/actions/runs/9/job/4",
+              jobId: 4,
+            },
+          ],
+          getActionJobLogs: async () => {
+            throw new Error("Must have admin rights to Repository");
+          },
+        }),
+        owner: "kirmanak",
+        repo: "jumi",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.unhandled).toHaveLength(1);
+      expect(inspection.unhandled[0]?.name).toBe("checks");
+      expect(inspection.unhandled[0]?.capped).toContain("Process completed with exit code 1.");
+      expect(inspection.unhandled[0]?.capped).toContain("https://github.com/kirmanak/jumi/actions/runs/9/job/4");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("pending GitHub check-run sibling skips; skipped jobs are not red", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const pending = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
+          listCheckRuns: async () => [
+            { id: 4, context: "checks", status: "failure", jobId: 4 },
+            { id: 5, context: "image", status: "pending" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "jumi",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(pending.pending).toBe(true);
+      expect(pending.failed.map((c) => c.name)).toEqual(["checks"]);
+      expect(
+        await needsCiFollowUp({
+          api: makeApi({
+            listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
+            listCheckRuns: async () => [
+              { id: 4, context: "checks", status: "failure", jobId: 4 },
+              { id: 5, context: "image", status: "pending" },
+            ],
+          }),
+          owner: "kirmanak",
+          repo: "jumi",
+          sha: "headsha",
+          home,
+          issueNumber: 12,
+        })
+      ).toBe(false);
+
+      const done = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
+          listCheckRuns: async () => [
+            { id: 4, context: "checks", status: "failure", jobId: 4 },
+            { id: 5, context: "image", status: "success" },
+          ],
+          getActionJobLogs: async () => "##[error]lint failed\n",
+        }),
+        owner: "kirmanak",
+        repo: "jumi",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(done.pending).toBe(false);
+      expect(done.unhandled.map((c) => c.name)).toEqual(["checks"]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("does not share budget with follow-up comment rounds", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
