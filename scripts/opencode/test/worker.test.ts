@@ -27,7 +27,7 @@ import {
   QuotaWaitError,
 } from "../src/quota.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
-import { isQuotaStuck, readStuckState, writeStuckState } from "../src/stuck.ts";
+import { isQuotaStuck, readStuckLatch, readStuckState, writeStuckState } from "../src/stuck.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
@@ -1160,7 +1160,9 @@ describe("processWorkerTick", () => {
       expect(store.rows[0]?.state).toBe("skipped");
       expect(store.rows[0]?.resultReason).toBe(QUOTA_STUCK_TEXT);
       expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(true);
-      expect(isQuotaStuck(await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12)))).toBe(true);
+      expect(
+        isQuotaStuck(await readStuckLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }))
+      ).toBe(true);
     } finally {
       await rm(home, { recursive: true, force: true });
       await rm(workdir, { recursive: true, force: true });

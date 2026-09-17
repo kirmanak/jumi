@@ -7,6 +7,7 @@ import { readFollowUpState, writeFollowUpState } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { MemoryReviewJobStore, PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { MemorySkipLatchStore, parseWorkerLatchPath, skipLatchesFor } from "../src/skip_latches.ts";
+import type { SqlClient } from "../src/sql_client.ts";
 import { readStuckState, writeStuckState } from "../src/stuck.ts";
 import { handleIssueCancel } from "../src/worker.ts";
 import { cancelLedgerWorkerJobs } from "../src/worker_webhook.ts";
@@ -134,13 +135,13 @@ describe("kill switch deletes skip latches", () => {
 
   test("cancelLedgerWorkerJobs bumps generation without deleting the Postgres row", async () => {
     const captured: string[] = [];
-    const sql = {
+    const sql: SqlClient = {
       async unsafe(query: string) {
         captured.push(query);
         if (query.includes("RETURNING")) return [{ generation: 2, skip_reason: null }];
         return [];
       },
-      async begin<T>(fn: (tx: typeof sql) => Promise<T>) {
+      async begin<T>(fn: (tx: SqlClient) => Promise<T>) {
         return fn(sql);
       },
     };
