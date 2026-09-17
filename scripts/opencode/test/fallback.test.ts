@@ -408,6 +408,31 @@ describe("withEngineChain", () => {
     variant: "high",
   };
 
+  test("single-entry claude chain still applies type and effort", async () => {
+    const claude = {
+      name: "claude",
+      type: "claude" as const,
+      model: "opus",
+      effort: "high",
+    };
+    const calls: Array<{ type?: string; model: string; variant?: string; effort?: string }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({
+        type: opts.type,
+        model: opts.model,
+        variant: opts.variant,
+        effort: opts.effort,
+      });
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [claude] })({
+      model: claude.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(claude.model));
+    expect(calls).toEqual([{ type: "claude", model: claude.model, variant: undefined, effort: "high" }]);
+  });
+
   test("named Spark→Grok chain hops once from scratch", async () => {
     const calls: Array<{ model: string; variant?: string; continueSession?: boolean; hop?: boolean }> = [];
     const engine: Engine = async (opts) => {

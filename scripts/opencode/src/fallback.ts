@@ -138,9 +138,11 @@ function lazyChain(opts: EngineRunOptions, hop: EngineChainOptions): NamedRunner
 }
 
 export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
-  if ((!hop.chain || hop.chain.length <= 1) && !hop.fallbackModel) return engine;
+  if (!hop.chain?.length && !hop.fallbackModel) return engine;
 
-  let chain = hop.chain && hop.chain.length >= 2 ? hop.chain : undefined;
+  let chain: NamedRunner[] | undefined;
+  if (hop.chain && hop.chain.length >= 2) chain = hop.chain;
+  else if (hop.chain?.length === 1 && !hop.fallbackModel) chain = hop.chain;
   let index = 0;
 
   const runnersFor = (opts: EngineRunOptions): NamedRunner[] => {
