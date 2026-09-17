@@ -30,7 +30,7 @@ const WEBHOOK_EVENT_SET = new Set<string>(WEBHOOK_EVENTS);
 export const JOB_RESULTS = ["succeeded", "skipped", "failed"] as const;
 export type JobResult = (typeof JOB_RESULTS)[number];
 
-export const OPENCODE_EXIT_CLASSES = ["ok", "143", "timeout", "infra", "incomplete"] as const;
+export const OPENCODE_EXIT_CLASSES = ["ok", "143", "timeout", "infra", "incomplete", "auth"] as const;
 export type OpenCodeExitClass = (typeof OPENCODE_EXIT_CLASSES)[number];
 
 export const RUN_KINDS: readonly JobKind[] = ["review", "implement", "follow-up", "conflict"];
@@ -77,10 +77,13 @@ export function classifyOpenCodeExit(result: {
   status: string;
   exitCode?: number | null;
   infra?: boolean;
+  auth?: boolean;
+  quota?: string | null;
 }): OpenCodeExitClass {
   if (result.status === "timeout") return "timeout";
   if (result.infra === true) return "infra";
   if (result.exitCode === 143) return "143";
+  if (result.auth === true && result.quota == null) return "auth";
   if (result.status === "ok") return "ok";
   return "incomplete";
 }
