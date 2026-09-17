@@ -1,11 +1,11 @@
 import { hostname } from "node:os";
 import { scrubSecretEnv } from "./config.ts";
+import { meterWebhook, renderProcessMetrics } from "./control_metrics.ts";
 import { createForge } from "./forge.ts";
 import { handleGithubWebhook } from "./github_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { ReviewQueue } from "./queue.ts";
 import { createPgReviewJobStore, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
-import { renderTokenMetrics } from "./token_metrics.ts";
 import type { IssueJob } from "./types.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
 import {
@@ -56,51 +56,59 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
     if (url.pathname === "/healthz") return json(200, { ok: true });
     if (url.pathname === "/metrics") {
       if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
-      return new Response(renderTokenMetrics(), {
+      return new Response(renderProcessMetrics(), {
         status: 200,
         headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
       });
     }
     if (url.pathname === "/webhooks/github") {
-      return handleGithubWebhook(request, config, {
-        worker: { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger },
-        logger,
-      });
+      return meterWebhook(
+        request.headers.get("x-github-event"),
+        handleGithubWebhook(request, config, {
+          worker: { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger },
+          logger,
+        })
+      );
     }
     if (url.pathname !== "/webhooks/gitea") return json(404, { error: "not found" });
-    if (request.method !== "POST") return json(405, { error: "method not allowed" });
-    if (!request.headers.get("content-type")?.includes("application/json")) {
-      return json(415, { error: "expected application/json" });
-    }
-    if (!authMatches(request.headers.get("authorization"), config.webhookAuthToken)) {
-      return json(401, { error: "invalid authorization header" });
-    }
+    const event = request.headers.get("x-gitea-event") || request.headers.get("x-gitea-event-type") || "unknown";
+    return meterWebhook(event, handleGiteaWebhook());
 
-    const rawBody = new Uint8Array(await request.arrayBuffer());
-    if (rawBody.byteLength > config.maxWebhookBytes) {
-      return json(413, { error: "webhook payload too large" });
-    }
-    const signatureOk = await verifyGiteaSignature(
-      rawBody,
-      config.webhookSecret,
-      request.headers.get("x-gitea-signature")
-    );
-    if (!signatureOk) return json(401, { error: "invalid signature" });
+    async function handleGiteaWebhook(): Promise<Response> {
+      if (request.method !== "POST") return json(405, { error: "method not allowed" });
+      if (!request.headers.get("content-type")?.includes("application/json")) {
+        return json(415, { error: "expected application/json" });
+      }
+      if (!authMatches(request.headers.get("authorization"), config.webhookAuthToken)) {
+        return json(401, { error: "invalid authorization header" });
+      }
 
-    return handleWorkerWebhookEvent(
-      rawBody,
-      request.headers.get("x-gitea-event"),
-      request.headers.get("x-gitea-event-type"),
-      request.headers.get("x-gitea-delivery") ?? crypto.randomUUID(),
-      {
-        giteaUrl: config.giteaUrl,
-        allowedOrgs: config.allowedOrgs,
-        allowedRepos: config.allowedRepos,
-        botUsername: config.botUsername,
-        followupIgnoreLogins: config.followupIgnoreLogins,
-      },
-      { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger }
-    );
+      const rawBody = new Uint8Array(await request.arrayBuffer());
+      if (rawBody.byteLength > config.maxWebhookBytes) {
+        return json(413, { error: "webhook payload too large" });
+      }
+      const signatureOk = await verifyGiteaSignature(
+        rawBody,
+        config.webhookSecret,
+        request.headers.get("x-gitea-signature")
+      );
+      if (!signatureOk) return json(401, { error: "invalid signature" });
+
+      return handleWorkerWebhookEvent(
+        rawBody,
+        request.headers.get("x-gitea-event"),
+        request.headers.get("x-gitea-event-type"),
+        request.headers.get("x-gitea-delivery") ?? crypto.randomUUID(),
+        {
+          giteaUrl: config.giteaUrl,
+          allowedOrgs: config.allowedOrgs,
+          allowedRepos: config.allowedRepos,
+          botUsername: config.botUsername,
+          followupIgnoreLogins: config.followupIgnoreLogins,
+        },
+        { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger }
+      );
+    }
   };
 }
 

@@ -100,6 +100,8 @@ export interface ReviewJobStore {
   cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number>;
   countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number>;
   countByState(): Promise<Record<ReviewJobState, number>>;
+  countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>>;
+  oldestQueuedAgeSeconds(now?: Date): Promise<Record<JobKind, number>>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
   readonly skipLatches: SkipLatchStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
@@ -344,6 +346,19 @@ function isImplementTerminal(
 
 function emptyCounts(): Record<ReviewJobState, number> {
   return { queued: 0, leased: 0, succeeded: 0, skipped: 0, failed: 0, cancelled: 0 };
+}
+
+function emptyKindStateCounts(): Record<JobKind, Record<ReviewJobState, number>> {
+  return {
+    review: emptyCounts(),
+    implement: emptyCounts(),
+    "follow-up": emptyCounts(),
+    conflict: emptyCounts(),
+  };
+}
+
+function emptyOldestQueuedAge(): Record<JobKind, number> {
+  return { review: 0, implement: 0, "follow-up": 0, conflict: 0 };
 }
 
 function mapIssueSkipLatch(row: { generation: unknown; skip_reason: unknown }): IssueSkipLatch {
@@ -651,6 +666,35 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const counts = emptyCounts();
       for (const row of this.rows) counts[row.state]++;
       return counts;
+    });
+  }
+
+  countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>> {
+    return this.locked(() => {
+      const counts = emptyKindStateCounts();
+      for (const row of this.rows) {
+        const kind = rowKind(row);
+        if (kind in counts && row.state in counts[kind]) counts[kind][row.state]++;
+      }
+      return counts;
+    });
+  }
+
+  oldestQueuedAgeSeconds(now = new Date()): Promise<Record<JobKind, number>> {
+    return this.locked(() => {
+      const nowMs = now.getTime();
+      const oldest: Partial<Record<JobKind, number>> = {};
+      for (const row of this.rows) {
+        if (row.state !== "queued") continue;
+        const kind = rowKind(row);
+        if (oldest[kind] == null || row.createdAt < oldest[kind]!) oldest[kind] = row.createdAt;
+      }
+      const ages = emptyOldestQueuedAge();
+      for (const kind of JOB_KINDS) {
+        const createdAt = oldest[kind];
+        if (createdAt != null) ages[kind] = Math.max(0, (nowMs - createdAt) / 1000);
+      }
+      return ages;
     });
   }
 
@@ -1256,6 +1300,35 @@ export class PgReviewJobStore implements ReviewJobStore {
     return counts;
   }
 
+  async countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>> {
+    const rows = asRows<{ kind: unknown; state: unknown; n: unknown }>(
+      await this.sql.unsafe(`SELECT kind, state, COUNT(*)::bigint AS n FROM review_jobs GROUP BY kind, state`)
+    );
+    const counts = emptyKindStateCounts();
+    for (const row of rows) {
+      const kind = (str(row.kind) || REVIEW_KIND) as JobKind;
+      const state = str(row.state) as ReviewJobState;
+      if (kind in counts && state in counts[kind]) counts[kind][state] = num(row.n);
+    }
+    return counts;
+  }
+
+  async oldestQueuedAgeSeconds(now = new Date()): Promise<Record<JobKind, number>> {
+    const rows = asRows<{ kind: unknown; age: unknown }>(
+      await this.sql.unsafe(
+        `SELECT kind, EXTRACT(EPOCH FROM ($1::timestamptz - MIN(created_at))) AS age
+         FROM review_jobs WHERE state = 'queued' GROUP BY kind`,
+        [now.toISOString()]
+      )
+    );
+    const ages = emptyOldestQueuedAge();
+    for (const row of rows) {
+      const kind = (str(row.kind) || REVIEW_KIND) as JobKind;
+      if (kind in ages && row.age != null && row.age !== "") ages[kind] = Math.max(0, num(row.age));
+    }
+    return ages;
+  }
+
   async get(id: number): Promise<ReviewJobRecord | undefined> {
     const rows = asRows<ReviewJobRow>(await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [id]));
     return rows[0] ? mapRow(rows[0]) : undefined;
@@ -1327,11 +1400,19 @@ export async function createPgReviewJobStore(databaseUrl: string): Promise<PgRev
   return store;
 }
 
-export async function renderQueueMetrics(store: ReviewJobStore): Promise<string> {
-  const counts = await store.countByState();
-  const lines = ["# HELP jumi_review_jobs Number of review jobs by state.", "# TYPE jumi_review_jobs gauge"];
-  for (const state of REVIEW_JOB_STATES) {
-    lines.push(`jumi_review_jobs{state="${state}"} ${counts[state]}`);
+export async function renderQueueMetrics(store: ReviewJobStore, now = new Date()): Promise<string> {
+  const counts = await store.countByKindState();
+  const ages = await store.oldestQueuedAgeSeconds(now);
+  const lines = ["# HELP jumi_review_jobs Number of jobs by state and kind", "# TYPE jumi_review_jobs gauge"];
+  for (const kind of JOB_KINDS) {
+    for (const state of REVIEW_JOB_STATES) {
+      lines.push(`jumi_review_jobs{state="${state}",kind="${kind}"} ${counts[kind][state]}`);
+    }
+  }
+  lines.push("# HELP jumi_review_jobs_oldest_queued_age_seconds Age in seconds of the oldest queued job by kind");
+  lines.push("# TYPE jumi_review_jobs_oldest_queued_age_seconds gauge");
+  for (const kind of JOB_KINDS) {
+    lines.push(`jumi_review_jobs_oldest_queued_age_seconds{kind="${kind}"} ${ages[kind]}`);
   }
   return `${lines.join("\n")}\n`;
 }

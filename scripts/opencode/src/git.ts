@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { recordOpenCodeRun } from "./control_metrics.ts";
 import {
   byteLength,
   finalizeMemoryTracker,
@@ -311,6 +312,12 @@ function engineExitMessage(exitCode: number | null, stderr: string): string {
   return `opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`;
 }
 
+function observeOpenCode(opts: OpenCodeRunOptions, result: EngineResult): EngineResult {
+  if (opts.abortSignal?.aborted) return result;
+  recordOpenCodeRun(opts.trace?.kind ?? "review", result);
+  return result;
+}
+
 export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   const prompt = await resolveOpenCodePrompt(opts);
@@ -568,7 +575,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     }
 
     if (quota && quotaInfo) {
-      return {
+      return observeOpenCode(opts, {
         status: "stuck",
         exitCode,
         stdout,
@@ -577,17 +584,26 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         durationMs,
         quota: quotaInfo.kind,
         retryAfterMs: quotaInfo.retryAfterMs,
-      };
+      });
     }
 
     if (runError) {
       const message = runError instanceof Error ? runError.message : String(runError);
-      if (infra || looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
+      const isInfra = infra || looksLikeInfraStderr(message);
+      observeOpenCode(opts, { status: "exit", infra: isInfra, durationMs, message });
+      if (isInfra) throw new EngineFailedError(message, true);
       throw runError;
     }
 
     if (timedOut) {
-      return { status: "timeout", exitCode, stdout, message: engineExitMessage(exitCode, stderr), infra, durationMs };
+      return observeOpenCode(opts, {
+        status: "timeout",
+        exitCode,
+        stdout,
+        message: engineExitMessage(exitCode, stderr),
+        infra,
+        durationMs,
+      });
     }
 
     if (exitCode === 0) {
@@ -597,10 +613,17 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       if (stderr) {
         log(`[opencode stderr] ${stderr}`);
       }
-      return { status: "ok", exitCode: 0, stdout, durationMs };
+      return observeOpenCode(opts, { status: "ok", exitCode: 0, stdout, durationMs });
     }
 
-    return { status: "exit", exitCode, stdout, message: engineExitMessage(exitCode, stderr), infra, durationMs };
+    return observeOpenCode(opts, {
+      status: "exit",
+      exitCode,
+      stdout,
+      message: engineExitMessage(exitCode, stderr),
+      infra,
+      durationMs,
+    });
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;

@@ -183,7 +183,7 @@ GET /healthz
 GET /metrics
 ```
 
-`GET /healthz` is `200 {"ok":true}`. `GET /metrics` is Prometheus text (`ai_tokens_total`, `ai_tokens`, `ai_sessions`, `jumi_review_jobs`) from **in-process** counters. After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums, then deletes the workspace. Totals reset on process restart; Grafana `increase()` handles that. This is not a durable OpenCode DB on `HOME`.
+`GET /healthz` is `200 {"ok":true}`. `GET /metrics` is Prometheus text. Router scrapes Postgres-backed `jumi_review_jobs` (state and kind), oldest queued age by kind, and `jumi_webhooks_total`. Engine/worker scrape **in-process** `ai_tokens_*` / `ai_sessions` plus job completion, OpenCode duration, and exit class. After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums, then deletes the workspace. Token and run counters reset on process restart; Grafana `increase()` handles that. This is not a durable OpenCode DB on `HOME`.
 
 When `PHOENIX_OTLP_ENDPOINT` is set, the same post-run window POSTs an OpenInference trace (OTLP HTTP protobuf) to in-cluster Phoenix: one `AGENT` root per job (`input.value` = this job's initial user prompt), `TOOL` children with full tool input, and `LLM` children with model/provider/token counts and this-turn `output.value` only (no conversation reprint, no `llm.input_messages`). Encoded body is capped at 4 MiB. Unset skips export. Timeout (15s), over-cap after shrinking, or an unreadable DB increments `ai_trace_exporter_errors` and does not fail the job. Phoenix **project** is `AGENT_INSTANCE`.
 

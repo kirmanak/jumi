@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   CONFLICT_PROMPT,
@@ -25,6 +26,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetControlMetricsForTests();
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
@@ -257,6 +259,9 @@ exit 7
         expect(result.exitCode).toBe(7);
         expect(result.message).toContain("opencode exited with code 7:\nbad things");
         expect(result.infra).toBe(true);
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="infra"} 1');
+        expect(text).toContain('jumi_job_duration_seconds_count{kind="review",result="infra"} 1');
       }
     );
   });
