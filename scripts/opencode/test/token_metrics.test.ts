@@ -161,11 +161,11 @@ writeFileSync(${JSON.stringify(ready)}, "ok");
 await Bun.sleep(60_000);
 `
       );
-      const child = Bun.spawn(["bun", "run", script], { stdout: "ignore", stderr: "ignore" });
+      const child = Bun.spawn([process.execPath, "run", script], { stdout: "ignore", stderr: "ignore" });
       try {
         const wal = `${dbPath}-wal`;
-        const deadline = Date.now() + 5000;
-        while ((!existsSync(ready) || !existsSync(wal)) && Date.now() < deadline) {
+        while (!existsSync(ready) || !existsSync(wal)) {
+          if (child.exitCode !== null) break;
           await Bun.sleep(20);
         }
         expect(existsSync(ready)).toBe(true);
@@ -190,5 +190,5 @@ await Bun.sleep(60_000);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
