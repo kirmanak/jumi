@@ -10,6 +10,7 @@ import {
   openCodeLogDirPath,
   openCodeSessionDbPath,
   shouldHopInsteadOfQuotaStuck,
+  withEngineChain,
   withModelHop,
 } from "../src/fallback.ts";
 import { runOpenCode } from "../src/git.ts";
@@ -56,6 +57,7 @@ describe("isProviderUnavailableResult", () => {
       false
     );
     expect(isProviderUnavailableResult({ ...unavailable, infra: true })).toBe(false);
+    expect(isProviderUnavailableResult({ ...unavailable, auth: true })).toBe(false);
     expect(
       isProviderUnavailableResult({
         status: "exit",
@@ -140,8 +142,6 @@ describe("withModelHop", () => {
       { result: { status: "exit", exitCode: 143, message: "429 rate limit exceeded" } },
       { result: { status: "exit", exitCode: 1, message: "EACCES: mkdir", infra: true } },
       { error: new EngineFailedError("EACCES: mkdir '/data/.local/state'", true) },
-      { result: { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true } },
-      { error: new EngineFailedError("host: provider auth death", false, { auth: true }) },
       { result: unavailable, opts: { continueSession: true } },
       { result: unavailable, opts: { abortSignal: AbortSignal.abort() } },
       { error: abortErr },
@@ -277,6 +277,44 @@ describe("withModelHop", () => {
     ]);
   });
 
+  test("auth exit class hops once", async () => {
+    const authDeath: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message: "host: provider auth death",
+      auth: true,
+    };
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === "openai/gpt-5.5") return authDeath;
+      return ok(opts.model);
+    };
+    const result = await withModelHop(engine, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
+      model: "openai/gpt-5.5",
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
+  });
+
+  test("EngineFailedError auth hops once", async () => {
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === "openai/gpt-5.5") {
+        throw new EngineFailedError("host: provider auth death", false, { auth: true });
+      }
+      return ok(opts.model);
+    };
+    const result = await withModelHop(engine, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
+      model: "openai/gpt-5.5",
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
+  });
+
   test("EngineFailedError provider-unavailable hops once", async () => {
     const models: string[] = [];
     const engine: Engine = async (opts) => {
@@ -353,6 +391,104 @@ describe("withModelHop", () => {
     });
     expect(result).toEqual(quotaStuck);
     expect(models).toEqual(["opencode/big-pickle"]);
+  });
+});
+
+describe("withEngineChain", () => {
+  const spark = {
+    name: "spark",
+    type: "opencode" as const,
+    model: "provider-a/spark",
+    variant: "xhigh",
+  };
+  const grok = {
+    name: "grok",
+    type: "opencode" as const,
+    model: "provider-b/grok",
+    variant: "high",
+  };
+
+  test("named Spark→Grok chain hops once from scratch", async () => {
+    const calls: Array<{ model: string; variant?: string; continueSession?: boolean; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({
+        model: opts.model,
+        variant: opts.variant,
+        continueSession: opts.continueSession,
+        hop: opts.hop,
+      });
+      if (opts.model === spark.model) return unavailable;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [spark, grok] })({
+      model: spark.model,
+      variant: spark.variant,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(grok.model));
+    expect(calls).toEqual([
+      { model: spark.model, variant: spark.variant, continueSession: undefined, hop: undefined },
+      { model: grok.model, variant: grok.variant, continueSession: false, hop: true },
+    ]);
+  });
+
+  test("continueSession does not hop", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return unavailable;
+    };
+    const result = await withEngineChain(engine, { chain: [spark, grok] })({
+      model: spark.model,
+      workdir: "/tmp",
+      continueSession: true,
+    });
+    expect(result).toEqual(unavailable);
+    expect(n).toBe(1);
+  });
+
+  test("infra does not hop", async () => {
+    const infra = new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      throw infra;
+    };
+    await expect(
+      withEngineChain(engine, { chain: [spark, grok] })({ model: spark.model, workdir: "/tmp" })
+    ).rejects.toBe(infra);
+    expect(n).toBe(1);
+  });
+
+  test("auth class hops", async () => {
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === spark.model) {
+        return { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true };
+      }
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [spark, grok] })({
+      model: spark.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(grok.model));
+    expect(models).toEqual([spark.model, grok.model]);
+  });
+
+  test("exhausting the chain fails closed", async () => {
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      return unavailable;
+    };
+    const result = await withEngineChain(engine, { chain: [spark, grok] })({
+      model: spark.model,
+      workdir: "/tmp",
+    });
+    expect(isProviderUnavailableResult(result)).toBe(true);
+    expect(models).toEqual([spark.model, grok.model]);
   });
 });
 

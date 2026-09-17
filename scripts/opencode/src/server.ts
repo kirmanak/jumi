@@ -24,6 +24,7 @@ import {
   type ReviewJobStore,
   renderQueueMetrics,
 } from "./review_jobs.ts";
+import { orderedRunners } from "./runners.ts";
 import type { ReviewJob } from "./types.ts";
 import {
   isReviewWebhookAction,
@@ -102,6 +103,7 @@ export async function runReviewJob(
       variant: config.variant,
       fallbackModel: config.fallbackModel,
       fallbackVariant: config.fallbackVariant,
+      chain: orderedRunners(config),
       remainingLeaseMs: extras.remainingLeaseMs,
       extendLease: extras.extendLease,
       workspace,

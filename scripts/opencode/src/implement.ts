@@ -40,6 +40,7 @@ import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import type { NamedRunner } from "./runners.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -79,6 +80,7 @@ export interface ImplementOptions extends PickupPolicy {
   variant?: string;
   fallbackModel?: string;
   fallbackVariant?: string;
+  chain?: NamedRunner[];
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   home: string;

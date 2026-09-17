@@ -2,7 +2,7 @@ import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
-import { withModelHop } from "./fallback.ts";
+import { withEngineChain } from "./fallback.ts";
 import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { isInfraFailure } from "./infra.ts";
@@ -30,6 +30,7 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
+import type { NamedRunner } from "./runners.ts";
 import {
   appendStuckFingerprint,
   clearQuotaStuck,
@@ -95,6 +96,7 @@ export interface ReviewOptions {
   variant?: string;
   fallbackModel?: string;
   fallbackVariant?: string;
+  chain?: NamedRunner[];
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   workspace: string;
@@ -916,7 +918,8 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
 
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
-  const engine = withModelHop(resolveEngine(opts, openCodeEngine), {
+  const engine = withEngineChain(resolveEngine(opts, openCodeEngine), {
+    chain: opts.chain,
     fallbackModel: opts.fallbackModel,
     fallbackVariant: opts.fallbackVariant,
     remainingLeaseMs: opts.remainingLeaseMs,

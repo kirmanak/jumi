@@ -2,6 +2,7 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { GITHUB_ENV, loadForgeBind, SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
 import { type ForgeKind, parseForge } from "./forge.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
+import { loadRunnersCatalog, modelsFromCatalog, type RunnerConfig } from "./runners.ts";
 
 export interface WorkerConfig {
   host: string;
@@ -23,6 +24,8 @@ export interface WorkerConfig {
   variant?: string;
   fallbackModel?: string;
   fallbackVariant?: string;
+  runners: Record<string, RunnerConfig>;
+  chain: string[];
   opencodeConfig?: string;
   opencodeWellKnownUrl?: string;
   opencodeWellKnownKey: string;
@@ -99,6 +102,14 @@ function normalizeUrl(value: string): string {
 export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
   const resolved = overlaySecretsFromFile(env);
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
+  const fromEnv = {
+    model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
+    variant: optionalEnv(resolved, "OPENCODE_VARIANT"),
+    fallbackModel: optionalEnv(resolved, "OPENCODE_FALLBACK_MODEL"),
+    fallbackVariant: optionalEnv(resolved, "OPENCODE_FALLBACK_VARIANT"),
+  };
+  const runnersFile = optionalEnv(resolved, "JUMI_RUNNERS_FILE");
+  const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv);
   const forge = parseForge(resolved.FORGE);
   const forgeBind =
     forge === "github"
@@ -119,10 +130,9 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     githubWebhookSecret: resolved[GITHUB_ENV.webhookSecret] || undefined,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
-    model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
-    variant: optionalEnv(resolved, "OPENCODE_VARIANT"),
-    fallbackModel: optionalEnv(resolved, "OPENCODE_FALLBACK_MODEL"),
-    fallbackVariant: optionalEnv(resolved, "OPENCODE_FALLBACK_VARIANT"),
+    ...(runnersFile ? modelsFromCatalog(runnersCatalog) : fromEnv),
+    runners: runnersCatalog.runners,
+    chain: runnersCatalog.chain,
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
     opencodeWellKnownUrl: parseOpenCodeWellKnownUrl(resolved.OPENCODE_WELLKNOWN_URL),
     opencodeWellKnownKey:
