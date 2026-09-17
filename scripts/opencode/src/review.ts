@@ -2,8 +2,8 @@ import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
+import { registeredEngine } from "./engine_dispatch.ts";
 import { withEngineChain } from "./fallback.ts";
-import { openCodeEngine } from "./git.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { isInfraFailure } from "./infra.ts";
 import { resolvePermissions } from "./permissions.ts";
@@ -918,7 +918,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
 
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
-  const engine = withEngineChain(resolveEngine(opts, openCodeEngine), {
+  const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
     chain: opts.chain,
     fallbackModel: opts.fallbackModel,
     fallbackVariant: opts.fallbackVariant,

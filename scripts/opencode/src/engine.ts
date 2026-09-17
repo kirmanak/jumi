@@ -9,8 +9,10 @@ export interface TraceContext {
 }
 
 export interface EngineRunOptions {
+  type?: "opencode" | "claude";
   model: string;
   variant?: string;
+  effort?: string;
   workdir: string;
   home?: string;
   sanitizeEnv?: boolean;
