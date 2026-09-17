@@ -40,6 +40,7 @@ export interface EngineResult {
   stdout?: string;
   message?: string;
   infra?: boolean;
+  auth?: boolean;
   durationMs?: number;
   quota?: QuotaClass;
   retryAfterMs?: number;
@@ -49,13 +50,15 @@ export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;
 
 export class EngineFailedError extends Error {
   readonly infra: boolean;
+  readonly auth: boolean;
   readonly quota?: QuotaClass;
   readonly retryAfterMs?: number;
 
-  constructor(message: string, infra = false, extras?: { quota?: QuotaClass; retryAfterMs?: number }) {
+  constructor(message: string, infra = false, extras?: { quota?: QuotaClass; retryAfterMs?: number; auth?: boolean }) {
     super(message);
     this.name = "EngineFailedError";
-    this.infra = infra;
+    this.auth = extras?.auth === true;
+    this.infra = this.auth ? false : infra;
     if (extras?.quota) this.quota = extras.quota;
     if (extras?.retryAfterMs != null) this.retryAfterMs = extras.retryAfterMs;
   }
@@ -70,5 +73,6 @@ export function throwIfEngineFailed(result: EngineResult): void {
   throw new EngineFailedError(result.message ?? `engine ${result.status}`, result.infra === true, {
     quota: result.quota,
     retryAfterMs: result.retryAfterMs,
+    auth: result.auth === true,
   });
 }

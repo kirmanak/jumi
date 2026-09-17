@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
 import { recordOpenCodeRun } from "./control_metrics.ts";
 import {
   byteLength,
@@ -522,6 +523,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       }
     }
     const quota = quotaInfo != null;
+    const auth = !quota && !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(stderr);
     if (quotaInfo && !quotaHit) {
       logDiagnostic(log, "opencode_quota", {
         review: opts.reviewLabel,
@@ -562,6 +564,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
       run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
       infra,
+      auth,
       quota,
       quota_class: quotaInfo?.kind ?? null,
       retry_after_ms: quotaInfo?.retryAfterMs ?? null,
@@ -589,6 +592,12 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
 
     if (runError) {
       const message = runError instanceof Error ? runError.message : String(runError);
+      if (auth || looksLikeProviderAuthDeath(message)) {
+        if (stderr) log(`[opencode stderr] ${stderr}`);
+        const authMessage = providerAuthDeathMessage();
+        observeOpenCode(opts, { status: "exit", infra: false, auth: true, durationMs, message: authMessage });
+        throw new EngineFailedError(authMessage, false, { auth: true });
+      }
       const isInfra = infra || looksLikeInfraStderr(message);
       observeOpenCode(opts, { status: "exit", infra: isInfra, durationMs, message });
       if (isInfra) throw new EngineFailedError(message, true);
@@ -616,6 +625,19 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       return observeOpenCode(opts, { status: "ok", exitCode: 0, stdout, durationMs });
     }
 
+    if (auth) {
+      if (stderr) log(`[opencode stderr] ${stderr}`);
+      return observeOpenCode(opts, {
+        status: "exit",
+        exitCode,
+        stdout,
+        message: providerAuthDeathMessage(),
+        infra: false,
+        auth: true,
+        durationMs,
+      });
+    }
+
     return observeOpenCode(opts, {
       status: "exit",
       exitCode,
@@ -628,6 +650,9 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
     const message = err instanceof Error ? err.message : String(err);
+    if (looksLikeProviderAuthDeath(message)) {
+      throw new EngineFailedError(providerAuthDeathMessage(), false, { auth: true });
+    }
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
   } finally {

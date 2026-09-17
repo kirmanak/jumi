@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
@@ -262,6 +263,107 @@ exit 7
         const text = renderRunMetrics();
         expect(text).toContain('jumi_opencode_exits_total{kind="review",class="infra"} 1');
         expect(text).toContain('jumi_job_duration_seconds_count{kind="review",result="infra"} 1');
+      }
+    );
+  });
+
+  test("classifies grant rejection as auth with a short hostname message", async () => {
+    const grant = `oauth token refresh failed: ${"x".repeat(400)} {"error":"invalid_grant","error_description":"refresh token revoked"}`;
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf '%s' '${grant}' >&2
+exit 1
+`,
+      async (_binDir, workdir) => {
+        const logs: string[] = [];
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          logger: (message) => logs.push(message),
+        });
+        expect(result.status).toBe("exit");
+        expect(result.auth).toBe(true);
+        expect(result.infra).toBe(false);
+        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).toContain(hostname());
+        expect(result.message).not.toContain("invalid_grant");
+        expect(result.message).not.toContain("refresh token");
+        expect(logs.some((line) => line.includes("[opencode stderr]") && line.includes("invalid_grant"))).toBe(true);
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
+        expect(text).not.toContain('kind="review",class="incomplete"} 1');
+        expect(text).not.toContain("invalid_grant");
+        expect(text).not.toContain(`hostname="${hostname()}"`);
+      }
+    );
+  });
+
+  test("classifies missing provider key as auth, not infra", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'missing API key for provider xai' >&2
+exit 1
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.auth).toBe(true);
+        expect(result.infra).toBe(false);
+        expect(result.message).toBe(providerAuthDeathMessage());
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
+        expect(text).not.toContain('kind="review",class="infra"} 1');
+      }
+    );
+  });
+
+  test("does not reclassify a quota hit as auth", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+printf 'invalid_grant\\n' >&2
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
+        });
+        expect(result.status).toBe("stuck");
+        expect(result.quota).toBe("resetting");
+        expect(result.auth).toBeFalsy();
+        expect(result.infra).toBe(false);
+        const text = renderRunMetrics();
+        expect(text).not.toContain('kind="review",class="auth"} 1');
+      }
+    );
+  });
+
+  test("timeout stays timeout even when stderr has invalid_grant", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'invalid_grant' >&2
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          timeoutMs: 100,
+        });
+        expect(result.status).toBe("timeout");
+        expect(result.auth).toBeFalsy();
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="timeout"} 1');
+        expect(text).not.toContain('kind="review",class="auth"} 1');
       }
     );
   });

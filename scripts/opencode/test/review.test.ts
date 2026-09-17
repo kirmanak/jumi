@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { providerAuthDeathMessage } from "../src/auth.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
@@ -1142,6 +1143,38 @@ describe("reviewPullRequest", () => {
 
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("Jumi review failed: model unavailable");
+    });
+  });
+
+  test("auth death posts a short hostname status, not OpenCode stderr", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const grant = `opencode exited with code 1:\n${"x".repeat(400)} invalid_grant refresh token revoked`;
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          openCodeRunner: async () => ({
+            status: "exit",
+            exitCode: 1,
+            auth: true,
+            message: providerAuthDeathMessage(),
+          }),
+        })
+      ).rejects.toMatchObject({ auth: true, message: providerAuthDeathMessage() });
+
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(statuses[1].description).toBe(`Jumi review failed: ${providerAuthDeathMessage()}`);
+      expect(statuses[1].description).toContain(hostname());
+      expect(statuses[1].description).toContain("auth");
+      expect(statuses[1].description).not.toContain("invalid_grant");
+      expect(statuses[1].description).not.toContain(grant);
+      expect(new TextEncoder().encode(statuses[1].description ?? "").byteLength).toBeLessThan(140);
     });
   });
 
