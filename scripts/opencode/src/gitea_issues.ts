@@ -1,4 +1,4 @@
-import { isAssignedToBot } from "./assignee.ts";
+import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { Forge, Pull, Tracker } from "./ports.ts";
 
 export type { IssueApi, LinkedIssue, Tracker } from "./ports.ts";
@@ -124,10 +124,16 @@ export function isForeignPrIdentity(
   return true;
 }
 
-export function isAssignedForeignPR(pr: Pull, owner: string, repo: string, botUsername: string): boolean {
+export function isAssignedForeignPR(
+  pr: Pull,
+  owner: string,
+  repo: string,
+  botUsername: string,
+  policy?: PickupPolicy
+): boolean {
   if (!isEligibleWorkerPR(pr, owner, repo)) return false;
   if (!isForeignPrIdentity(pr, owner, repo, botUsername)) return false;
-  return isAssignedToBot(pr, botUsername);
+  return isIssuePickedUp(pr, policy ?? { botUsername });
 }
 
 export async function findOpenClosingPullRequest(

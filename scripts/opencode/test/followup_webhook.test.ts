@@ -4,9 +4,11 @@ import {
   shouldEnqueueIssueCommentFollowUp,
   shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullAssign,
+  shouldEnqueuePullLabel,
   shouldEnqueuePullRejectedFollowUp,
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "../src/followup_webhook.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
@@ -314,6 +316,53 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
     }
   });
 
+  test("enqueues a comment on a labeled GitHub foreign PR keyed by the PR number", () => {
+    const repository = makeRepo({
+      html_url: "https://github.com/kirmanak/demo",
+      clone_url: "https://github.com/kirmanak/demo.git",
+    });
+    const decision = shouldEnqueueIssueCommentFollowUp(
+      makeIssueCommentPayload({
+        repository,
+        issue: makeIssue({
+          number: 55,
+          title: "chore(deps)",
+          body: "",
+          html_url: "https://github.com/kirmanak/demo/pull/55",
+          user: makeUser({ login: "renovate[bot]" }),
+          assignee: null,
+          assignees: [],
+          labels: [{ name: "jumi" }],
+          pull_request: { merged_at: null },
+        }),
+        pull_request: makePR({
+          number: 55,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate[bot]" }),
+          assignee: null,
+          assignees: [],
+          labels: [{ name: "jumi" }],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+      }),
+      githubPolicy,
+      "issue_comment"
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.mode).toBe("follow-up");
+      expect(decision.job.issueNumber).toBe(55);
+      expect(decision.job.prNumber).toBe(55);
+    }
+  });
+
   test("enqueues a comment on an assigned foreign PR keyed by the PR number", () => {
     const repository = makeRepo();
     const decision = shouldEnqueueIssueCommentFollowUp(
@@ -482,6 +531,43 @@ describe("shouldEnqueuePullRejectedFollowUp", () => {
     if (decision.type === "enqueue") {
       expect(decision.job.trigger?.reviewId).toBeUndefined();
       expect(decision.job.trigger?.body).toBe("please rename");
+    }
+  });
+
+  test("enqueues pull_request_rejected for a labeled GitHub foreign PR", () => {
+    const repository = makeRepo({
+      html_url: "https://github.com/kirmanak/demo",
+      clone_url: "https://github.com/kirmanak/demo.git",
+    });
+    const decision = shouldEnqueuePullRejectedFollowUp(
+      makePayload({
+        action: "submitted",
+        repository,
+        pull_request: makePR({
+          number: 55,
+          title: "chore(deps)",
+          body: "",
+          user: makeUser({ login: "renovate[bot]" }),
+          assignee: null,
+          assignees: [],
+          labels: [{ name: "jumi" }],
+          head: {
+            label: "kirmanak:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+        review: { id: 9, body: "please change this" },
+      }),
+      githubPolicy,
+      "pull_request_review"
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(55);
+      expect(decision.job.prNumber).toBe(55);
     }
   });
 
@@ -702,6 +788,152 @@ describe("shouldEnqueuePullAssign", () => {
       expect(decision.job.prNumber).toBe(127);
     }
     expect(loaded).toEqual([]);
+  });
+});
+
+const githubPolicy = {
+  giteaUrl: "https://github.com",
+  allowedOrgs: ["kirmanak"],
+  allowedRepos: [] as string[],
+  botUsername: "kirmanak-jumi[bot]",
+  isPickedUp: hasJumiLabel,
+};
+
+function labeledForeignPayload(overrides: Parameters<typeof makePR>[0] = {}) {
+  const repository = makeRepo({
+    html_url: "https://github.com/kirmanak/demo",
+    clone_url: "https://github.com/kirmanak/demo.git",
+  });
+  return makePayload({
+    action: "labeled",
+    label: { name: "jumi" },
+    repository,
+    sender: makeUser({ login: "alice" }),
+    pull_request: makePR({
+      number: 55,
+      title: "chore(deps)",
+      body: "",
+      user: makeUser({ login: "renovate[bot]" }),
+      assignee: null,
+      assignees: [],
+      labels: [{ name: "jumi" }],
+      html_url: "https://github.com/kirmanak/demo/pull/55",
+      head: {
+        label: "kirmanak:renovate/all-digest",
+        ref: "renovate/all-digest",
+        sha: "headsha",
+        repo: repository,
+        repo_id: repository.id,
+      },
+      ...overrides,
+    }),
+  });
+}
+
+describe("shouldEnqueuePullLabel", () => {
+  test("enqueues follow-up when jumi is added to a foreign PR", async () => {
+    const decision = await shouldEnqueuePullLabel(labeledForeignPayload(), githubPolicy);
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.mode).toBe("follow-up");
+      expect(decision.job.issueNumber).toBe(55);
+      expect(decision.job.prNumber).toBe(55);
+      expect(decision.job.trigger).toEqual({ event: "labeled", sender: "alice" });
+    }
+  });
+
+  test("cancels when jumi is removed", async () => {
+    const payload = labeledForeignPayload({ labels: [] });
+    payload.action = "unlabeled";
+    expect(await shouldEnqueuePullLabel(payload, githubPolicy)).toEqual({
+      type: "cancel",
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 55,
+    });
+  });
+
+  test("skips factory-bot sender on labeled and still enqueues interviewer bots", async () => {
+    expect(
+      await shouldEnqueuePullLabel(
+        { ...labeledForeignPayload(), sender: makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" }) },
+        githubPolicy
+      )
+    ).toEqual({ type: "skip", reason: "sender is bot" });
+    const renovate = await shouldEnqueuePullLabel(
+      { ...labeledForeignPayload(), sender: makeUser({ login: "renovate[bot]", type: "Bot" }) },
+      githubPolicy
+    );
+    expect(renovate.type).toBe("enqueue");
+  });
+
+  test("skips other labels, drafts, forks, and WIP", async () => {
+    expect(await shouldEnqueuePullLabel({ ...labeledForeignPayload(), label: { name: "bug" } }, githubPolicy)).toEqual({
+      type: "skip",
+      reason: "labeled other label",
+    });
+    expect(await shouldEnqueuePullLabel(labeledForeignPayload({ draft: true }), githubPolicy)).toEqual({
+      type: "skip",
+      reason: "draft or WIP pull request",
+    });
+    expect(await shouldEnqueuePullLabel(labeledForeignPayload({ title: "WIP: deps" }), githubPolicy)).toEqual({
+      type: "skip",
+      reason: "draft or WIP pull request",
+    });
+    const forkRepo = makeRepo({
+      full_name: "other/demo",
+      html_url: "https://github.com/other/demo",
+      clone_url: "https://github.com/other/demo.git",
+    });
+    expect(
+      await shouldEnqueuePullLabel(
+        labeledForeignPayload({
+          head: {
+            label: "other:renovate/all-digest",
+            ref: "renovate/all-digest",
+            sha: "headsha",
+            repo: forkRepo,
+            repo_id: forkRepo.id,
+          },
+        }),
+        githubPolicy
+      )
+    ).toEqual({ type: "skip", reason: "fork pull request" });
+  });
+
+  test("skips a closer whose issue is already labeled jumi", async () => {
+    const repository = makeRepo({
+      html_url: "https://github.com/kirmanak/demo",
+      clone_url: "https://github.com/kirmanak/demo.git",
+    });
+    const decision = await shouldEnqueuePullLabel(
+      makePayload({
+        action: "labeled",
+        label: { name: "jumi" },
+        repository,
+        sender: makeUser({ login: "alice" }),
+        pull_request: makePR({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #12",
+          user: makeUser({ login: "kirmanak-jumi[bot]" }),
+          labels: [{ name: "jumi" }],
+          html_url: "https://github.com/kirmanak/demo/pull/127",
+          head: {
+            label: "kirmanak:jumi/issue-12-fix-the-thing",
+            ref: "jumi/issue-12-fix-the-thing",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+      }),
+      githubPolicy,
+      {
+        getIssue: async () => makeIssue({ assignee: null, assignees: [], labels: [{ name: "jumi" }] }),
+      }
+    );
+    expect(decision).toEqual({ type: "skip", reason: "closing issue already assigned" });
   });
 });
 

@@ -89,7 +89,7 @@ export async function shouldEnqueueWorkflowJobFollowUp(
 
   for (const pr of pulls) {
     if (!jobHeadMatches(pr.head.sha, pr.head.ref, job)) continue;
-    if (isAssignedForeignPR(pr, owner, repo, policy.botUsername)) {
+    if (isAssignedForeignPR(pr, owner, repo, policy.botUsername, policy)) {
       jobs.push({
         owner,
         repo,

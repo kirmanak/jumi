@@ -60,6 +60,7 @@ export interface GiteaPR {
   mergeable?: boolean | null;
   assignee?: GiteaUser | null;
   assignees?: GiteaUser[] | null;
+  labels?: Array<string | { name?: string }> | null;
 }
 
 export interface GiteaPRFile {
@@ -133,6 +134,7 @@ export interface GiteaPRPayload {
   sender: GiteaUser;
   review?: GiteaPRReviewRef;
   assignee?: GiteaUser | null;
+  label?: { name?: string } | string | null;
 }
 
 export interface GiteaIssueCommentPayload {

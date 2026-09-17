@@ -345,6 +345,39 @@ describe("enqueueFollowUpFromReview", () => {
     expect(logs).toEqual(["persist-insert skipped: no closer"]);
   });
 
+  test("labeled GitHub foreign PR failure trailer below cap enqueues keyed by PR number", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const repo = makeRepo({
+      html_url: "https://github.com/kirmanak/demo",
+      clone_url: "https://github.com/kirmanak/demo.git",
+    });
+    const api = makeApi({
+      getPR: async () =>
+        makePR({
+          user: makeUser({ login: "renovate[bot]" }),
+          body: "no close keyword",
+          assignee: null,
+          assignees: [],
+          labels: [{ name: "jumi" }],
+          head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "headsha", repo, repo_id: repo.id },
+        }),
+      getRepo: async () => repo,
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "kirmanak-jumi[bot]",
+      isPickedUp: hasJumiLabel,
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "follow-up")?.issueNumber).toBe(7);
+  });
+
   test("assigned foreign PR failure trailer below cap enqueues keyed by PR number", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());

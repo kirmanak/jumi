@@ -4,6 +4,7 @@ import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
   shouldEnqueueIssueCommentFollowUpWithTrust,
+  shouldEnqueuePullLabel,
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import type { ForgeKind } from "./forge.ts";
@@ -349,7 +350,32 @@ export async function handleGithubWebhookEvent(
         return json(400, { error: "invalid webhook payload" });
       }
     }
-    if (deps.worker && (action === "closed" || action === "merged" || action === "unassigned")) {
+    if (deps.worker && (action === "labeled" || action === "unlabeled")) {
+      try {
+        const payload = parsePullRequestPayload(rawBody);
+        const decision = await shouldEnqueuePullLabel(payload, policy, deps.worker.api, logger);
+        if (decision.type === "skip") return skipped(decision.reason, logger);
+        if (decision.type === "cancel") {
+          const result = deps.worker.cancel
+            ? await deps.worker.cancel(decision.owner, decision.repo, decision.issueNumber)
+            : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
+          logger(`cancelled ${result.key}`);
+          return json(202, result);
+        }
+        const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const result: EnqueueResult = await deps.worker.queue.enqueue(job);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        return json(202, result);
+      } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${err.message}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+        return json(400, { error: "invalid webhook payload" });
+      }
+    }
+    if (deps.worker && (action === "closed" || action === "merged")) {
       return handleWorkerWebhookEvent(rawBody, event, event, delivery, policy, {
         ...deps.worker,
         logger: deps.worker.logger ?? logger,

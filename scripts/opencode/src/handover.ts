@@ -88,7 +88,7 @@ export async function enqueueFollowUpFromReview(
   const closer = extractClosingIssueNumber(pr);
   const foreign =
     closer === undefined &&
-    isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername) &&
+    isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername, opts) &&
     !isJumiPrIdentity(pr, opts.botUsername);
   if (closer === undefined && !foreign) return logSkip("no closer");
 

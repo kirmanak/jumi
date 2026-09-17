@@ -244,9 +244,15 @@ function jobKey(job: Omit<IssueJob, "delivery" | "receivedAt">): string {
   return `${job.owner}/${job.repo}#${job.issueNumber}`;
 }
 
-function shouldWakeAssignedIssues(payload: GiteaPRPayload, owner: string, repo: string, botUsername: string): boolean {
+function shouldWakeAssignedIssues(
+  payload: GiteaPRPayload,
+  owner: string,
+  repo: string,
+  policy: IssueWebhookPolicy
+): boolean {
   const pr = payload.pull_request;
   const action = payload.action;
+  const botUsername = policy.botUsername;
   if (!isForeignPrIdentity(pr, owner, repo, botUsername)) return false;
   if (action === "unassigned") {
     if (payload.assignee != null) {
@@ -255,7 +261,7 @@ function shouldWakeAssignedIssues(payload: GiteaPRPayload, owner: string, repo: 
     return !isAssignedToBot(pr, botUsername);
   }
   if (action !== "closed" && action !== "merged") return false;
-  return isAssignedToBot(pr, botUsername);
+  return isIssuePickedUp(pr, policy);
 }
 
 export async function pullWaitClearJobsToEnqueue(
@@ -303,10 +309,10 @@ export async function pullWaitClearJobsToEnqueue(
     }
   }
 
-  if (api.listRepoIssues && shouldWakeAssignedIssues(payload, owner, repo, policy.botUsername)) {
+  if (api.listRepoIssues && shouldWakeAssignedIssues(payload, owner, repo, policy)) {
     const pulls = await api.listOpenPulls(owner, repo);
     const remainingLock = pulls.some(
-      (open) => open.number !== pr.number && isAssignedForeignPR(open, owner, repo, policy.botUsername)
+      (open) => open.number !== pr.number && isAssignedForeignPR(open, owner, repo, policy.botUsername, policy)
     );
     if (!remainingLock) {
       const assigned = await assignedIssueJobsToEnqueue(

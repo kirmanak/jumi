@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "../src/push_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
@@ -121,6 +122,46 @@ describe("shouldEnqueuePushConflicts", () => {
   test("skips missing after", async () => {
     const decision = await shouldEnqueuePushConflicts(makePushPayload({ after: undefined }), policy, makeApi());
     expect(decision).toEqual({ type: "skip", reason: "deleted ref" });
+  });
+
+  test("enqueues conflict for a labeled GitHub foreign PR", async () => {
+    const githubRepo = makeRepo({
+      html_url: "https://github.com/kirmanak/demo",
+      clone_url: "https://github.com/kirmanak/demo.git",
+    });
+    const foreign = makePR({
+      number: 55,
+      title: "chore(deps)",
+      body: "",
+      user: makeUser({ login: "renovate[bot]" }),
+      assignee: null,
+      assignees: [],
+      labels: [{ name: "jumi" }],
+      html_url: "https://github.com/kirmanak/demo/pull/55",
+      head: {
+        label: "kirmanak:renovate/all-digest",
+        ref: "renovate/all-digest",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    const decision = await shouldEnqueuePushConflicts(
+      makePushPayload({ repository: githubRepo }),
+      {
+        giteaUrl: "https://github.com",
+        allowedOrgs: ["kirmanak"],
+        allowedRepos: [],
+        botUsername: "kirmanak-jumi[bot]",
+        isPickedUp: hasJumiLabel,
+      },
+      makeApi({ listOpenPulls: async () => [foreign] })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs[0]?.mode).toBe("conflict");
+    expect(decision.jobs[0]?.issueNumber).toBe(55);
+    expect(decision.jobs[0]?.prNumber).toBe(55);
   });
 
   test("enqueues conflict for an assigned foreign PR", async () => {

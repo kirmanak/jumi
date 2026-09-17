@@ -67,6 +67,7 @@ export interface Pull {
   mergeable?: boolean | null;
   assignee?: Actor | null;
   assignees?: Actor[] | null;
+  labels?: Array<string | { name?: string }> | null;
   created_at: string;
   updated_at: string;
 }

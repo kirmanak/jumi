@@ -89,6 +89,7 @@ type GithubPR = {
   mergeable?: boolean | null;
   assignee?: GithubUser;
   assignees?: GithubUser[] | null;
+  labels?: Array<{ name?: string } | string> | null;
   created_at: string;
   updated_at: string;
 };
@@ -290,6 +291,7 @@ export function toPull(pr: GithubPR): Pull {
     mergeable: pr.mergeable,
     assignee: pr.assignee ? actor(pr.assignee) : (pr.assignee ?? null),
     assignees: pr.assignees == null ? pr.assignees : pr.assignees.map(actor),
+    labels: pr.labels,
     created_at: pr.created_at,
     updated_at: pr.updated_at,
   };

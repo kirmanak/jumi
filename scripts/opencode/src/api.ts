@@ -116,6 +116,7 @@ export function toPull(pr: GiteaPR): Pull {
     mergeable: pr.mergeable,
     assignee: pr.assignee ? actor(pr.assignee) : pr.assignee,
     assignees: pr.assignees?.map(actor) ?? pr.assignees,
+    labels: pr.labels,
     created_at: pr.created_at,
     updated_at: pr.updated_at,
   };
