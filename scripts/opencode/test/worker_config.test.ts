@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ReviewQueue } from "../src/queue.ts";
+import { RUNNERS_FILE_ENV } from "../src/runners.ts";
 import type { IssueJob } from "../src/types.ts";
 import { loadWorkerConfig } from "../src/worker_config.ts";
 import { makeIssueJob } from "./fixtures.ts";
@@ -53,6 +57,50 @@ describe("loadWorkerConfig", () => {
       loadWorkerConfig({ ...required, OPENCODE_FALLBACK_MODEL: "anthropic/claude-sonnet-4-6" }).fallbackModel
     ).toBe("anthropic/claude-sonnet-4-6");
     expect(loadWorkerConfig({ ...required, OPENCODE_FALLBACK_VARIANT: "high" }).fallbackVariant).toBe("high");
+  });
+
+  test("synthesizes a 1-entry OpenCode chain from OPENCODE_MODEL when fallback is unset", () => {
+    const config = loadWorkerConfig(required);
+    expect(config.chain).toEqual(["primary"]);
+    expect(config.runners).toEqual({ primary: { type: "opencode", model: "openai/gpt-5.5" } });
+    expect(config.model).toBe("openai/gpt-5.5");
+    expect(config.fallbackModel).toBeUndefined();
+  });
+
+  test("synthesizes a 2-entry OpenCode chain from OPENCODE_MODEL and FALLBACK_*", () => {
+    const config = loadWorkerConfig({
+      ...required,
+      OPENCODE_MODEL: "provider-a/model-one",
+      OPENCODE_VARIANT: "xhigh",
+      OPENCODE_FALLBACK_MODEL: "provider-b/model-two",
+      OPENCODE_FALLBACK_VARIANT: "high",
+    });
+    expect(config.chain).toEqual(["primary", "fallback"]);
+    expect(config.runners).toEqual({
+      primary: { type: "opencode", model: "provider-a/model-one", variant: "xhigh" },
+      fallback: { type: "opencode", model: "provider-b/model-two", variant: "high" },
+    });
+    expect(config.model).toBe("provider-a/model-one");
+    expect(config.fallbackModel).toBe("provider-b/model-two");
+  });
+
+  test("JUMI_RUNNERS_FILE named runners override OPENCODE_*", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jumi-worker-runners-"));
+    const file = join(dir, "runners.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        runners: {
+          first: { type: "opencode", model: "provider-a/one" },
+          second: { type: "opencode", model: "provider-b/two" },
+        },
+        chain: ["first", "second"],
+      })
+    );
+    const config = loadWorkerConfig({ ...required, [RUNNERS_FILE_ENV]: file });
+    expect(config.chain).toEqual(["first", "second"]);
+    expect(config.model).toBe("provider-a/one");
+    expect(config.fallbackModel).toBe("provider-b/two");
   });
 
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {
