@@ -77,6 +77,7 @@ jobs:
           build-args: |
             BUN_VERSION=${{ env.BUN_VERSION }}
             OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
+            CLAUDE_VERSION=${{ env.CLAUDE_VERSION }}
             HELM_VERSION=${{ env.HELM_VERSION }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
@@ -121,6 +122,7 @@ jobs:
           fi
           docker run --rm "${IMAGE}:${VERSION}" python3 --version
           docker run --rm "${IMAGE}:${VERSION}" helm version --short
+          docker run --rm "${IMAGE}:${VERSION}" claude --version
           docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/gitops-apply-review/SKILL.md
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}:${VERSION}" sh -c 'cd /work && git init -q && opencode debug config')"
           printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null

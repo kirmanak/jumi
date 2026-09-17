@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { ActionJob, Check, CheckState, Forge } from "./ports.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 
-type CiApi = Pick<Forge, "listCommitStatuses" | "listActionJobs" | "getActionJobLogs">;
+type CiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
 
 export const JUMI_REVIEW_CONTEXT = "jumi/opencode-review";
 export const CI_LOG_FILE = "JUMI_CI.md";
@@ -196,7 +196,8 @@ export function jobMatchesCheck(job: ActionJob, checkName: string, sha: string):
 
 function jobIdFromTargetUrl(targetUrl: string | undefined): number | undefined {
   if (!targetUrl) return undefined;
-  const match = /\/actions\/(?:runs\/\d+\/)?jobs\/(\d+)(?:\/|$)/.exec(targetUrl);
+  const match =
+    /\/actions\/(?:runs\/\d+\/)?jobs?\/(\d+)(?:\/|$)/.exec(targetUrl) ?? /\/checks\/(\d+)(?:\/|$)/.exec(targetUrl);
   if (!match) return undefined;
   const id = Number(match[1]);
   return Number.isFinite(id) ? id : undefined;
@@ -338,7 +339,8 @@ async function logsForCheck(
   jobs: ActionJob[]
 ): Promise<{ text: string; jobId?: number }> {
   const name = status.context ?? "";
-  const jobId = jobIdFromTargetUrl(status.target_url) ?? jobs.find((job) => jobMatchesCheck(job, name, sha))?.id;
+  const jobId =
+    status.jobId ?? jobIdFromTargetUrl(status.target_url) ?? jobs.find((job) => jobMatchesCheck(job, name, sha))?.id;
   if (jobId === undefined) {
     const fallback = [status.description, status.target_url].filter(Boolean).join("\n");
     return { text: fallback };
@@ -362,13 +364,19 @@ export async function inspectCi(opts: {
   skipLatches?: SkipLatchStore;
 }): Promise<CiInspection> {
   if (!opts.sha) return emptyInspection(opts.sha);
-  let statuses: Check[];
+  let statuses: Check[] = [];
   try {
-    statuses = latestStatuses(await opts.api.listCommitStatuses(opts.owner, opts.repo, opts.sha));
+    statuses = await opts.api.listCommitStatuses(opts.owner, opts.repo, opts.sha);
   } catch {
-    return emptyInspection(opts.sha);
+    statuses = [];
   }
-  const others = statuses.filter((status) => !isJumiReviewContext(status.context));
+  let checkRuns: Check[] = [];
+  try {
+    checkRuns = await opts.api.listCheckRuns(opts.owner, opts.repo, opts.sha);
+  } catch {
+    checkRuns = [];
+  }
+  const others = latestStatuses([...statuses, ...checkRuns]).filter((status) => !isJumiReviewContext(status.context));
   const pending = others.some((status) => commitStatusState(status) === "pending");
   const red = others.filter((status) => {
     const state = commitStatusState(status);

@@ -86,12 +86,12 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `OPENCODE_VARIANT` | unset | OpenCode reasoning effort passed to `opencode run --variant`. Unset or empty omits the flag (model default). Do not bake an effort into the image |
 | `OPENCODE_FALLBACK_MODEL` | unset | Optional OpenCode model ID (`provider/model`) for one from-scratch hop when the primary child exits because the provider/model is unavailable. Unset, empty, or same-provider fallback does not hop: Zen/Free quota then delayed-requeues the same job instead of a human kill-switch |
 | `OPENCODE_FALLBACK_VARIANT` | unset | OpenCode reasoning effort for the fallback spawn. Unset or empty omits `--variant` (model default) |
-| `JUMI_RUNNERS_FILE` | unset | Optional JSON catalog of named OpenCode runners and an ordered hop chain. Unset synthesizes a 1–2 entry chain from `OPENCODE_MODEL` / `OPENCODE_VARIANT` / `OPENCODE_FALLBACK_*`. Unknown `type` fails process start. Secrets stay in env, not this file. Router does not require it |
+| `JUMI_RUNNERS_FILE` | unset | Optional JSON catalog of named runners and an ordered hop chain. `type` is `opencode` or `claude`; unknown `type` fails process start. Unset synthesizes a 1–2 entry **OpenCode** chain from `OPENCODE_MODEL` / `OPENCODE_VARIANT` / `OPENCODE_FALLBACK_*` — pinning the Claude binary does not flip either factory. Claude entries use `model`, optional `effort` (`--effort`), and spawn with `--setting-sources user` (untrusted checkout `.claude/` / `.mcp.json` is not loaded). Auth is `HOME` / `CLAUDE_CODE_OAUTH_TOKEN` from the parent env, not this file. Secrets stay in env. Router does not require it |
 | `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`; only `gitops-apply-review` is allowed (`skills.paths`); other skills denied; external_directory is last-match star deny then allow `/app/review-skills`; webfetch JSON stays scalar allow (OpenCode types it as Action); last-match star allow then deny `kirmanak.stream` and GitHub search is applied via `OPENCODE_PERMISSION`; task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
 | `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. Override to **your** well-known host. Unset or empty still defaults to `https://kirmanak.stream`. Set `disabled` to turn well-known **off** (no `auth.json` seed, no fetch). Other non-URL values fail closed. `OPENCODE_MODEL` and `OPENCODE_API_KEY` still apply with well-known off. Otherwise the service seeds a `wellknown` auth entry so OpenCode loads `/.well-known/opencode` before the local review policy |
 | `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
 | `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
-| `HOME` | `/data` in the image | OpenCode auth storage root |
+| `HOME` | `/data` in the image | Auth storage root (`OpenCode` under `HOME`; Claude Code uses `HOME` and `CLAUDE_CODE_OAUTH_TOKEN` from the parent env, not OpenCode’s per-run `XDG_CONFIG_HOME`) |
 | `WORKDIR` | `/work` in the image | Temporary workspace root |
 | `QUEUE_CONCURRENCY` | `1` | Review worker concurrency |
 | `MAX_FILES` | `100` | Max changed files sent to OpenCode |
@@ -170,7 +170,7 @@ Event map (router mailbox):
 - `issue_comment` / `pull_request_comment` `created` on an open jumi closing PR or an assigned foreign PR (human sender, non-empty body, not a jumi sticky) → enqueue follow-up
 - `pull_request_rejected` on an open jumi closing PR or assigned foreign PR → enqueue follow-up
 - `push` on `refs/heads/<repository.default_branch>` → mechanical HTTP filter (list open managed jumi closers and assigned foreign PRs; no git, no OpenCode). Enqueue `mode: "conflict"`. Tags, deletes, and non-default branches skip
-- `workflow_job` → wake only (202 immediately). Malformed / not-ours → 202 skip, never 400. Do not use `status` (also fires for Jumi reviews). Re-reads **live** commit statuses for `pr.head.sha`, ignores `jumi/opencode-review`, skips if any other context is `pending`, and on a non-jumi `failure` injects `JUMI_CI.md` then follow-up
+- `workflow_job` → wake only (202 immediately). Malformed / not-ours → 202 skip, never 400. Do not use `status` (also fires for Jumi reviews). Re-reads **live** commit statuses for `pr.head.sha` (Gitea) and GitHub Actions check-runs, ignores `jumi/opencode-review`, skips if any other context is `pending`, and on a non-jumi `failure` injects `JUMI_CI.md` then follow-up
 - `pull_request` / `pull_request_assign` `assigned` (bot still assigned) → enqueue follow-up keyed by the PR number, except when the PR closes a same-repo issue that is open and assigned to the bot: skip (202), live GET, fail closed on GET failure; the issue job owns the work. `unassigned` when the bot is no longer an assignee → cancel that PR. If that PR was an assigned foreign PR and no assigned foreign PR remains, enqueue first-run for other open issues still assigned to the bot (fresh GET). `closed` / `merged` of an assigned (or merged) foreign PR with no remaining assigned foreign PR does the same, and also `GET`s `/blocks` on the PR and on issues it closes. Unassign of the waiting issue remains the kill switch. Other `pull_request` actions: reviewer owns opened/synchronize; the rest `202` skip, never 400
 - `ping` → `200 {"ok":true}`
 - other events → `202` skip
@@ -301,7 +301,7 @@ bun run server
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
   opencode-implement.json    # Implement config (edit/write allow; skills.paths /app/review-skills; blanket skill allow)
-  tool-versions.env          # Pinned OpenCode/Bun/Helm/Temurin versions
+  tool-versions.env          # Pinned OpenCode/Claude/Bun/Helm/Temurin versions
 deploy/
   contract.md                # GitOps runtime contract (semver source of truth)
 review-skills/

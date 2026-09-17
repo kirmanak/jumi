@@ -141,8 +141,30 @@ describe("loadConfig", () => {
       second: { type: "opencode", model: "provider-b/two", variant: "high" },
     });
 
+    const claudeFile = join(dir, "claude.json");
+    writeFileSync(
+      claudeFile,
+      JSON.stringify({
+        runners: {
+          spark: { type: "claude", model: "opus", effort: "high" },
+          grok: { type: "opencode", model: "opencode/grok-4.6", variant: "high" },
+        },
+        chain: ["spark", "grok"],
+      })
+    );
+    const claudeConfig = loadConfig({ ...required, [RUNNERS_FILE_ENV]: claudeFile });
+    expect(claudeConfig.chain).toEqual(["spark", "grok"]);
+    expect(claudeConfig.runners).toEqual({
+      spark: { type: "claude", model: "opus", effort: "high" },
+      grok: { type: "opencode", model: "opencode/grok-4.6", variant: "high" },
+    });
+    expect(claudeConfig.model).toBe("opus");
+    expect(claudeConfig.variant).toBeUndefined();
+    expect(claudeConfig.fallbackModel).toBe("opencode/grok-4.6");
+    expect(claudeConfig.fallbackVariant).toBe("high");
+
     const bad = join(dir, "bad.json");
-    writeFileSync(bad, JSON.stringify({ runners: { x: { type: "claude", model: "claude" } }, chain: ["x"] }));
+    writeFileSync(bad, JSON.stringify({ runners: { x: { type: "hermes", model: "claude" } }, chain: ["x"] }));
     expect(() => loadConfig({ ...required, [RUNNERS_FILE_ENV]: bad })).toThrow("Unknown runner type");
   });
 

@@ -2057,6 +2057,55 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("GitHub Actions check-run failure with only jumi/opencode-review status runs OpenCode", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
+        listCheckRuns: async () => [
+          {
+            id: 4,
+            context: "checks",
+            status: "failure",
+            description: "Process completed with exit code 1.",
+            target_url: "https://github.com/kirmanak/jumi/actions/runs/9/job/4",
+            jobId: 4,
+          },
+          { id: 5, context: "image", status: "success" },
+        ],
+        getActionJobLogs: async () => "##[error]lint/typecheck/tests, exit 1\n",
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          const ci = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
+          expect(ci).toContain("lint/typecheck/tests, exit 1");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).not.toBe("skipped");
+      expect(openCode).toBe(1);
+    });
+  });
+
   test("CI-only wake injects the last jumi review into JUMI_FEEDBACK.md", async () => {
     await withDirs(async (home, workdir) => {
       const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

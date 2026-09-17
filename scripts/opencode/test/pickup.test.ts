@@ -91,6 +91,28 @@ describe("classifyCloserWork", () => {
     }
   });
 
+  test("red GitHub Actions check-run with only jumi/opencode-review status is follow-up", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-pickup-"));
+    try {
+      const mode = await classifyCloserWork({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", status: "success" }],
+          listCheckRuns: async () => [{ id: 4, context: "checks", status: "failure", jobId: 4 }],
+          getActionJobLogs: async () => "##[error]lint/typecheck/tests, exit 1\n",
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        pr: jumiCloser(),
+        issueNumber: 12,
+        botUsername: "jumi",
+        home,
+      });
+      expect(mode).toBe("follow-up");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("mergeable false with no comments is conflict", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-pickup-"));
     try {

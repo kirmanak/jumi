@@ -4,7 +4,7 @@ import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
-import type { NamedRunner } from "./runners.ts";
+import { CLAUDE_RUNNER_TYPE, type NamedRunner, OPENCODE_RUNNER_TYPE } from "./runners.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 
@@ -124,17 +124,31 @@ async function beginHop(
   await clearOpenCodeSession(opts.workdir);
 }
 
+function engineOptsForRunner(
+  opts: EngineRunOptions,
+  runner: NamedRunner,
+  extra?: Partial<EngineRunOptions>
+): EngineRunOptions {
+  const fields: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort"> =
+    runner.type === CLAUDE_RUNNER_TYPE
+      ? { type: CLAUDE_RUNNER_TYPE, model: runner.model, effort: runner.effort, variant: undefined }
+      : { type: OPENCODE_RUNNER_TYPE, model: runner.model, variant: runner.variant, effort: undefined };
+  return { ...opts, ...fields, ...extra };
+}
+
 function lazyChain(opts: EngineRunOptions, hop: EngineChainOptions): NamedRunner[] {
   return [
-    { name: "primary", type: "opencode", model: opts.model, variant: opts.variant },
-    { name: "fallback", type: "opencode", model: hop.fallbackModel!, variant: hop.fallbackVariant },
+    { name: "primary", type: OPENCODE_RUNNER_TYPE, model: opts.model, variant: opts.variant },
+    { name: "fallback", type: OPENCODE_RUNNER_TYPE, model: hop.fallbackModel!, variant: hop.fallbackVariant },
   ];
 }
 
 export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
-  if ((!hop.chain || hop.chain.length <= 1) && !hop.fallbackModel) return engine;
+  if (!hop.chain?.length && !hop.fallbackModel) return engine;
 
-  let chain = hop.chain && hop.chain.length >= 2 ? hop.chain : undefined;
+  let chain: NamedRunner[] | undefined;
+  if (hop.chain && hop.chain.length >= 2) chain = hop.chain;
+  else if (hop.chain?.length === 1 && !hop.fallbackModel) chain = hop.chain;
   let index = 0;
 
   const runnersFor = (opts: EngineRunOptions): NamedRunner[] => {
@@ -148,23 +162,16 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     const current = runners[index]!;
 
     if (index > 0) {
-      return engine({
-        ...opts,
-        model: current.model,
-        variant: current.variant,
-      });
+      return engine(engineOptsForRunner(opts, current));
     }
 
     while (true) {
       const runner = runners[index]!;
       const hopSpawn = index > 0;
-      const runOpts: EngineRunOptions = {
-        ...opts,
-        model: runner.model,
-        variant: runner.variant,
+      const runOpts: EngineRunOptions = engineOptsForRunner(opts, runner, {
         deferQuotaExit: true,
         ...(hopSpawn ? { continueSession: false, hop: true } : {}),
-      };
+      });
 
       let result: EngineResult;
       try {
