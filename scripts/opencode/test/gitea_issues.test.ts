@@ -10,6 +10,7 @@ import {
   pullRequestClosesIssue,
   resolveWorkerPullRequest,
 } from "../src/gitea_issues.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import { makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 describe("pullRequestClosesIssue", () => {
@@ -235,6 +236,24 @@ describe("isAssignedForeignPR", () => {
       },
     });
     expect(isAssignedForeignPR(closer, "kirmanak", "demo", "jumi")).toBe(false);
+  });
+
+  test("matches a labeled GitHub foreign PR when pickup is the jumi label", () => {
+    const repo = makeRepo();
+    const foreign = makePR({
+      user: makeUser({ login: "renovate[bot]" }),
+      assignee: null,
+      assignees: [],
+      labels: [{ name: "jumi" }],
+      head: { label: "kirmanak:renovate/x", ref: "renovate/x", sha: "abc", repo, repo_id: repo.id },
+    });
+    expect(
+      isAssignedForeignPR(foreign, "kirmanak", "demo", "kirmanak-jumi[bot]", {
+        botUsername: "kirmanak-jumi[bot]",
+        isPickedUp: hasJumiLabel,
+      })
+    ).toBe(true);
+    expect(isAssignedForeignPR(foreign, "kirmanak", "demo", "kirmanak-jumi[bot]")).toBe(false);
   });
 });
 

@@ -1,4 +1,4 @@
-import { isAssignedToBot, isIssuePickedUp, isPullRequestIssue, type PickupPolicy } from "./assignee.ts";
+import { hasLabel, isAssignedToBot, isIssuePickedUp, isPullRequestIssue, type PickupPolicy } from "./assignee.ts";
 import {
   extractClosingIssueNumber,
   type IssueApi,
@@ -147,7 +147,7 @@ export function followUpIssueNumber(
     if (closer !== undefined) return closer;
   }
   if (issue && isIssuePickedUp(issue, pickup)) return pr.number;
-  if (isAssignedToBot(pr, botUsername)) return pr.number;
+  if (isIssuePickedUp(pr, pickup)) return pr.number;
   return undefined;
 }
 
@@ -178,7 +178,7 @@ export function followUpSkipReason(
   }
 
   const assignedOnIssue = Boolean(issue && isIssuePickedUp(issue, pickup) && issue.number === pr.number);
-  const assignedOnPr = isAssignedToBot(pr, botUsername);
+  const assignedOnPr = isIssuePickedUp(pr, pickup);
   if (!assignedOnIssue && !assignedOnPr) {
     if (!isJumiPrIdentity(pr, botUsername)) return "not a jumi pull request";
     return "no closing issue";
@@ -415,6 +415,68 @@ export async function shouldEnqueuePullAssign(
     type: "enqueue",
     job: followUpJob(owner, repo, pr.number, pr, payload.repository, payload.action, {
       event: "pull_request_assign",
+      sender: payload.sender.login,
+    }),
+  };
+}
+
+function payloadJumiLabel(label: GiteaPRPayload["label"]): boolean {
+  if (label == null) return false;
+  return hasLabel({ labels: [label] }, "jumi");
+}
+
+function prWithEventLabel(pr: GiteaPR, label: GiteaPRPayload["label"]): GiteaPR {
+  if (label == null) return pr;
+  return { ...pr, labels: [...(pr.labels ?? []), label] };
+}
+
+export async function shouldEnqueuePullLabel(
+  payload: GiteaPRPayload,
+  policy: FollowUpWebhookPolicy,
+  api?: Pick<IssueApi, "getIssue">,
+  logger?: (message: string) => void
+): Promise<PullAssignWebhookDecision> {
+  const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
+  const pr = prWithEventLabel(payload.pull_request, payload.label);
+
+  if (payload.action === "unlabeled") {
+    if (!payloadJumiLabel(payload.label)) return { type: "skip", reason: "unlabeled other label" };
+    return { type: "cancel", owner, repo, issueNumber: pr.number };
+  }
+
+  if (payload.action !== "labeled") {
+    return { type: "skip", reason: `unsupported action ${payload.action}` };
+  }
+
+  if (loginEquals(payload.sender?.login, policy.botUsername)) {
+    return { type: "skip", reason: "sender is bot" };
+  }
+  if (!payloadJumiLabel(payload.label)) return { type: "skip", reason: "labeled other label" };
+
+  const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername, policy);
+  if (skip) return { type: "skip", reason: skip };
+
+  const closer = extractClosingIssueNumber(pr);
+  if (closer !== undefined) {
+    if (!api) return { type: "skip", reason: "failed to load issue" };
+    try {
+      const issue = await api.getIssue(owner, repo, closer);
+      if (issue.state === "open" && isIssuePickedUp(issue, policy)) {
+        return { type: "skip", reason: "closing issue already assigned" };
+      }
+    } catch (err) {
+      logger?.(`failed to load issue: ${err instanceof Error ? err.message : String(err)}`);
+      return {
+        type: "skip",
+        reason: "failed to load issue",
+      };
+    }
+  }
+
+  return {
+    type: "enqueue",
+    job: followUpJob(owner, repo, pr.number, pr, payload.repository, payload.action, {
+      event: "labeled",
       sender: payload.sender.login,
     }),
   };

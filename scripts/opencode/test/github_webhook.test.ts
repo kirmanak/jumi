@@ -235,7 +235,7 @@ describe("POST /webhooks/github", () => {
     };
   }
 
-  test("labeled issue enqueues implement; labeled PR does not", async () => {
+  test("labeled issue enqueues implement; issues-event labeled PR does not", async () => {
     const { handler, store } = mailbox();
     const labeled = await handler(await signedGithubRequest(labeledPayload(), { event: "issues" }));
     expect(labeled.status).toBe(202);
@@ -253,6 +253,101 @@ describe("POST /webhooks/github", () => {
     expect(pr.status).toBe(202);
     expect(await responseJson(pr)).toEqual({ skipped: "pull request issue" });
     expect(store.rows).toHaveLength(1);
+  });
+
+  function labeledForeignPrPayload(overrides: Parameters<typeof makePR>[0] = {}) {
+    return makePayload({
+      action: "labeled",
+      label: { name: "jumi" },
+      repository: githubRepo,
+      sender: makeUser({ login: "alice", type: "User" }),
+      pull_request: makePR({
+        number: 55,
+        title: "chore(deps)",
+        body: "",
+        user: makeUser({ login: "renovate[bot]" }),
+        assignee: null,
+        assignees: [],
+        labels: [{ name: "jumi" }],
+        html_url: "https://github.com/kirmanak/demo/pull/55",
+        head: {
+          label: "kirmanak:renovate/all-digest",
+          ref: "renovate/all-digest",
+          sha: "headsha",
+          repo: githubRepo,
+          repo_id: githubRepo.id,
+        },
+        ...overrides,
+      }),
+    });
+  }
+
+  test("pull_request labeled jumi enqueues follow-up on the PR head ref", async () => {
+    const { handler, store } = mailbox();
+    const response = await handler(await signedGithubRequest(labeledForeignPrPayload(), { event: "pull_request" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#55:headsha", queued: true });
+    expect(store.rows[0]?.kind).toBe("follow-up");
+    expect(store.rows[0]?.issueNumber).toBe(55);
+    expect(store.rows[0]?.prNumber).toBe(55);
+  });
+
+  test("pull_request labeled does not enqueue review", async () => {
+    const queue = makeReviewQueue();
+    const { store } = mailbox();
+    const withReview = createFetchHandler(githubConfig(), {
+      queue,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+      },
+    });
+    const response = await withReview(await signedGithubRequest(labeledForeignPrPayload(), { event: "pull_request" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#55:headsha", queued: true });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  test("unlabel jumi on a PR cancels worker jobs", async () => {
+    const { handler, store } = mailbox();
+    expect(
+      (await handler(await signedGithubRequest(labeledForeignPrPayload(), { event: "pull_request" }))).status
+    ).toBe(202);
+    const unlabeled = labeledForeignPrPayload({ labels: [] });
+    unlabeled.action = "unlabeled";
+    const response = await handler(await signedGithubRequest(unlabeled, { event: "pull_request" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#55", cancelled: true });
+    expect(store.rows.filter((row) => row.state === "queued")).toHaveLength(0);
+  });
+
+  test("GitHub pull_request assigned does not start follow-up", async () => {
+    const { handler, store } = mailbox();
+    const response = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "assigned",
+          repository: githubRepo,
+          pull_request: makePR({
+            number: 55,
+            user: makeUser({ login: "renovate[bot]" }),
+            assignee: makeUser({ login: "alice" }),
+            assignees: [makeUser({ login: "alice" })],
+            html_url: "https://github.com/kirmanak/demo/pull/55",
+            head: {
+              label: "kirmanak:renovate/x",
+              ref: "renovate/x",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        }),
+        { event: "pull_request" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action assigned" });
+    expect(store.rows).toHaveLength(0);
   });
 
   test("unlabel deletes skip latches even when no jobs are queued", async () => {
@@ -412,7 +507,7 @@ describe("POST /webhooks/github", () => {
     expect(store.rows).toHaveLength(0);
   });
 
-  test("closed assigned foreign PR wakes labeled issues", async () => {
+  test("closed labeled foreign PR wakes labeled issues", async () => {
     const store = new MemoryReviewJobStore();
     const handler = createFetchHandler(githubConfig(), {
       queue: store,
@@ -446,8 +541,9 @@ describe("POST /webhooks/github", () => {
             title: "chore(deps)",
             body: "",
             user: makeUser({ login: "renovate[bot]" }),
-            assignee: makeUser({ login: "jumi" }),
-            assignees: [makeUser({ login: "jumi" })],
+            assignee: null,
+            assignees: [],
+            labels: [{ name: "jumi" }],
             html_url: "https://github.com/kirmanak/demo/pulls/50",
             head: {
               label: "kirmanak:renovate/x",
@@ -791,6 +887,42 @@ describe("worker POST /webhooks/github", () => {
         )
       ).status
     ).toBe(401);
+  });
+
+  test("labeled foreign PR enqueues follow-up on the worker mailbox", async () => {
+    const queue = makeIssueQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), { queue });
+    const response = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "labeled",
+          label: { name: "jumi" },
+          repository: githubRepo,
+          sender: makeUser({ login: "alice", type: "User" }),
+          pull_request: makePR({
+            number: 55,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate[bot]" }),
+            labels: [{ name: "jumi" }],
+            html_url: "https://github.com/kirmanak/demo/pull/55",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        }),
+        { event: "pull_request", url: "https://worker.test/webhooks/github" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#55", queued: true });
+    expect(queue.jobs[0]?.mode).toBe("follow-up");
+    expect(queue.jobs[0]?.issueNumber).toBe(55);
+    expect(queue.jobs[0]?.prNumber).toBe(55);
   });
 
   test("does not enqueue review jobs on the worker mailbox", async () => {

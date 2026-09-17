@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "../src/ci_webhook.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
@@ -143,6 +144,48 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
       })
     );
     expect(decision).toEqual({ type: "skip", reason: "not an in-scope jumi pull request" });
+  });
+
+  test("enqueues follow-up for a labeled GitHub foreign PR matching head sha", async () => {
+    const githubRepo = makeRepo({
+      html_url: "https://github.com/kirmanak/demo",
+      clone_url: "https://github.com/kirmanak/demo.git",
+    });
+    const foreign = makePR({
+      number: 55,
+      title: "chore(deps)",
+      body: "",
+      user: makeUser({ login: "renovate[bot]" }),
+      assignee: null,
+      assignees: [],
+      labels: [{ name: "jumi" }],
+      html_url: "https://github.com/kirmanak/demo/pull/55",
+      head: {
+        label: "kirmanak:renovate/all-digest",
+        ref: "renovate/all-digest",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    const decision = await shouldEnqueueWorkflowJobFollowUp(
+      makeWorkflowJobPayload({
+        repository: githubRepo,
+        workflow_job: { id: 99, name: "build", head_sha: "headsha", head_branch: "renovate/all-digest" },
+      }),
+      {
+        giteaUrl: "https://github.com",
+        allowedOrgs: ["kirmanak"],
+        allowedRepos: [],
+        botUsername: "kirmanak-jumi[bot]",
+        isPickedUp: hasJumiLabel,
+      },
+      makeApi({ listOpenPulls: async () => [foreign] })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs[0]?.issueNumber).toBe(55);
+    expect(decision.jobs[0]?.prNumber).toBe(55);
   });
 
   test("enqueues follow-up for an assigned foreign PR matching head sha", async () => {

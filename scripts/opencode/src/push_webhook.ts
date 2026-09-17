@@ -71,7 +71,7 @@ export async function shouldEnqueuePushConflicts(
   const sender = pushSender(payload);
 
   for (const pr of pulls) {
-    if (isAssignedForeignPR(pr, owner, repo, policy.botUsername)) {
+    if (isAssignedForeignPR(pr, owner, repo, policy.botUsername, policy)) {
       jobs.push({
         owner,
         repo,
