@@ -4,6 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
+import { withModelHop } from "../src/fallback.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   CONFLICT_PROMPT,
@@ -341,6 +342,8 @@ exec sleep 30
         expect(result.infra).toBe(false);
         const text = renderRunMetrics();
         expect(text).not.toContain('kind="review",class="auth"} 1');
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 1');
+        expect(text).not.toContain('kind="review",class="quota"} 1');
       }
     );
   });
@@ -622,8 +625,76 @@ exec sleep 30
         expect(result.message).toContain("usage limit exceeded");
         expect(result.infra).toBe(false);
         expect(result.quota).toBe("resetting");
+        expect(result.exitCode).toBe(143);
         // Live abort: must not wait out the 30s sleep.
         expect(Date.now() - startedAt).toBeLessThan(20_000);
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 1');
+        expect(text).not.toContain('kind="review",class="quota"} 1');
+      }
+    );
+  });
+
+  test("hop-yes quota SIGTERM is class quota, not 143", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+model=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-m" ]; then model="$arg"; fi
+  prev="$arg"
+done
+case "$model" in
+  anthropic/*)
+    printf 'ok\\n'
+    exit 0
+    ;;
+esac
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const result = await withModelHop(runOpenCode, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
+          prompt: "prompt",
+          model: "opencode/big-pickle",
+          workdir,
+          sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
+        });
+        expect(result.status).toBe("ok");
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="quota"} 1');
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="ok"} 1');
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 0');
+      }
+    );
+  });
+
+  test("quota SIGTERM stays 143 when lease is too short to hop", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+mkdir -p "$XDG_DATA_HOME/opencode/log"
+printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const result = await withModelHop(runOpenCode, {
+          fallbackModel: "anthropic/claude-sonnet-4-6",
+          remainingLeaseMs: () => 1,
+        })({
+          prompt: "prompt",
+          model: "opencode/big-pickle",
+          workdir,
+          sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
+          timeoutMs: 900_000,
+        });
+        expect(result.status).toBe("stuck");
+        expect(result.exitCode).toBe(143);
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 1');
+        expect(text).not.toContain('kind="review",class="quota"} 1');
       }
     );
   });

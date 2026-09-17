@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
@@ -100,6 +101,11 @@ function shouldHopFromError(err: unknown, opts: EngineRunOptions, currentModel: 
   return looksLikeProviderUnavailable(err.message);
 }
 
+function settleQuotaSigterm(opts: EngineRunOptions, result: EngineResult, hopped: boolean): void {
+  if (!shouldDeferQuotaExit(result)) return;
+  recordOpenCodeRun(opts.trace?.kind ?? "review", { ...result, hopped });
+}
+
 async function beginHop(
   hop: EngineChainOptions,
   opts: EngineRunOptions,
@@ -162,11 +168,10 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     while (true) {
       const runner = runners[index]!;
       const hopSpawn = index > 0;
-      const runOpts: EngineRunOptions = engineOptsForRunner(
-        opts,
-        runner,
-        hopSpawn ? { continueSession: false, hop: true } : undefined
-      );
+      const runOpts: EngineRunOptions = engineOptsForRunner(opts, runner, {
+        deferQuotaExit: true,
+        ...(hopSpawn ? { continueSession: false, hop: true } : {}),
+      });
 
       let result: EngineResult;
       try {
@@ -181,9 +186,21 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       }
 
       const next = runners[index + 1];
-      if (!next || !shouldHopFromResult(result, opts, runner.model, next.model)) return result;
-      if (!(await leaseAllowsHop(hop, opts.timeoutMs))) return result;
-      await beginHop(hop, opts, runner, next);
+      if (!next || !shouldHopFromResult(result, opts, runner.model, next.model)) {
+        settleQuotaSigterm(opts, result, false);
+        return result;
+      }
+      if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
+        settleQuotaSigterm(opts, result, false);
+        return result;
+      }
+      try {
+        await beginHop(hop, opts, runner, next);
+      } catch (err) {
+        settleQuotaSigterm(opts, result, false);
+        throw err;
+      }
+      settleQuotaSigterm(opts, result, true);
       index++;
     }
   };

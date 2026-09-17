@@ -30,7 +30,7 @@ const WEBHOOK_EVENT_SET = new Set<string>(WEBHOOK_EVENTS);
 export const JOB_RESULTS = ["succeeded", "skipped", "failed"] as const;
 export type JobResult = (typeof JOB_RESULTS)[number];
 
-export const OPENCODE_EXIT_CLASSES = ["ok", "143", "timeout", "infra", "incomplete", "auth"] as const;
+export const OPENCODE_EXIT_CLASSES = ["ok", "143", "timeout", "infra", "incomplete", "auth", "quota"] as const;
 export type OpenCodeExitClass = (typeof OPENCODE_EXIT_CLASSES)[number];
 
 export const RUN_KINDS: readonly JobKind[] = ["review", "implement", "follow-up", "conflict"];
@@ -79,10 +79,14 @@ export function classifyOpenCodeExit(result: {
   infra?: boolean;
   auth?: boolean;
   quota?: string | null;
+  hopped?: boolean;
 }): OpenCodeExitClass {
   if (result.status === "timeout") return "timeout";
   if (result.infra === true) return "infra";
-  if (result.exitCode === 143) return "143";
+  if (result.exitCode === 143) {
+    if (result.quota != null && result.hopped === true) return "quota";
+    return "143";
+  }
   if (result.auth === true && result.quota == null) return "auth";
   if (result.status === "ok") return "ok";
   return "incomplete";
@@ -130,10 +134,24 @@ export function recordJobCompleted(kind: string, result: JobResult): void {
   add(jobCounts, kindResultKey(kind, result));
 }
 
-export function recordOpenCodeRun(kind: string, result: EngineResult): void {
+export function shouldDeferQuotaExit(result: {
+  status: string;
+  exitCode?: number | null;
+  infra?: boolean;
+  quota?: string | null;
+  hopped?: boolean;
+}): boolean {
+  return result.quota != null && classifyOpenCodeExit(result) === "143";
+}
+
+export function recordOpenCodeRun(kind: string, result: EngineResult & { hopped?: boolean }): void {
   const exitClass = classifyOpenCodeExit(result);
-  add(exitCounts, kindResultKey(kind, exitClass));
-  const durationMs = result.durationMs;
+  addExit(kind, exitClass, result.durationMs);
+}
+
+function addExit(kind: string, exitClass: OpenCodeExitClass, durationMs: number | undefined): void {
+  const countKey = kindResultKey(kind, exitClass);
+  add(exitCounts, countKey);
   if (durationMs == null || durationMs < 0) return;
   const seconds = durationMs / 1000;
   const key = kindResultKey(kind, exitClass);
