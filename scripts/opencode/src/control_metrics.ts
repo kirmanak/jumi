@@ -30,7 +30,7 @@ const WEBHOOK_EVENT_SET = new Set<string>(WEBHOOK_EVENTS);
 export const JOB_RESULTS = ["succeeded", "skipped", "failed"] as const;
 export type JobResult = (typeof JOB_RESULTS)[number];
 
-export const OPENCODE_EXIT_CLASSES = ["ok", "143", "timeout", "infra", "incomplete", "auth"] as const;
+export const OPENCODE_EXIT_CLASSES = ["ok", "143", "timeout", "infra", "incomplete", "auth", "quota"] as const;
 export type OpenCodeExitClass = (typeof OPENCODE_EXIT_CLASSES)[number];
 
 export const RUN_KINDS: readonly JobKind[] = ["review", "implement", "follow-up", "conflict"];
@@ -79,10 +79,14 @@ export function classifyOpenCodeExit(result: {
   infra?: boolean;
   auth?: boolean;
   quota?: string | null;
+  hopped?: boolean;
 }): OpenCodeExitClass {
   if (result.status === "timeout") return "timeout";
   if (result.infra === true) return "infra";
-  if (result.exitCode === 143) return "143";
+  if (result.exitCode === 143) {
+    if (result.quota != null && result.hopped === true) return "quota";
+    return "143";
+  }
   if (result.auth === true && result.quota == null) return "auth";
   if (result.status === "ok") return "ok";
   return "incomplete";
@@ -130,19 +134,40 @@ export function recordJobCompleted(kind: string, result: JobResult): void {
   add(jobCounts, kindResultKey(kind, result));
 }
 
-export function recordOpenCodeRun(kind: string, result: EngineResult): void {
+export function recordOpenCodeRun(kind: string, result: EngineResult & { hopped?: boolean }): void {
   const exitClass = classifyOpenCodeExit(result);
-  add(exitCounts, kindResultKey(kind, exitClass));
-  const durationMs = result.durationMs;
+  addExit(kind, exitClass, result.durationMs, 1);
+}
+
+export function markOpenCodeQuotaHopped(kind: string, result: EngineResult): void {
+  if (result.exitCode !== 143 || result.quota == null) return;
+  if (classifyOpenCodeExit(result) !== "143") return;
+  if ((exitCounts.get(kindResultKey(kind, "143")) ?? 0) <= 0) return;
+  addExit(kind, "143", result.durationMs, -1);
+  addExit(kind, "quota", result.durationMs, 1);
+}
+
+function addExit(kind: string, exitClass: OpenCodeExitClass, durationMs: number | undefined, delta: number): void {
+  const countKey = kindResultKey(kind, exitClass);
+  add(exitCounts, countKey, delta);
+  if ((exitCounts.get(countKey) ?? 0) === 0) exitCounts.delete(countKey);
   if (durationMs == null || durationMs < 0) return;
   const seconds = durationMs / 1000;
   const key = kindResultKey(kind, exitClass);
-  add(durationSum, key, seconds);
-  add(durationCount, key);
+  add(durationSum, key, seconds * delta);
+  add(durationCount, key, delta);
   for (const le of DURATION_BUCKETS_SECONDS) {
-    if (seconds <= le) add(durationBuckets, bucketKey(kind, exitClass, String(le)));
+    if (seconds <= le) add(durationBuckets, bucketKey(kind, exitClass, String(le)), delta);
   }
-  add(durationBuckets, bucketKey(kind, exitClass, "+Inf"));
+  add(durationBuckets, bucketKey(kind, exitClass, "+Inf"), delta);
+  if ((durationCount.get(key) ?? 0) === 0) {
+    durationSum.delete(key);
+    durationCount.delete(key);
+    for (const le of DURATION_BUCKETS_SECONDS) {
+      durationBuckets.delete(bucketKey(kind, exitClass, String(le)));
+    }
+    durationBuckets.delete(bucketKey(kind, exitClass, "+Inf"));
+  }
 }
 
 export function renderWebhookMetrics(): string {

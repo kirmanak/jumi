@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { markOpenCodeQuotaHopped } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
@@ -175,6 +176,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       if (!next || !shouldHopFromResult(result, opts, runner.model, next.model)) return result;
       if (!(await leaseAllowsHop(hop, opts.timeoutMs))) return result;
       await beginHop(hop, opts, runner, next);
+      markOpenCodeQuotaHopped(opts.trace?.kind ?? "review", result);
       index++;
     }
   };
