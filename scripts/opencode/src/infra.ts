@@ -1,3 +1,4 @@
+import { looksLikeProviderAuthDeath } from "./auth.ts";
 import { EngineFailedError } from "./engine.ts";
 import { looksLikeProviderUnavailable } from "./fallback.ts";
 
@@ -11,7 +12,7 @@ export const INFRA_RETRY_PREFIX = "infra-retry:";
 export const INFRA_SPAWN_REASON = "Jumi failed: infra/spawn";
 
 const INFRA_STDERR_RE =
-  /EACCES|EPERM|missing API key|API key not|spawn |spawnSync|interpreter|SIGSEGV|segmentation fault|Executable not found|not found in \$PATH/i;
+  /EACCES|EPERM|spawn |spawnSync|interpreter|SIGSEGV|segmentation fault|Executable not found|not found in \$PATH/i;
 
 export function looksLikeInfraStderr(text: string): boolean {
   return INFRA_STDERR_RE.test(text);
@@ -30,6 +31,7 @@ export function classifyOpenCodeInfra(input: {
 }): boolean {
   if (input.tokensExist) return false;
   if (looksLikeProviderUnavailable(input.stderr ?? "")) return false;
+  if (looksLikeProviderAuthDeath(input.stderr ?? "")) return false;
   if (input.durationMs >= INFRA_SHORT_MS) return false;
   if (looksLikeInfraStderr(input.stderr ?? "")) return true;
   if (sessionDbGrew(input.dbBefore, input.dbAfter)) return false;
@@ -39,6 +41,7 @@ export function classifyOpenCodeInfra(input: {
 export function isInfraFailure(err: unknown): boolean {
   if (err instanceof EngineFailedError) return err.infra;
   const text = err instanceof Error ? err.message : String(err);
+  if (looksLikeProviderAuthDeath(text)) return false;
   return looksLikeInfraStderr(text);
 }
 

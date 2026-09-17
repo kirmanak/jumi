@@ -38,6 +38,7 @@ export function shouldHopInsteadOfQuotaStuck(primaryModel: string, fallbackModel
 export function isProviderUnavailableResult(result: EngineResult): boolean {
   if (result.status !== "exit") return false;
   if (result.infra === true) return false;
+  if (result.auth === true) return false;
   if (result.exitCode === 143) return false;
   return looksLikeProviderUnavailable(result.message ?? "");
 }
@@ -76,13 +77,14 @@ function isQuotaStuckResult(result: EngineResult): boolean {
 
 function shouldHopFromResult(result: EngineResult, opts: EngineRunOptions, fallbackModel: string): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted) return false;
+  if (result.auth === true) return false;
   if (isProviderUnavailableResult(result)) return true;
   return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(opts.model, fallbackModel);
 }
 
 function shouldHopFromError(err: unknown, opts: EngineRunOptions, fallbackModel: string): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted || isAbortError(err)) return false;
-  if (!(err instanceof EngineFailedError) || err.infra) return false;
+  if (!(err instanceof EngineFailedError) || err.infra || err.auth) return false;
   if (isQuotaError(err)) return shouldHopInsteadOfQuotaStuck(opts.model, fallbackModel);
   return looksLikeProviderUnavailable(err.message);
 }
