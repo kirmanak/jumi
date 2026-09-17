@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   classifyOpenCodeExit,
-  markOpenCodeQuotaHopped,
   meterWebhook,
   recordJobCompleted,
   recordOpenCodeRun,
@@ -133,10 +132,14 @@ describe("run metrics", () => {
     expect(text).toContain('jumi_job_duration_seconds_count{kind="implement",result="quota"} 1');
   });
 
-  test("recasts a recorded hop-yes quota SIGTERM from 143 to quota", () => {
-    const result = { status: "stuck" as const, exitCode: 143, quota: "resetting" as const, durationMs: 5_000 };
-    recordOpenCodeRun("review", result);
-    markOpenCodeQuotaHopped("review", result);
+  test("records hop-yes quota SIGTERM as quota without publishing 143", () => {
+    recordOpenCodeRun("review", {
+      status: "stuck",
+      exitCode: 143,
+      quota: "resetting",
+      hopped: true,
+      durationMs: 5_000,
+    });
     const text = renderRunMetrics();
     expect(text).toContain('jumi_opencode_exits_total{kind="review",class="quota"} 1');
     expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 0');

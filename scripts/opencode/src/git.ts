@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
-import { recordOpenCodeRun } from "./control_metrics.ts";
+import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import {
   byteLength,
   finalizeMemoryTracker,
@@ -315,6 +315,7 @@ function engineExitMessage(exitCode: number | null, stderr: string): string {
 
 function observeOpenCode(opts: OpenCodeRunOptions, result: EngineResult): EngineResult {
   if (opts.abortSignal?.aborted) return result;
+  if (opts.deferQuotaExit && shouldDeferQuotaExit(result)) return result;
   recordOpenCodeRun(opts.trace?.kind ?? "review", result);
   return result;
 }

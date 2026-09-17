@@ -134,40 +134,33 @@ export function recordJobCompleted(kind: string, result: JobResult): void {
   add(jobCounts, kindResultKey(kind, result));
 }
 
+export function shouldDeferQuotaExit(result: {
+  status: string;
+  exitCode?: number | null;
+  infra?: boolean;
+  quota?: string | null;
+  hopped?: boolean;
+}): boolean {
+  return result.quota != null && classifyOpenCodeExit(result) === "143";
+}
+
 export function recordOpenCodeRun(kind: string, result: EngineResult & { hopped?: boolean }): void {
   const exitClass = classifyOpenCodeExit(result);
-  addExit(kind, exitClass, result.durationMs, 1);
+  addExit(kind, exitClass, result.durationMs);
 }
 
-export function markOpenCodeQuotaHopped(kind: string, result: EngineResult): void {
-  if (result.exitCode !== 143 || result.quota == null) return;
-  if (classifyOpenCodeExit(result) !== "143") return;
-  if ((exitCounts.get(kindResultKey(kind, "143")) ?? 0) <= 0) return;
-  addExit(kind, "143", result.durationMs, -1);
-  addExit(kind, "quota", result.durationMs, 1);
-}
-
-function addExit(kind: string, exitClass: OpenCodeExitClass, durationMs: number | undefined, delta: number): void {
+function addExit(kind: string, exitClass: OpenCodeExitClass, durationMs: number | undefined): void {
   const countKey = kindResultKey(kind, exitClass);
-  add(exitCounts, countKey, delta);
-  if ((exitCounts.get(countKey) ?? 0) === 0) exitCounts.delete(countKey);
+  add(exitCounts, countKey);
   if (durationMs == null || durationMs < 0) return;
   const seconds = durationMs / 1000;
   const key = kindResultKey(kind, exitClass);
-  add(durationSum, key, seconds * delta);
-  add(durationCount, key, delta);
+  add(durationSum, key, seconds);
+  add(durationCount, key);
   for (const le of DURATION_BUCKETS_SECONDS) {
-    if (seconds <= le) add(durationBuckets, bucketKey(kind, exitClass, String(le)), delta);
+    if (seconds <= le) add(durationBuckets, bucketKey(kind, exitClass, String(le)));
   }
-  add(durationBuckets, bucketKey(kind, exitClass, "+Inf"), delta);
-  if ((durationCount.get(key) ?? 0) === 0) {
-    durationSum.delete(key);
-    durationCount.delete(key);
-    for (const le of DURATION_BUCKETS_SECONDS) {
-      durationBuckets.delete(bucketKey(kind, exitClass, String(le)));
-    }
-    durationBuckets.delete(bucketKey(kind, exitClass, "+Inf"));
-  }
+  add(durationBuckets, bucketKey(kind, exitClass, "+Inf"));
 }
 
 export function renderWebhookMetrics(): string {

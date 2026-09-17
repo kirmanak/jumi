@@ -28,6 +28,7 @@ export interface EngineRunOptions {
   prompt?: string;
   continueSession?: boolean;
   hop?: boolean;
+  deferQuotaExit?: boolean;
 }
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";
