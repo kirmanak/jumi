@@ -68,12 +68,20 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("LSP is also allowed");
     expect(prompt).toContain("<!-- jumi-check: success -->");
     expect(prompt).toContain("<!-- jumi-check: failure -->");
-    expect(prompt).toContain("gitops-apply-review");
+    expect(prompt).toContain("You are Jumi's reviewer");
+    expect(prompt).toContain("this git forge");
+    expect(prompt).toContain("the commit status");
     expect(prompt).toContain("Do not read charts/*.tgz");
     expect(prompt).toContain("Never run helm upgrade, helm install, or kubectl apply");
+    expect(prompt).not.toContain("You are OpenCode");
+    expect(prompt).not.toContain("integrated into a Gitea");
+    expect(prompt).not.toContain("external_directory");
+    expect(prompt).not.toContain("Gitea commit status");
+    expect(prompt).not.toContain("gitops-apply-review");
+    expect(prompt).not.toContain("skill tool");
   });
 
-  test("tells the reviewer to load gitops-apply-review when Helm/K8s paths change", () => {
+  test("injects the gitops-apply-review pack when Helm/K8s paths change", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
       pr: makePR(),
@@ -83,11 +91,21 @@ describe("buildPROpenedPrompt", () => {
     expect(touchesGitOpsApplyReview([makeFile({ filename: "k3s/apps/gitea/values.yaml" })])).toBe(true);
     expect(touchesGitOpsApplyReview([makeFile({ filename: "charts/foo/Chart.yaml" })])).toBe(true);
     expect(touchesGitOpsApplyReview([makeFile({ filename: "src/demo.ts" })])).toBe(false);
-    expect(prompt).toContain("Load the `gitops-apply-review` skill now");
+    expect(prompt).toContain("Use the gitops-apply-review pack below");
+    expect(prompt).toContain("<gitops-apply-review>");
+    expect(prompt).toContain("Checksum / rollout");
+    expect(prompt).toContain("DNS the app actually dials");
+    expect(prompt).toContain("Volume class vs Velero");
+    expect(prompt).toContain("Sibling resources");
+    expect(prompt).toContain("Hook process identity");
+    expect(prompt).toContain("House misses");
     expect(prompt).toContain("Do not read or `git show` `charts/*.tgz`");
+    expect(prompt).not.toContain("Load the `gitops-apply-review` skill now");
+    expect(prompt).not.toContain("skill tool");
+    expect(prompt).not.toContain("You are OpenCode");
   });
 
-  test("tells the reviewer to load gitops-apply-review on Jumi image bumps", () => {
+  test("injects the gitops-apply-review pack on Jumi image bumps", () => {
     const pr = makePR({
       title: "chore(deps): update gitea.kirmanak.stream/personal/jumi-reviewer digest to abcdef",
       body: "depName: gitea.kirmanak.stream/personal/jumi-reviewer\n\n## GitOps\nnone\n",
@@ -105,8 +123,32 @@ describe("buildPROpenedPrompt", () => {
         body: pr.body,
       })
     ).toBe(true);
-    expect(prompt).toContain("Load the `gitops-apply-review` skill now");
+    expect(prompt).toContain("Use the gitops-apply-review pack below");
+    expect(prompt).toContain("<gitops-apply-review>");
+    expect(prompt).toContain("Checksum / rollout");
+    expect(prompt).toContain("House misses");
     expect(prompt).toContain("Parse the PR body `## GitOps` section");
+    expect(prompt).not.toContain("Load the `gitops-apply-review` skill now");
+    expect(prompt).not.toContain("skill tool");
+  });
+
+  test("injects the gitops-apply-review pack on a Jumi image bump without Helm path files", () => {
+    const pr = makePR({
+      title: "chore(deps): update gitea.kirmanak.stream/personal/jumi-worker digest to abcdef",
+      body: "depName: gitea.kirmanak.stream/personal/jumi-worker\n\n## GitOps\nnone\n",
+    });
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr,
+      prFiles: [makeFile({ filename: "src/demo.ts" })],
+    });
+
+    expect(prompt).toContain("looks like a Renovate docker bump of `jumi-reviewer` / `jumi-worker`");
+    expect(prompt).toContain("Use the gitops-apply-review pack below");
+    expect(prompt).toContain("Checksum / rollout");
+    expect(prompt).toContain("House misses");
+    expect(prompt).toContain("Parse the PR body `## GitOps` section");
+    expect(prompt).not.toContain("skill tool");
   });
 
   test("includes review notes", () => {

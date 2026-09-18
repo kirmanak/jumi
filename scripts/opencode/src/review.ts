@@ -173,7 +173,7 @@ function markerFor(owner: string, repo: string, prNumber: number): string {
 }
 
 function buildCommentBody(marker: string, headSha: string, output: string, checkLine?: string): string {
-  const body = `${marker}\n### Jumi OpenCode review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`;
+  const body = `${marker}\n### Jumi review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`;
   if (!checkLine) return body;
   return `${body.trimEnd()}\n\n${checkLine}`;
 }

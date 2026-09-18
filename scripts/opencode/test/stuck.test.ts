@@ -22,10 +22,10 @@ const findingB = "rename the helper\n<!-- jumi-check: failure -->";
 describe("fingerprintReviewArtifact", () => {
   test("hashes a complete failure finding and ignores commit SHA", () => {
     const a = fingerprintReviewArtifact(
-      "### Jumi OpenCode review\n\nReviewed commit: `abc1234`\n\nplease fix the tests\n<!-- jumi-check: failure -->"
+      "### Jumi review\n\nReviewed commit: `abc1234`\n\nplease fix the tests\n<!-- jumi-check: failure -->"
     );
     const b = fingerprintReviewArtifact(
-      "### Jumi OpenCode review\n\nReviewed commit: `def5678`\n\nplease fix the tests\n<!-- jumi-check: failure -->"
+      "### Jumi review\n\nReviewed commit: `def5678`\n\nplease fix the tests\n<!-- jumi-check: failure -->"
     );
     expect(a).toBeTruthy();
     expect(a).toBe(b);

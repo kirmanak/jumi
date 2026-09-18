@@ -1,6 +1,29 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { isJumiDockerBump } from "./gitops_notes.ts";
 import type { Pull, PullFile, Repo } from "./ports.ts";
 import { formatLinkedIssuesXml, formatPrCommentsXml, type ReviewThread } from "./review_context.ts";
+
+const GITOPS_PACK_CANDIDATES = [
+  join(import.meta.dir, "../../../review-skills/gitops-apply-review"),
+  "/app/review-skills/gitops-apply-review",
+];
+
+export function gitOpsApplyReviewPackDir(): string {
+  for (const dir of GITOPS_PACK_CANDIDATES) {
+    if (existsSync(join(dir, "SKILL.md")) && existsSync(join(dir, "references/house-misses.md"))) {
+      return dir;
+    }
+  }
+  throw new Error("gitops-apply-review pack missing (SKILL.md + references/house-misses.md)");
+}
+
+export function loadGitOpsApplyReviewPack(): string {
+  const dir = gitOpsApplyReviewPackDir();
+  const skill = readFileSync(join(dir, "SKILL.md"), "utf8").trim();
+  const misses = readFileSync(join(dir, "references/house-misses.md"), "utf8").trim();
+  return `${skill}\n\n${misses}`;
+}
 
 export function touchesGitOpsApplyReview(files: PullFile[]): boolean {
   return files.some((file) => {
@@ -54,18 +77,18 @@ function formatPRFiles(files: PullFile[]): string {
 
 // ── Preamble ────────────────────────────────────────────────────────────────
 
-const PREAMBLE = `You are OpenCode, an AI code review assistant integrated into a Gitea repository.
+const PREAMBLE = `You are Jumi's reviewer, an AI code review assistant for this git forge.
 
 <rules>
   <rule>The current working directory is a full checkout of the pull request head.</rule>
-  <rule>Prefer built-in read/list/glob/grep tools for file contents and search; they enforce external_directory.</rule>
+  <rule>Prefer built-in read/list/glob/grep tools for file contents and search.</rule>
   <rule>Shell is open for inspection. Pipes, quotes, and git grep regex are allowed.</rule>
   <rule>Keep tool output small: never dump directory-wide or high-context git patches into the session; prefer --stat, single-file --unified=3, and built-in read.</rule>
   <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
   <rule>The only file you should write is JUMI_REVIEW.md at the repository root. Stdout is logs, not the sticky.</rule>
   <rule>Do not git add source, git commit, git push, or force-push.</rule>
   <rule>Do not run mutating git commands, helm upgrade, helm install, kubectl apply, package installs, or arbitrary network shell commands.</rule>
-  <rule>If the diff touches k3s/, Chart.yaml, or values.yaml, load the gitops-apply-review skill. Do not read charts/*.tgz. Never run helm upgrade, helm install, or kubectl apply.</rule>
+  <rule>Do not read charts/*.tgz. Never run helm upgrade, helm install, or kubectl apply.</rule>
 </rules>`;
 
 const REVIEW_RUBRIC = `Write findings with \`<file>:<line>:\` (or \`L<line>:\` for a single-file review), the problem, and a concrete fix. Exact symbol/function/variable names in backticks. Include the why when the fix is not obvious.
@@ -102,7 +125,11 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
   const gitOpsSkill = shouldLoadGitOpsApplyReview({ files: prFiles, title: pr.title, body: pr.body ?? "" })
     ? `
 
-This pull request ${helmGitOps ? "touches Helm/Kubernetes paths (`k3s/`, Chart.yaml, or values.yaml)" : "looks like a Renovate docker bump of `jumi-reviewer` / `jumi-worker`"}. Load the \`gitops-apply-review\` skill now. Do not wait to discover it. Do not read or \`git show\` \`charts/*.tgz\`. Never run \`helm upgrade\`, \`helm install\`, or \`kubectl apply\`.${imageBump ? " Parse the PR body `## GitOps` section." : ""}`
+This pull request ${helmGitOps ? "touches Helm/Kubernetes paths (`k3s/`, Chart.yaml, or values.yaml)" : "looks like a Renovate docker bump of `jumi-reviewer` / `jumi-worker`"}. Use the gitops-apply-review pack below (checklist + house misses). Do not wait to discover it. Do not read or \`git show\` \`charts/*.tgz\`. Never run \`helm upgrade\`, \`helm install\`, or \`kubectl apply\`.${imageBump ? " Parse the PR body `## GitOps` section." : ""}
+
+<gitops-apply-review>
+${loadGitOpsApplyReviewPack()}
+</gitops-apply-review>`
     : "";
 
   return `${PREAMBLE}
@@ -145,7 +172,7 @@ JUMI_REVIEW.md is markdown findings, then exactly one HTML comment as the last n
 Optional short reason: \`<!-- jumi-check: failure; 1 blocking, 1 risk -->\`
 Use failure if you reported any 🔴 bug or 🟡 risk, or if you could not finish the review.
 Use success if there are no 🔴/🟡 findings. ❓ questions are allowed with success. 💡 suggestions do not fail the trailer.
-The check comment must be the last non-empty line, not quoted inside prose. The service uses it as the Gitea commit status.`;
+The check comment must be the last non-empty line, not quoted inside prose. The service uses it as the commit status.`;
 }
 
 export function buildIncompleteWritePrompt(lastAssistant?: string): string {

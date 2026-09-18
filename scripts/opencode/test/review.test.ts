@@ -99,7 +99,7 @@ function reviewWriteup(
   sha = "headsha",
   marker = "<!-- jumi-review:kirmanak/demo#7 -->"
 ): string {
-  const body = `${marker}\n### Jumi OpenCode review\n\nReviewed commit: \`${sha}\`\n\n${prose}`;
+  const body = `${marker}\n### Jumi review\n\nReviewed commit: \`${sha}\`\n\n${prose}`;
   if (!checkLine) return body;
   return `${body.trimEnd()}\n\n${checkLine}`;
 }
@@ -797,7 +797,7 @@ describe("reviewPullRequest", () => {
   test("does not treat a #136-shaped sticky without a trailer as a finding", () => {
     const body = [
       "<!-- jumi-review:personal/jumi#136 -->",
-      "### Jumi OpenCode review",
+      "### Jumi review",
       "",
       "Reviewed commit: `d90b7289701097dae3ffa3dc0ccdc348be552697`",
       "",
@@ -1305,6 +1305,43 @@ describe("reviewPullRequest", () => {
       expect(prompt).toContain("stable refs like jumi/target and HEAD");
       expect(prompt).toContain("git log --oneline jumi/target..HEAD");
       expect(prompt).toContain("web search/fetch");
+    });
+  });
+
+  test("parent-injects the gitops-apply-review pack for Helm/values PRs and posts a Jumi review heading", async () => {
+    await withWorkspace(async (workspace) => {
+      let prompt = "";
+      let sticky = "";
+      await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          getPRFiles: async () => [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            sticky = body;
+            return makeComment({ id: 1, body });
+          },
+          createPullReview: async (_owner, _repo, _index, review) => {
+            sticky = review.body ?? "";
+            return { id: 1 };
+          },
+        }),
+        openCodeRunner: async (opts) => {
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "No apply explosion.\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(prompt).toContain("You are Jumi's reviewer");
+      expect(prompt).toContain("Use the gitops-apply-review pack below");
+      expect(prompt).toContain("Checksum / rollout");
+      expect(prompt).toContain("House misses");
+      expect(prompt).not.toContain("You are OpenCode");
+      expect(prompt).not.toContain("integrated into a Gitea");
+      expect(prompt).not.toContain("skill tool");
+      expect(prompt).not.toContain("Load the `gitops-apply-review` skill now");
+      expect(sticky).toContain("### Jumi review");
+      expect(sticky).not.toContain("### Jumi OpenCode review");
     });
   });
 

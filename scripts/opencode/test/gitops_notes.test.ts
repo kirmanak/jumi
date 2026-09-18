@@ -12,7 +12,8 @@ describe("gitops-apply-review skill", () => {
     expect(skill).toContain("Volume class vs Velero");
     expect(skill).toContain("Sibling resources");
     expect(skill).toContain("Hook process identity");
-    expect(skill).toContain("Load this skill via the skill tool.");
+    expect(skill).not.toContain("Load this skill via the skill tool.");
+    expect(skill).not.toMatch(/skill tool/i);
     expect(skill).not.toMatch(/Do not Read [`']?\/app\/review-skills/i);
     expect(skill).not.toContain("/app/review-skills");
   });
