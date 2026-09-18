@@ -467,6 +467,66 @@ describe("enqueueFollowUpFromReview", () => {
     expect(logs).toEqual(["persist-insert skipped: incomplete"]);
   });
 
+  test("cancel after the lifetime cap lets a later failing review handover again", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedSucceededFollowUps(store, 3);
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(3);
+    expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "succeeded")).toHaveLength(3);
+    await store.clearIssueSkipLatch("kirmanak", "demo", 12);
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(0);
+    expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "succeeded")).toHaveLength(3);
+    await store.enqueue(makeJob());
+    const review = await store.lease("engine-1", 60_000);
+    const api = makeApi();
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: review!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(api.comments).toEqual([]);
+    expect(store.rows.find((row) => row.kind === "follow-up" && row.state === "queued")?.payload?.generation).toBe(1);
+  });
+
+  test("human-comment follow-ups in the current generation still count toward the cap", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.clearIssueSkipLatch("kirmanak", "demo", 12);
+    await seedSucceededFollowUps(store, 2);
+    await store.enqueueIssue(
+      makeIssueJob({
+        mode: "follow-up",
+        issueNumber: 12,
+        prNumber: 7,
+        headSha: "comment-sha",
+        delivery: "comment-follow",
+        trigger: { event: "issue_comment", commentId: 55, sender: "alice" },
+      })
+    );
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(3);
+    await store.enqueue(makeJob());
+    const review = await store.lease("engine-1", 60_000);
+    const api = makeApi();
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: review!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "queued")).toHaveLength(0);
+    expect(api.comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${TOO_MANY_FOLLOWUP_ROUNDS}`]);
+    expect(logs).toEqual(["persist-insert skipped: round cap"]);
+  });
+
   test("round cap does not unassign the issue", async () => {
     const store = new MemoryReviewJobStore();
     await seedSucceededFollowUps(store, 3);
