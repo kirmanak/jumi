@@ -575,6 +575,48 @@ describe("withEngineChain", () => {
     ]);
   });
 
+  test("claude usage-limit stuck hops once to grok from scratch", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const grok = { name: "grok", type: "opencode" as const, model: "xai/grok-4.6", variant: "high" };
+    const usageLimit: EngineResult = {
+      status: "stuck",
+      exitCode: 1,
+      message: QUOTA_MESSAGE,
+      quota: "resetting",
+    };
+    const calls: Array<{ type?: string; model: string; continueSession?: boolean; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({ type: opts.type, model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+      if (opts.type === "claude") return usageLimit;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [claude, grok] })({
+      model: claude.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(grok.model));
+    expect(calls).toEqual([
+      { type: "claude", model: claude.model, continueSession: undefined, hop: undefined },
+      { type: "opencode", model: grok.model, continueSession: false, hop: true },
+    ]);
+  });
+
+  test("last-runner claude usage-limit stuck is not converted to exit", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const usageLimit: EngineResult = {
+      status: "stuck",
+      exitCode: 1,
+      message: QUOTA_MESSAGE,
+      quota: "resetting",
+    };
+    const engine: Engine = async () => usageLimit;
+    const result = await withEngineChain(engine, { chain: [claude] })({
+      model: claude.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(usageLimit);
+  });
+
   test("spark quota stuck hops once to unprefixed claude", async () => {
     const spark = {
       name: "spark",

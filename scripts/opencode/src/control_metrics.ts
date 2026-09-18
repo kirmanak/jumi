@@ -88,6 +88,7 @@ export function classifyOpenCodeExit(result: {
     return "143";
   }
   if (result.auth === true && result.quota == null) return "auth";
+  if (result.quota != null) return "quota";
   if (result.status === "ok") return "ok";
   return "incomplete";
 }
@@ -147,6 +148,16 @@ export function shouldDeferQuotaExit(result: {
 export function recordOpenCodeRun(kind: string, result: EngineResult & { hopped?: boolean }): void {
   const exitClass = classifyOpenCodeExit(result);
   addExit(kind, exitClass, result.durationMs);
+}
+
+export function observeEngineRun(
+  opts: { abortSignal?: AbortSignal; deferQuotaExit?: boolean; trace?: { kind?: string } },
+  result: EngineResult
+): EngineResult {
+  if (opts.abortSignal?.aborted) return result;
+  if (opts.deferQuotaExit && shouldDeferQuotaExit(result)) return result;
+  recordOpenCodeRun(opts.trace?.kind ?? "review", result);
+  return result;
 }
 
 function addExit(kind: string, exitClass: OpenCodeExitClass, durationMs: number | undefined): void {

@@ -8,9 +8,12 @@ import {
   CLAUDE_PERMISSION_MODE,
   CLAUDE_SETTING_SOURCES,
   claudeArgv,
+  inspectClaudeUsageLimit,
   runClaude,
 } from "../src/claude.ts";
+import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { runRegisteredEngine } from "../src/engine_dispatch.ts";
+import { QUOTA_MESSAGE } from "../src/quota.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -18,6 +21,7 @@ const originalOauth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
 const originalXdg = process.env.XDG_CONFIG_HOME;
 
 afterEach(() => {
+  resetControlMetricsForTests();
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
@@ -41,6 +45,27 @@ async function withFakeClaude(script: string, run: (workdir: string) => Promise<
     await rm(workdir, { recursive: true, force: true });
   }
 }
+
+describe("inspectClaudeUsageLimit", () => {
+  test("classifies Claude session and usage limits as resetting", () => {
+    expect(inspectClaudeUsageLimit("You've hit your session limit · resets 12:50am (UTC)")).toBe("resetting");
+    expect(inspectClaudeUsageLimit("You've hit your usage limit")).toBe("resetting");
+    expect(inspectClaudeUsageLimit("You've hit your Opus limit")).toBe("resetting");
+    expect(inspectClaudeUsageLimit("You've hit your Sonnet limit")).toBe("resetting");
+    expect(inspectClaudeUsageLimit("You've hit your limit · resets 5pm")).toBe("resetting");
+    expect(inspectClaudeUsageLimit("Claude AI usage limit reached")).toBe("resetting");
+  });
+
+  test("does not guess from generic rate-limit or bare usage-limit text", () => {
+    expect(inspectClaudeUsageLimit("429 rate limit exceeded")).toBeUndefined();
+    expect(inspectClaudeUsageLimit("You've hit your spend limit")).toBeUndefined();
+    expect(inspectClaudeUsageLimit("Usage limit reached. It will reset in 1 hour")).toBeUndefined();
+    expect(inspectClaudeUsageLimit("my-model usage limit reached")).toBeUndefined();
+    expect(inspectClaudeUsageLimit("bad things")).toBeUndefined();
+    expect(inspectClaudeUsageLimit("")).toBeUndefined();
+    expect(inspectClaudeUsageLimit(null)).toBeUndefined();
+  });
+});
 
 describe("claudeArgv", () => {
   test("uses -p, user setting-sources, allowlist, and never --bare", () => {
@@ -138,6 +163,74 @@ exit 1
         expect(result.infra).toBe(false);
         expect(result.message).toBe(providerAuthDeathMessage());
         expect(result.message).toContain(hostname());
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
+      }
+    );
+  });
+
+  test("records ok runs on the existing exit and duration series", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf 'ok\\n'
+`,
+      async (workdir) => {
+        const result = await runClaude({
+          prompt: "prompt",
+          model: "opus",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+        });
+        expect(result.status).toBe("ok");
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="implement",class="ok"} 1');
+        expect(text).toContain('jumi_job_duration_seconds_count{kind="implement",result="ok"} 1');
+      }
+    );
+  });
+
+  test("classifies session limit as resetting quota stuck, not a plain exit", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\\n' "You've hit your session limit · resets 12:50am (UTC)" >&2
+exit 1
+`,
+      async (workdir) => {
+        const result = await runClaude({
+          prompt: "prompt",
+          model: "opus",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+        });
+        expect(result.status).toBe("stuck");
+        expect(result.quota).toBe("resetting");
+        expect(result.auth).toBeFalsy();
+        expect(result.infra).toBe(false);
+        expect(result.message).toBe(QUOTA_MESSAGE);
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="implement",class="quota"} 1');
+        expect(text).toContain('jumi_job_duration_seconds_count{kind="implement",result="quota"} 1');
+        expect(text).not.toContain('kind="implement",class="incomplete"} 1');
+      }
+    );
+  });
+
+  test("unknown non-zero stays exit and still records metrics", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf 'Usage limit reached. It will reset in 1 hour\\n' >&2
+exit 1
+`,
+      async (workdir) => {
+        const result = await runClaude({ prompt: "prompt", model: "opus", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.quota).toBeUndefined();
+        expect(result.message).toContain("claude exited with code 1");
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_exits_total{kind="review",class="incomplete"} 1');
+        expect(text).not.toContain('kind="review",class="quota"} 1');
       }
     );
   });

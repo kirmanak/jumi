@@ -1867,6 +1867,41 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
     });
   });
 
+  test("Claude usage-limit without fallback throws wait and does not set the skip flag", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        return "";
+      };
+      let err: unknown;
+      try {
+        await implementIssue({
+          api,
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "claude-opus-5",
+          chain: [{ name: "claude", type: "claude", model: "claude-opus-5", effort: "high" }],
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          engine: async () => ({ status: "stuck", exitCode: 1, message: QUOTA_MESSAGE, quota: "resetting" }),
+          logger: () => undefined,
+        });
+      } catch (caught) {
+        err = caught;
+      }
+      expect(isQuotaWaitError(err)).toBe(true);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
+      expect(isQuotaStuck(await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12)))).toBe(false);
+    });
+  });
+
   test("Free/Zen quota without fallback throws wait and does not set the skip flag", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();

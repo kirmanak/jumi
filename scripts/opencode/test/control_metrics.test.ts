@@ -32,7 +32,8 @@ describe("classifyOpenCodeExit", () => {
     expect(classifyOpenCodeExit({ status: "exit", exitCode: 1, auth: true })).toBe("auth");
     expect(classifyOpenCodeExit({ status: "timeout", auth: true })).toBe("timeout");
     expect(classifyOpenCodeExit({ status: "exit", exitCode: 143, auth: true })).toBe("143");
-    expect(classifyOpenCodeExit({ status: "stuck", auth: true, quota: "resetting" })).toBe("incomplete");
+    expect(classifyOpenCodeExit({ status: "stuck", auth: true, quota: "resetting" })).toBe("quota");
+    expect(classifyOpenCodeExit({ status: "stuck", exitCode: 1, quota: "resetting" })).toBe("quota");
     expect(classifyOpenCodeExit({ status: "stuck", exitCode: 143, quota: "resetting" })).toBe("143");
     expect(classifyOpenCodeExit({ status: "stuck", exitCode: 143, quota: "resetting", hopped: true })).toBe("quota");
     expect(classifyOpenCodeExit({ status: "timeout", exitCode: 143, quota: "resetting", hopped: true })).toBe(
@@ -130,6 +131,19 @@ describe("run metrics", () => {
     expect(text).toContain('jumi_job_duration_seconds_bucket{kind="review",result="timeout",le="1200"} 1');
     expect(text).toContain('jumi_job_duration_seconds_bucket{kind="follow-up",result="infra",le="15"} 1');
     expect(text).toContain('jumi_job_duration_seconds_count{kind="implement",result="quota"} 1');
+  });
+
+  test("records non-143 quota stuck as quota", () => {
+    recordOpenCodeRun("implement", {
+      status: "stuck",
+      exitCode: 1,
+      quota: "resetting",
+      durationMs: 5_000,
+    });
+    const text = renderRunMetrics();
+    expect(text).toContain('jumi_opencode_exits_total{kind="implement",class="quota"} 1');
+    expect(text).toContain('jumi_job_duration_seconds_count{kind="implement",result="quota"} 1');
+    expect(text).not.toContain('jumi_opencode_exits_total{kind="implement",class="incomplete"} 1');
   });
 
   test("records hop-yes quota SIGTERM as quota without publishing 143", () => {
