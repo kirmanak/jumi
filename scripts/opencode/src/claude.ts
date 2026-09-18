@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
 import { observeEngineRun } from "./control_metrics.ts";
-import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
+import {
+  type Engine,
+  EngineFailedError,
+  type EngineResult,
+  type EngineRunOptions,
+  redactEngineText,
+} from "./engine.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
@@ -233,8 +239,8 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       if (timeout) clearTimeout(timeout);
     }
 
-    const stdout = stripAnsi(stdoutResult.text).trim();
-    const stderr = stripAnsi(stderrResult.text).trim();
+    const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
+    const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);
     const combined = [stderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
     const quota = !timedOut ? inspectClaudeUsageLimit(combined) : undefined;
@@ -247,7 +253,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (runError) {
-      const message = runError instanceof Error ? runError.message : String(runError);
+      const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[claude stderr] ${stderr}`);
         const authMessage = providerAuthDeathMessage();
@@ -256,8 +262,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       }
       const isInfra = looksLikeInfraStderr(message);
       observeEngineRun(opts, { status: "exit", infra: isInfra, durationMs, message });
-      if (isInfra) throw new EngineFailedError(message, true);
-      throw runError;
+      throw new EngineFailedError(message, isInfra);
     }
 
     if (timedOut) {
@@ -302,6 +307,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       });
     }
 
+    if (stderr) log(`[claude stderr] ${stderr}`);
     return observeEngineRun(opts, {
       status: "exit",
       exitCode,

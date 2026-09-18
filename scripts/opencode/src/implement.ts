@@ -53,7 +53,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitAuthResolver, type GitRunner, workerOpenCodeChildEnv } from "./workspace.ts";
+import { type GitAuthResolver, type GitRunner, redactGitSecrets, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { HEARTBEAT_INTERVAL_MS } from "./claimed_worktree.ts";
 export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
@@ -519,7 +519,7 @@ export async function implementIssue(
         repo,
         issueNumber,
         opts.botUsername,
-        `Jumi failed: ${err instanceof Error ? err.message : String(err)}`
+        redactGitSecrets(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, [loop.auth.token])
       ).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
