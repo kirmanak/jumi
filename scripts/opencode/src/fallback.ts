@@ -2,9 +2,9 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
-import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
+import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
-import { CLAUDE_RUNNER_TYPE, type NamedRunner, OPENCODE_RUNNER_TYPE } from "./runners.ts";
+import { CLAUDE_RUNNER_TYPE, type NamedRunner, OPENCODE_RUNNER_TYPE, runnerStamp } from "./runners.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 
@@ -143,7 +143,14 @@ function lazyChain(opts: EngineRunOptions, hop: EngineChainOptions): NamedRunner
   ];
 }
 
+function stampRunner(result: EngineResult, runner: NamedRunner): EngineResult {
+  return { ...result, runner: runnerStamp(runner) };
+}
+
 export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
+  // Without a chain the bare engine runs and stamps fall back to the spawn
+  // options, which workers never type, so they read `opencode`. A Claude
+  // primary must therefore arrive through `chain` (a 1-entry one is fine).
   if (!hop.chain?.length && !hop.fallbackModel) return engine;
 
   let chain: NamedRunner[] | undefined;
@@ -162,7 +169,12 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     const current = runners[index]!;
 
     if (index > 0) {
-      return engine(engineOptsForRunner(opts, current));
+      try {
+        return stampRunner(await engine(engineOptsForRunner(opts, current)), current);
+      } catch (err) {
+        attachRunner(err, runnerStamp(current));
+        throw err;
+      }
     }
 
     while (true) {
@@ -175,8 +187,9 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
 
       let result: EngineResult;
       try {
-        result = await engine(runOpts);
+        result = stampRunner(await engine(runOpts), runner);
       } catch (err) {
+        attachRunner(err, runnerStamp(runner));
         const next = runners[index + 1];
         if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) throw err;
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) throw err;

@@ -1,3 +1,4 @@
+import { type RunnerStamp, runnerStamp } from "./runners.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
 export type TraceKind = "review" | "implement" | "follow-up" | "conflict";
@@ -49,6 +50,8 @@ export interface EngineResult {
   durationMs?: number;
   quota?: QuotaClass;
   retryAfterMs?: number;
+  /** The runner that actually produced this result (after any hop). */
+  runner?: RunnerStamp;
 }
 
 export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;
@@ -58,6 +61,8 @@ export class EngineFailedError extends Error {
   readonly auth: boolean;
   readonly quota?: QuotaClass;
   readonly retryAfterMs?: number;
+  /** The runner whose spawn failed; set by the engine chain or `throwIfEngineFailed`. */
+  runner?: RunnerStamp;
 
   constructor(message: string, infra = false, extras?: { quota?: QuotaClass; retryAfterMs?: number; auth?: boolean }) {
     super(message);
@@ -79,9 +84,53 @@ export function resolveEngine(opts: { engine?: Engine; openCodeRunner?: Engine }
 
 export function throwIfEngineFailed(result: EngineResult): void {
   if (result.status === "ok") return;
-  throw new EngineFailedError(result.message ?? `engine ${result.status}`, result.infra === true, {
+  const err = new EngineFailedError(result.message ?? `engine ${result.status}`, result.infra === true, {
     quota: result.quota,
     retryAfterMs: result.retryAfterMs,
     auth: result.auth === true,
   });
+  if (result.runner) err.runner = result.runner;
+  throw err;
+}
+
+/** Record on a thrown spawn error which runner failed, unless an inner layer already did. */
+export function attachRunner(err: unknown, runner: RunnerStamp): void {
+  if (err === null || typeof err !== "object") return;
+  const carrier = err as { runner?: RunnerStamp };
+  if (!carrier.runner) carrier.runner = runner;
+}
+
+/** Runner that produced `result`, falling back to the options the caller spawned with. */
+export function resultRunner(
+  result: EngineResult,
+  opts: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort">
+): RunnerStamp {
+  return result.runner ?? runnerStamp(opts);
+}
+
+/** Runner attached to a thrown spawn error, if any. */
+export function thrownRunner(err: unknown): RunnerStamp | undefined {
+  if (err === null || typeof err !== "object") return undefined;
+  return (err as { runner?: RunnerStamp }).runner;
+}
+
+/**
+ * Spawn `engine` and report the runner behind this spawn to `onRunner`, whether
+ * the spawn returns or throws, so failure diaries carry the runner that failed.
+ */
+export async function runEngineStamped(
+  engine: Engine,
+  opts: EngineRunOptions,
+  onRunner: (runner: RunnerStamp) => void
+): Promise<EngineResult> {
+  let result: EngineResult;
+  try {
+    result = await engine(opts);
+  } catch (err) {
+    attachRunner(err, runnerStamp(opts));
+    onRunner(thrownRunner(err) ?? runnerStamp(opts));
+    throw err;
+  }
+  onRunner(resultRunner(result, opts));
+  return result;
 }

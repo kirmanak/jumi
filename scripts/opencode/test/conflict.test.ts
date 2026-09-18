@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
 import { CONFLICT_TIMEOUT_MS, implementConflict, readConflictState, writeConflictState } from "../src/conflict.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
@@ -571,6 +572,29 @@ describe("implementConflict", () => {
     });
   });
 
+  test("resolver quota stuck → quota diary carries the resolver's stamp", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: conflictThenResolvedGit(),
+        openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "hard" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "stuck" });
+      expect(api.comments.at(-1)).toContain(QUOTA_STUCK_TEXT);
+      expect(api.comments.at(-1)).toContain("_Jumi · opencode · openai/gpt-5.5_");
+    });
+  });
+
   test("configured timeoutMs is passed to OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       let timeoutMs: number | undefined;
@@ -1035,6 +1059,7 @@ describe("implementConflict", () => {
       expect(state.lastBaseSha).toBe("basesha");
       expect(state.round).toBe(1);
       expect(api.comments.at(-1)).toContain("Jumi failed:");
+      expect(api.comments.at(-1)).toContain("_Jumi · opencode · openai/gpt-5.5_");
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
     });
   });

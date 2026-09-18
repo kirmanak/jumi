@@ -1,7 +1,7 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
-import { type Engine, resolveEngine, throwIfEngineFailed } from "./engine.ts";
+import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { withEngineChain } from "./fallback.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
@@ -30,7 +30,7 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
-import type { NamedRunner } from "./runners.ts";
+import { appendRunnerStamp, formatRunnerStamp, type NamedRunner } from "./runners.ts";
 import {
   appendStuckFingerprint,
   clearQuotaStuck,
@@ -124,7 +124,7 @@ export interface ReviewOptions {
 }
 
 export type PersistReviewResult =
-  | { kind: "markdown"; markdown: string }
+  | { kind: "markdown"; markdown: string; runner?: string }
   | { kind: "skip"; reason: string }
   | { kind: "error"; error: string };
 
@@ -143,6 +143,8 @@ export interface PublishReviewOptions {
   botUsername: string;
   resultMarkdown?: string | null;
   resultReason?: string | null;
+  /** Formatted stamp for the runner that produced `resultMarkdown`. */
+  resultRunner?: string | null;
   error?: string | null;
   logger?: (message: string) => void;
 }
@@ -172,8 +174,17 @@ function markerFor(owner: string, repo: string, prNumber: number): string {
   return `<!-- jumi-review:${owner}/${repo}#${prNumber} -->`;
 }
 
-function buildCommentBody(marker: string, headSha: string, output: string, checkLine?: string): string {
-  const body = `${marker}\n### Jumi review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`;
+function buildCommentBody(
+  marker: string,
+  headSha: string,
+  output: string,
+  checkLine?: string,
+  runner?: string | null
+): string {
+  const body = appendRunnerStamp(
+    `${marker}\n### Jumi review\n\nReviewed commit: \`${headSha}\`\n\n${output.trim()}`,
+    runner ?? undefined
+  );
   if (!checkLine) return body;
   return `${body.trimEnd()}\n\n${checkLine}`;
 }
@@ -382,6 +393,7 @@ async function postPullReview(opts: {
   event: PullReviewEvent;
   body: string;
   checkLine?: string;
+  runner?: string | null;
   singleFilePath?: string;
   log: (message: string) => void;
 }): Promise<boolean> {
@@ -486,7 +498,8 @@ async function postPullReview(opts: {
           opts.marker,
           opts.headSha,
           stripFindingLines(opts.comment, { singleFilePath: opts.singleFilePath, posted }),
-          opts.checkLine
+          opts.checkLine,
+          opts.runner
         )
       );
       return true;
@@ -859,9 +872,16 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     marker,
     opts.expectedHeadSha,
     stripFindingLines(parsed.comment, { singleFilePath }),
-    parsed.checkLine
+    parsed.checkLine,
+    opts.resultRunner
   );
-  const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, parsed.comment, parsed.checkLine);
+  const stickyBody = buildCommentBody(
+    marker,
+    opts.expectedHeadSha,
+    parsed.comment,
+    parsed.checkLine,
+    opts.resultRunner
+  );
 
   let result: ReviewResult | undefined;
   if (!parsed.verdict.incomplete) {
@@ -879,6 +899,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         event: reviewEventForVerdict(parsed.verdict.state, pr.user?.login, opts.botUsername),
         body: writeup,
         checkLine: parsed.checkLine,
+        runner: opts.resultRunner,
         singleFilePath,
         log,
       });
@@ -1115,11 +1136,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       }
     };
 
+    // Stamp for the spawn that wrote the artifact; after a hop, the runner that ran.
+    let runner: string | undefined;
     const runOpenCode = async (extra?: { prompt: string; continueSession: boolean }) => {
       throwIfAborted(opts.abortSignal);
       await writeFile(join(opts.workspace, "JUMI_TASK.md"), extra?.prompt ?? prompt);
       log(`Running OpenCode for ${repoFullName}#${pr.number}`);
-      const engineResult = await engine({
+      const runOpts: EngineRunOptions = {
         model: opts.model,
         variant: opts.variant,
         workdir: opts.workspace,
@@ -1138,7 +1161,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           sha: reviewedHeadSha,
           jobId: opts.jobId,
         },
-      });
+      };
+      const engineResult = await engine(runOpts);
+      runner = formatRunnerStamp(resultRunner(engineResult, runOpts));
       // Only the quota path in git.ts returns engine `stuck`; gate on the
       // message so a future non-quota `stuck` producer falls through to the
       // fingerprint path instead of setting the human-clear quota flag.
@@ -1207,7 +1232,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         }
         if (artifact.status !== "missing" && artifact.content.trim()) {
           const markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
-          await persistOutcome({ kind: "markdown", markdown });
+          await persistOutcome({ kind: "markdown", markdown, ...(runner ? { runner } : {}) });
           if (opts.home) {
             const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
             // A successful run clears any stale (TTL-expired) quota flag.
@@ -1228,6 +1253,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             expectedHeadSha: reviewedHeadSha,
             botUsername: opts.botUsername,
             resultMarkdown: markdown,
+            resultRunner: runner,
             logger: log,
           });
         }

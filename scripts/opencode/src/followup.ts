@@ -36,7 +36,7 @@ import {
   shouldIncrementRound,
   writeConflictLatch,
 } from "./conflict.ts";
-import { throwIfEngineFailed } from "./engine.ts";
+import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -47,6 +47,7 @@ import { trustedWriteLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -787,8 +788,12 @@ export async function implementFollowUp(
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };
 
+  // The runner behind the latest spawn; after a hop this is the one that ran.
+  let runner: RunnerStamp | undefined;
   const sticky = (body: string, index: number) =>
-    upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, body, { index });
+    upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
+      index,
+    });
 
   const assigned = await recheckAssignedAndOpen(claimed, opts);
   if (assigned) return assigned;
@@ -1040,6 +1045,9 @@ export async function implementFollowUp(
           jobId: opts.jobId ?? opts.job.delivery,
           ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
           onPid: loop.engineOnPid(opts.onPid),
+          onRunner: (r) => {
+            runner = r;
+          },
         });
       } catch (err: unknown) {
         if (isQuotaError(err)) {
@@ -1056,6 +1064,7 @@ export async function implementFollowUp(
         prefixMergeThrew = true;
         throw err;
       }
+      runner = mergeResult.runner;
       const persistConflictAttempt = async (result: typeof mergeResult) => {
         if (!shouldIncrementRound(result)) return;
         await writeConflictLatch(latches, latchKey, {
@@ -1143,13 +1152,15 @@ export async function implementFollowUp(
       if (ci.failed.length) {
         await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
       }
+      // No follow-up runner has spawned yet; don't carry the resolver's stamp.
+      runner = undefined;
       await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
       const runEngine = async (label: string): Promise<{ status: "skipped"; reason: string } | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
         followUpEngineRan = true;
-        const result = await engine({
+        const runOpts: EngineRunOptions = {
           model: opts.model,
           variant: opts.variant,
           workdir: worktree,
@@ -1169,6 +1180,10 @@ export async function implementFollowUp(
           logger: log,
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
+        };
+        runner = undefined;
+        const result = await runEngineStamped(engine, runOpts, (r) => {
+          runner = r;
         });
         // Gate on the message so a future non-quota `stuck` producer uses the
         // fingerprint path instead of the human-clear quota flag.
@@ -1261,6 +1276,7 @@ export async function implementFollowUp(
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
+      runner = thrownRunner(err) ?? runner;
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,

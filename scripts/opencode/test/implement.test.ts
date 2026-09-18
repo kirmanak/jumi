@@ -928,11 +928,14 @@ describe("implementIssue", () => {
       expect(api.pulls).toEqual([
         {
           title: "Fix the thing",
-          body: "Fixes #12",
+          body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
           head: "jumi/issue-12-fix-the-thing",
           base: "main",
         },
       ]);
+      expect(api.comments.at(-1)).toContain(
+        "Opened https://gitea.kirmanak.stream/kirmanak/demo/pulls/3\n\n_Jumi · opencode · openai/gpt-5.5_"
+      );
       const push = gitCalls.find((args) => args[0] === "push");
       expect(push).toEqual(["push", "-u", "origin", "jumi/issue-12-fix-the-thing"]);
       expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
@@ -1201,6 +1204,7 @@ describe("implementIssue", () => {
       expect(claim?.pid).toBe(0);
       expect(claim?.terminal).toBe(true);
       expect(api.comments.at(-1)).toContain("Jumi failed");
+      expect(api.comments.at(-1)).toContain("_Jumi · opencode · openai/gpt-5.5_");
     });
   });
 
@@ -1261,7 +1265,9 @@ describe("implementIssue", () => {
         logger: () => undefined,
       });
       expect(result.status).toBe("pr");
-      expect(api.pulls[0]).toMatchObject({ body: "Caches categories.\n\nFixes #12" });
+      expect(api.pulls[0]).toMatchObject({
+        body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+      });
       expect(statusSawPrFile).toBe(false);
       await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
     });
@@ -1295,7 +1301,9 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(api.pulls[0]).toMatchObject({ body: "Caches categories.\n\nFixes #12" });
+      expect(api.pulls[0]).toMatchObject({
+        body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+      });
     });
   });
 
@@ -1327,7 +1335,7 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12" });
+      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_" });
     });
   });
 
@@ -1404,7 +1412,9 @@ describe("implementIssue", () => {
         logger: () => undefined,
       });
       expect(result.status).toBe("pr");
-      expect(api.pulls[0]).toMatchObject({ body: "Caches categories.\n\nFixes #12" });
+      expect(api.pulls[0]).toMatchObject({
+        body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+      });
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
     });
@@ -1439,7 +1449,7 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12" });
+      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_" });
     });
   });
 
@@ -1480,7 +1490,7 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12" });
+      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_" });
       expect(statusSawPrDir).toBe(false);
       await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
     });
@@ -1864,6 +1874,44 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
+    });
+  });
+
+  test("stamps the PR and diary with the runner that ran after a hop, not the primary", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) =>
+          opts.type === "claude"
+            ? { status: "exit", exitCode: 1, message: "claude exited with code 1: 503 service unavailable" }
+            : { status: "ok" },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      const stamp = "_Jumi · opencode · xai/grok-4.6 (high)_";
+      expect(api.pulls[0]).toMatchObject({ body: `Fixes #12\n\n${stamp}` });
+      expect(api.comments.at(-1)).toContain(`Opened https://gitea.kirmanak.stream/kirmanak/demo/pulls/3\n\n${stamp}`);
+      expect(api.comments.join("\n")).not.toContain("claude-opus-5");
     });
   });
 

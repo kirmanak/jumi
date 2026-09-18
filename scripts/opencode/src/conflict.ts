@@ -18,7 +18,7 @@ import {
   throwIfAborted,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
-import { throwIfEngineFailed } from "./engine.ts";
+import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
@@ -27,6 +27,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import type { Pull } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -70,6 +71,8 @@ export interface MergeDefaultResult {
   baseSha: string;
   openCodeRan: boolean;
   conflicted: boolean;
+  /** Set when a runner resolved the conflict; the one that actually ran. */
+  runner?: RunnerStamp;
 }
 
 export interface MergeDefaultIntoWorktreeOpts {
@@ -95,6 +98,8 @@ export interface MergeDefaultIntoWorktreeOpts {
   ciMarkdown?: string;
   jobId?: string;
   skipCleanMerge?: boolean;
+  /** Called with the runner that ran, before any engine failure is thrown. */
+  onRunner?: (runner: RunnerStamp) => void;
 }
 
 function logDefault(message: string) {
@@ -413,6 +418,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
   const leftoverLocks = remaining.filter(isGeneratedLock);
   remaining = remaining.filter((path) => !isGeneratedLock(path));
   let openCodeRan = false;
+  let runner: RunnerStamp | undefined;
   if (leftoverLocks.length > 0) {
     return { status: "stuck", headSha, baseSha, openCodeRan: false, conflicted: true };
   }
@@ -442,29 +448,32 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     if (opts.ciMarkdown) await writeFile(join(worktree, CI_LOG_FILE), opts.ciMarkdown);
     log(`Running OpenCode conflict resolution for ${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`);
     openCodeRan = true;
-    throwIfEngineFailed(
-      await opts.openCodeRunner({
-        model: opts.model,
-        variant: opts.variant,
-        workdir: worktree,
-        home: opts.home,
-        sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
-        extraEnv: opts.extraEnv,
-        timeoutMs: opts.timeoutMs ?? CONFLICT_TIMEOUT_MS,
-        maxOutputBytes: opts.maxOutputBytes,
-        reviewLabel: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
-        trace: {
-          kind: "conflict",
-          owner: opts.job.owner,
-          repo: opts.job.repo,
-          sha: headSha,
-          jobId: opts.jobId ?? opts.job.delivery,
-        },
-        logger: log,
-        abortSignal: opts.abortSignal,
-        onPid: opts.onPid,
-      })
-    );
+    const runOpts: EngineRunOptions = {
+      model: opts.model,
+      variant: opts.variant,
+      workdir: worktree,
+      home: opts.home,
+      sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
+      extraEnv: opts.extraEnv,
+      timeoutMs: opts.timeoutMs ?? CONFLICT_TIMEOUT_MS,
+      maxOutputBytes: opts.maxOutputBytes,
+      reviewLabel: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
+      trace: {
+        kind: "conflict",
+        owner: opts.job.owner,
+        repo: opts.job.repo,
+        sha: headSha,
+        jobId: opts.jobId ?? opts.job.delivery,
+      },
+      logger: log,
+      abortSignal: opts.abortSignal,
+      onPid: opts.onPid,
+    };
+    const engineResult = await runEngineStamped(opts.openCodeRunner, runOpts, (r) => {
+      runner = r;
+      opts.onRunner?.(r);
+    });
+    throwIfEngineFailed(engineResult);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
     await rm(join(worktree, CI_LOG_FILE), { force: true });
@@ -472,7 +481,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     await git(["add", "-A"], { cwd: worktree, env }).catch(() => undefined);
     remaining = await markerPaths(git, worktree, env);
     if (remaining.length > 0) {
-      return { status: "stuck", headSha, baseSha, openCodeRan, conflicted: true };
+      return { status: "stuck", headSha, baseSha, openCodeRan, conflicted: true, runner };
     }
   }
 
@@ -481,7 +490,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     await git(["add", "-A"], { cwd: worktree, env }).catch(() => undefined);
   }
   await commitMergeIfNeeded(git, env, worktree, defaultBranch, headRef);
-  return { status: "merged", headSha, baseSha, openCodeRan, conflicted };
+  return { status: "merged", headSha, baseSha, openCodeRan, conflicted, ...(runner ? { runner } : {}) };
 }
 
 export function shouldIncrementRound(result: MergeDefaultResult): boolean {
@@ -502,8 +511,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };
 
+  // The runner behind the latest spawn; after a hop this is the one that ran.
+  let runner: RunnerStamp | undefined;
   const sticky = (body: string, index: number) =>
-    upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, body, { index });
+    upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
+      index,
+    });
 
   const assigned = await recheckAssignedAndOpen(claimed, opts);
   if (assigned) return assigned;
@@ -632,6 +645,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           ciMarkdown,
           jobId: opts.jobId ?? opts.job.delivery,
           onPid: loop.engineOnPid(opts.onPid),
+          onRunner: (r) => {
+            runner = r;
+          },
         });
       } catch (err: unknown) {
         if (isQuotaError(err)) {
@@ -652,6 +668,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         throw err;
       }
 
+      runner = mergeResult.runner;
       if (mergeResult.status === "up-to-date") {
         await loop.stopHeartbeat();
         await loop.forgetSerialized();
@@ -682,7 +699,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             throwIfAborted(opts.abortSignal);
             await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
             log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
-            const continued = await engine({
+            const continuedOpts: EngineRunOptions = {
               model: opts.model,
               variant: opts.variant,
               workdir: worktree,
@@ -702,6 +719,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               logger: log,
               abortSignal: opts.abortSignal,
               onPid: loop.engineOnPid(opts.onPid),
+            };
+            runner = undefined;
+            const continued = await runEngineStamped(engine, continuedOpts, (r) => {
+              runner = r;
             });
             // Gate on the message so a future non-quota `stuck` producer does
             // not set the human-clear quota flag.
@@ -761,6 +782,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
+      runner = thrownRunner(err) ?? runner;
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,

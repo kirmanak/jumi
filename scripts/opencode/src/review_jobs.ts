@@ -62,6 +62,8 @@ export interface ReviewJobRecord {
   leasedBy: string | null;
   leasedUntil: number | null;
   resultMarkdown: string | null;
+  /** Formatted runner stamp for the spawn that produced `resultMarkdown`. */
+  resultRunner?: string | null;
   resultReason: string | null;
   error: string | null;
   pendingStatusAt: number | null;
@@ -162,6 +164,7 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS pr_updated_at TIMESTAMPTZ;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'review';
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS payload JSONB;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_runner TEXT;
 
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
@@ -600,6 +603,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot save result for job ${id}`);
       if (result.kind === "markdown") {
         row.resultMarkdown = result.markdown;
+        row.resultRunner = result.runner ?? null;
         row.resultReason = null;
         row.error = null;
       } else if (result.kind === "skip") {
@@ -794,6 +798,7 @@ type ReviewJobRow = {
   leased_by: unknown;
   leased_until: unknown;
   result_markdown: unknown;
+  result_runner?: unknown;
   result_reason: unknown;
   error: unknown;
   pending_status_at: unknown;
@@ -874,6 +879,7 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     leasedBy: strOrNull(row.leased_by),
     leasedUntil: epoch(row.leased_until),
     resultMarkdown: strOrNull(row.result_markdown),
+    resultRunner: strOrNull(row.result_runner),
     resultReason: strOrNull(row.result_reason),
     error: strOrNull(row.error),
     pendingStatusAt: epoch(row.pending_status_at),
@@ -1179,10 +1185,10 @@ export class PgReviewJobStore implements ReviewJobStore {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_markdown = $3, result_reason = NULL, error = NULL, updated_at = NOW()
+           SET result_markdown = $3, result_runner = $4, result_reason = NULL, error = NULL, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.markdown]
+          [id, leasedBy, result.markdown, result.runner ?? null]
         )
       );
     } else if (result.kind === "skip") {

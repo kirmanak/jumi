@@ -119,7 +119,7 @@ describe("withModelHop", () => {
       fallbackModel: "anthropic/claude-sonnet-4-6",
       fallbackVariant: "high",
     })({ model: "openai/gpt-5.5", variant: "xhigh", workdir: "/tmp" });
-    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(result).toMatchObject(ok("anthropic/claude-sonnet-4-6"));
     expect(calls).toEqual([
       { model: "openai/gpt-5.5", variant: "xhigh", continueSession: undefined, hop: undefined },
       { model: "anthropic/claude-sonnet-4-6", variant: "high", continueSession: false, hop: true },
@@ -189,7 +189,7 @@ describe("withModelHop", () => {
       model: "openai/gpt-5.5",
       workdir: "/tmp",
     });
-    expect(result).toEqual(stdoutHit);
+    expect(result).toMatchObject(stdoutHit);
     expect(models).toEqual(["openai/gpt-5.5"]);
   });
 
@@ -204,7 +204,7 @@ describe("withModelHop", () => {
       remainingLeaseMs: () => 1_500_000,
       extendLease: async () => false,
     })({ model: "openai/gpt-5.5", workdir: "/tmp", timeoutMs: 900_000 });
-    expect(result).toEqual(unavailable);
+    expect(result).toMatchObject(unavailable);
     expect(models).toEqual(["openai/gpt-5.5"]);
   });
 
@@ -218,7 +218,7 @@ describe("withModelHop", () => {
       fallbackModel: "anthropic/claude-sonnet-4-6",
       remainingLeaseMs: () => 1_000,
     })({ model: "openai/gpt-5.5", workdir: "/tmp", timeoutMs: 900_000 });
-    expect(result).toEqual(unavailable);
+    expect(result).toMatchObject(unavailable);
     expect(models).toEqual(["openai/gpt-5.5"]);
   });
 
@@ -239,7 +239,7 @@ describe("withModelHop", () => {
         return true;
       },
     })({ model: "openai/gpt-5.5", workdir: "/tmp", timeoutMs: 900_000 });
-    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(result).toMatchObject(ok("anthropic/claude-sonnet-4-6"));
     expect(extended).toBe(1);
     expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
   });
@@ -304,7 +304,7 @@ describe("withModelHop", () => {
       model: "openai/gpt-5.5",
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(result).toMatchObject(ok("anthropic/claude-sonnet-4-6"));
     expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
   });
 
@@ -321,7 +321,7 @@ describe("withModelHop", () => {
       model: "openai/gpt-5.5",
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(result).toMatchObject(ok("anthropic/claude-sonnet-4-6"));
     expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
   });
 
@@ -336,7 +336,7 @@ describe("withModelHop", () => {
       model: "openai/gpt-5.5",
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(result).toMatchObject(ok("anthropic/claude-sonnet-4-6"));
     expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
   });
 
@@ -352,7 +352,7 @@ describe("withModelHop", () => {
       model: "opencode/big-pickle",
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok("anthropic/claude-sonnet-4-6"));
+    expect(result).toMatchObject(ok("anthropic/claude-sonnet-4-6"));
     expect(calls).toEqual([
       { model: "opencode/big-pickle", continueSession: undefined, hop: undefined },
       { model: "anthropic/claude-sonnet-4-6", continueSession: false, hop: true },
@@ -399,7 +399,7 @@ describe("withModelHop", () => {
       model: "opencode/big-pickle",
       workdir: "/tmp",
     });
-    expect(result).toEqual(quotaStuck);
+    expect(result).toMatchObject(quotaStuck);
     expect(models).toEqual(["opencode/big-pickle"]);
   });
 });
@@ -439,7 +439,8 @@ describe("withEngineChain", () => {
       model: claude.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(claude.model));
+    expect(result).toMatchObject(ok(claude.model));
+    expect(result.runner).toEqual({ type: "claude", model: claude.model, effort: "high" });
     expect(calls).toEqual([{ type: "claude", model: claude.model, variant: undefined, effort: "high" }]);
   });
 
@@ -460,11 +461,21 @@ describe("withEngineChain", () => {
       variant: spark.variant,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(grok.model));
+    expect(result).toMatchObject(ok(grok.model));
+    expect(result.runner).toEqual({ type: "opencode", model: grok.model, variant: grok.variant });
     expect(calls).toEqual([
       { model: spark.model, variant: spark.variant, continueSession: undefined, hop: undefined },
       { model: grok.model, variant: grok.variant, continueSession: false, hop: true },
     ]);
+  });
+
+  test("stamps the runner that ran on later calls after a hop, not the primary", async () => {
+    const engine: Engine = async (opts) => (opts.model === spark.model ? unavailable : ok(opts.model));
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    const first = await run({ model: spark.model, variant: spark.variant, workdir: "/tmp" });
+    const second = await run({ model: spark.model, variant: spark.variant, workdir: "/tmp" });
+    expect(first.runner).toEqual({ type: "opencode", model: grok.model, variant: grok.variant });
+    expect(second.runner).toEqual({ type: "opencode", model: grok.model, variant: grok.variant });
   });
 
   test("continueSession does not hop", async () => {
@@ -478,7 +489,7 @@ describe("withEngineChain", () => {
       workdir: "/tmp",
       continueSession: true,
     });
-    expect(result).toEqual(unavailable);
+    expect(result).toMatchObject(unavailable);
     expect(n).toBe(1);
   });
 
@@ -493,6 +504,23 @@ describe("withEngineChain", () => {
       withEngineChain(engine, { chain: [spark, grok] })({ model: spark.model, workdir: "/tmp" })
     ).rejects.toBe(infra);
     expect(n).toBe(1);
+    expect(infra.runner).toEqual({ type: "opencode", model: spark.model, variant: spark.variant });
+  });
+
+  test("thrown failure after a hop carries the runner that failed, not the primary", async () => {
+    const err = new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+    const engine: Engine = async (opts) => {
+      if (opts.model === spark.model) return unavailable;
+      throw err;
+    };
+    await expect(
+      withEngineChain(engine, { chain: [spark, grok] })({
+        model: spark.model,
+        variant: spark.variant,
+        workdir: "/tmp",
+      })
+    ).rejects.toBe(err);
+    expect(err.runner).toEqual({ type: "opencode", model: grok.model, variant: grok.variant });
   });
 
   test("auth class hops", async () => {
@@ -508,7 +536,7 @@ describe("withEngineChain", () => {
       model: spark.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(grok.model));
+    expect(result).toMatchObject(ok(grok.model));
     expect(models).toEqual([spark.model, grok.model]);
   });
 
@@ -543,7 +571,7 @@ describe("withEngineChain", () => {
       model: claude.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(grok.model));
+    expect(result).toMatchObject(ok(grok.model));
     expect(calls).toEqual([
       { type: "claude", model: claude.model, variant: undefined, effort: "high", hop: undefined },
       { type: "opencode", model: grok.model, variant: "high", effort: undefined, hop: true },
@@ -568,7 +596,7 @@ describe("withEngineChain", () => {
       model: claude.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(grok.model));
+    expect(result).toMatchObject(ok(grok.model));
     expect(calls).toEqual([
       { type: "claude", model: claude.model, continueSession: undefined, hop: undefined },
       { type: "opencode", model: grok.model, continueSession: false, hop: true },
@@ -594,7 +622,7 @@ describe("withEngineChain", () => {
       model: claude.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(grok.model));
+    expect(result).toMatchObject(ok(grok.model));
     expect(calls).toEqual([
       { type: "claude", model: claude.model, continueSession: undefined, hop: undefined },
       { type: "opencode", model: grok.model, continueSession: false, hop: true },
@@ -614,7 +642,7 @@ describe("withEngineChain", () => {
       model: claude.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(usageLimit);
+    expect(result).toMatchObject(usageLimit);
   });
 
   test("spark quota stuck hops once to unprefixed claude", async () => {
@@ -637,7 +665,7 @@ describe("withEngineChain", () => {
       model: spark.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(claude.model));
+    expect(result).toMatchObject(ok(claude.model));
     expect(calls).toEqual([
       { type: "opencode", model: spark.model, continueSession: undefined, hop: undefined },
       { type: "claude", model: claude.model, continueSession: false, hop: true },
@@ -663,7 +691,7 @@ describe("withEngineChain", () => {
       model: spark.model,
       workdir: "/tmp",
     });
-    expect(result).toEqual(ok(grok.model));
+    expect(result).toMatchObject(ok(grok.model));
     expect(models).toEqual([spark.model, grok.model]);
   });
 

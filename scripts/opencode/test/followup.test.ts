@@ -12,6 +12,7 @@ import {
   stuckStatePath,
 } from "../src/claim.ts";
 import { readConflictState, writeConflictState } from "../src/conflict.ts";
+import { EngineFailedError } from "../src/engine.ts";
 import {
   buildFeedbackMarkdown,
   CI_PENDING_RETRY_MS,
@@ -1885,6 +1886,57 @@ describe("implementFollowUp", () => {
       expect(conflict.round).toBe(0);
       expect(conflict.lastHeadSha).toBe("");
       expect(conflict.lastBaseSha).toBe("");
+    });
+  });
+
+  test("follow-up that resolved conflicts then throws is not stamped with the resolver", async () => {
+    await withDirs(async (home, workdir) => {
+      let conflictDone = false;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return conflictDone ? "" : "src/demo.ts";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("MERGE_HEAD")) return "mergehead";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "M src/demo.ts";
+        return "";
+      };
+      const api = makeApi();
+      const resolverStamp = "_Jumi · claude · claude-opus-5 (high)_";
+      await expect(
+        implementFollowUp({
+          api,
+          job: followUpJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async (opts) => {
+            if (opts.trace?.kind === "conflict") {
+              conflictDone = true;
+              return { status: "ok", runner: { type: "claude", model: "claude-opus-5", effort: "high" } };
+            }
+            throw new EngineFailedError("host: provider auth death", false, { auth: true });
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("provider auth death");
+      const addressing = api.comments.find((body) => body.includes("Jumi is addressing review comments."));
+      expect(addressing).toBeDefined();
+      expect(addressing).not.toContain(resolverStamp);
+      expect(addressing).not.toContain("_Jumi ·");
+      const failed = api.comments.find((body) => body.includes("Jumi failed"));
+      expect(failed).toContain("Jumi failed");
+      expect(failed).not.toContain(resolverStamp);
+      expect(failed).toContain("_Jumi · opencode · openai/gpt-5.5_");
     });
   });
 

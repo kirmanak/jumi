@@ -31,7 +31,7 @@ import {
   type QueueCandidate,
   validateYield,
 } from "./dependencies.ts";
-import { type Engine, throwIfEngineFailed } from "./engine.ts";
+import { type Engine, type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
@@ -41,7 +41,7 @@ import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import type { NamedRunner } from "./runners.ts";
+import { appendRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -133,7 +133,15 @@ export function buildTaskMarkdown(job: IssueJob): string {
   return `# ${job.title}\n\n${job.body}\n\n${job.htmlUrl}\n`;
 }
 
-export function buildPullRequestBody(issueNumber: number, fileContents: string | null | undefined): string {
+export function buildPullRequestBody(
+  issueNumber: number,
+  fileContents: string | null | undefined,
+  runner?: RunnerStamp
+): string {
+  return appendRunnerStamp(pullRequestText(issueNumber, fileContents), runner);
+}
+
+function pullRequestText(issueNumber: number, fileContents: string | null | undefined): string {
   const fallback = `Fixes #${issueNumber}`;
   if (fileContents == null) return fallback;
   let text = fileContents.replaceAll("\0", "").trim();
@@ -237,6 +245,10 @@ export async function implementIssue(
   }
 
   const loop = openClaimedLoop(claimed, opts);
+  // The runner behind the latest spawn; after a hop this is the one that ran.
+  let runner: RunnerStamp | undefined;
+  const diary = (body: string) =>
+    upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
 
   return runClaimedLoop(
     loop,
@@ -283,7 +295,7 @@ export async function implementIssue(
       ): Promise<ImplementResult | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
-        const result = await engine({
+        const runOpts: EngineRunOptions = {
           model: opts.model,
           variant: opts.variant,
           workdir: worktree,
@@ -304,6 +316,10 @@ export async function implementIssue(
           logger: log,
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
+        };
+        runner = undefined;
+        const result = await runEngineStamped(engine, runOpts, (r) => {
+          runner = r;
         });
         // Gate on the message: only the quota path returns engine `stuck`
         // today, but a future non-quota producer must not set the quota flag.
@@ -314,7 +330,7 @@ export async function implementIssue(
             fallbackModel: opts.fallbackModel,
             previousError: opts.previousError,
           });
-          await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+          await diary(QUOTA_STUCK_TEXT);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
         }
@@ -368,7 +384,7 @@ export async function implementIssue(
       };
 
       const skipBlocked = async (reason: string) => {
-        await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, reason);
+        await diary(reason);
         return skipClaimedWork(loop, reason);
       };
 
@@ -469,7 +485,7 @@ export async function implementIssue(
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
         await loop.stopHeartbeat();
-        await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, "no changes");
+        await diary("no changes");
         await loop.stampTerminalClaim(opts.api);
         await loop.detachWorktree();
         return { status: "no-changes" };
@@ -486,17 +502,18 @@ export async function implementIssue(
 
       const pr = await opts.api.createPullRequest(owner, repo, {
         title: liveJob.title,
-        body: buildPullRequestBody(issueNumber, prFileContents),
+        body: buildPullRequestBody(issueNumber, prFileContents, runner),
         head: branch,
         base: opts.job.defaultBranch,
       });
-      await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, `Opened ${pr.html_url}`);
+      await diary(`Opened ${pr.html_url}`);
       await loop.stopHeartbeat();
       await loop.forgetSerialized();
       await loop.detachWorktree();
       return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
     },
     async (err) => {
+      runner = thrownRunner(err) ?? runner;
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,
@@ -504,21 +521,14 @@ export async function implementIssue(
           fallbackModel: opts.fallbackModel,
           previousError: opts.previousError,
         });
-        await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT).catch(
-          () => undefined
-        );
+        await diary(QUOTA_STUCK_TEXT).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
         await loop.stopHeartbeat();
         await loop.forgetSerialized().catch(() => undefined);
         await loop.detachWorktree();
         return;
       }
-      await upsertWorkerComment(
-        opts.api,
-        owner,
-        repo,
-        issueNumber,
-        opts.botUsername,
+      await diary(
         redactGitSecrets(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, [loop.auth.token])
       ).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));

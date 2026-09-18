@@ -142,3 +142,32 @@ export function modelsFromCatalog(catalog: RunnersCatalog): SynthesizeRunnersInp
     fallbackVariant: second?.type === OPENCODE_RUNNER_TYPE ? second.variant : undefined,
   };
 }
+
+export interface RunnerStamp {
+  type: string;
+  model: string;
+  variant?: string;
+  effort?: string;
+}
+
+export function runnerStamp(runner: { type?: string; model: string; variant?: string; effort?: string }): RunnerStamp {
+  const type = runner.type ?? OPENCODE_RUNNER_TYPE;
+  const level = type === CLAUDE_RUNNER_TYPE ? runner.effort : runner.variant;
+  if (!level) return { type, model: runner.model };
+  return type === CLAUDE_RUNNER_TYPE
+    ? { type, model: runner.model, effort: level }
+    : { type, model: runner.model, variant: level };
+}
+
+/** The one visible attribution line Jumi appends to public artifacts. */
+export function formatRunnerStamp(runner: RunnerStamp): string {
+  const level = runner.effort ?? runner.variant;
+  return `_Jumi · ${runner.type} · ${runner.model}${level ? ` (${level})` : ""}_`;
+}
+
+export function appendRunnerStamp(body: string, runner: RunnerStamp | string | undefined): string {
+  if (!runner) return body;
+  const line = typeof runner === "string" ? runner : formatRunnerStamp(runner);
+  const text = body.trimEnd();
+  return text ? `${text}\n\n${line}` : line;
+}
