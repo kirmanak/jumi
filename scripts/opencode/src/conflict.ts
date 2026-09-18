@@ -38,7 +38,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitRunner, workerOpenCodeChildEnv } from "./workspace.ts";
+import { type GitRunner, redactGitSecrets, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { CONFLICT_PROMPT } from "./git.ts";
 
@@ -775,9 +775,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         await loop.detachWorktree();
         return;
       }
-      await sticky(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, pr.number).catch(
-        () => undefined
-      );
+      await sticky(
+        redactGitSecrets(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, [loop.auth.token]),
+        pr.number
+      ).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { claimFilePath, readClaim, stuckStatePath } from "../src/claim.ts";
 import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT } from "../src/git.ts";
+import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
@@ -1723,6 +1723,60 @@ describe("implementIssue", () => {
       expect(openCode).toBe(2);
       expect(api.pulls).toHaveLength(0);
       expect(api.comments.at(-1)).toContain("Jumi failed:");
+    });
+  });
+
+  test("redacts the git token from engine stderr in the failure comment and log", async () => {
+    await withDirs(async (home, workdir) => {
+      const token = "ghs_leaky_git_token_74";
+      const binDir = await mkdtemp(join(tmpdir(), "jumi-impl-bin-"));
+      try {
+        const bin = join(binDir, "opencode");
+        await writeFile(
+          bin,
+          `#!/bin/sh
+printf 'session' > "$OPENCODE_DB"
+echo "push failed: token=$GIT_AUTH_TOKEN" >&2
+exit 1
+`
+        );
+        await chmod(bin, 0o755);
+        process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+        const api = makeApi();
+        const logs: string[] = [];
+        const gitRunner: GitRunner = async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          return "";
+        };
+        await expect(
+          implementIssue({
+            api,
+            job: makeIssueJob(),
+            giteaUrl: "https://gitea.kirmanak.stream",
+            giteaToken: token,
+            botUsername: "jumi",
+            model: "openai/gpt-5.5",
+            home,
+            workdir,
+            heartbeatIntervalMs: 0,
+            gitRunner,
+            openCodeRunner: (runOpts) => runOpenCode({ ...runOpts, quotaPollIntervalMs: 0 }),
+            logger: (message) => logs.push(message),
+          })
+        ).rejects.toThrow("opencode exited with code 1");
+        const comment = api.comments.at(-1) ?? "";
+        expect(comment).toContain("Jumi failed:");
+        expect(comment).toContain("token=***");
+        expect(comment).not.toContain(token);
+        const stderrLog = logs.find((line) => line.includes("[opencode stderr]"));
+        expect(stderrLog).toBeDefined();
+        expect(stderrLog).toContain("token=***");
+        expect(stderrLog).not.toContain(token);
+        expect(logs.some((line) => line.includes(token))).toBe(false);
+      } finally {
+        await rm(binDir, { recursive: true, force: true });
+      }
     });
   });
 

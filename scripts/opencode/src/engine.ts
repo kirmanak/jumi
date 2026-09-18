@@ -1,3 +1,5 @@
+import { redactGitSecrets } from "./workspace.ts";
+
 export type TraceKind = "review" | "implement" | "follow-up" | "conflict";
 
 export interface TraceContext {
@@ -65,6 +67,10 @@ export class EngineFailedError extends Error {
     if (extras?.quota) this.quota = extras.quota;
     if (extras?.retryAfterMs != null) this.retryAfterMs = extras.retryAfterMs;
   }
+}
+
+export function redactEngineText(text: string, opts: Pick<EngineRunOptions, "extraEnv">): string {
+  return redactGitSecrets(text, [opts.extraEnv?.GIT_AUTH_TOKEN]);
 }
 
 export function resolveEngine(opts: { engine?: Engine; openCodeRunner?: Engine }, fallback: Engine): Engine {

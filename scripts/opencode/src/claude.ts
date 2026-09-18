@@ -1,7 +1,13 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
-import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
+import {
+  type Engine,
+  EngineFailedError,
+  type EngineResult,
+  type EngineRunOptions,
+  redactEngineText,
+} from "./engine.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 
@@ -224,8 +230,8 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       if (timeout) clearTimeout(timeout);
     }
 
-    const stdout = stripAnsi(stdoutResult.text).trim();
-    const stderr = stripAnsi(stderrResult.text).trim();
+    const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
+    const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);
     const combined = [stderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
     const auth = !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(combined);
@@ -237,15 +243,13 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (runError) {
-      const message = runError instanceof Error ? runError.message : String(runError);
+      const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[claude stderr] ${stderr}`);
         const authMessage = providerAuthDeathMessage();
         throw new EngineFailedError(authMessage, false, { auth: true });
       }
-      const isInfra = looksLikeInfraStderr(message);
-      if (isInfra) throw new EngineFailedError(message, true);
-      throw runError;
+      throw new EngineFailedError(message, looksLikeInfraStderr(message));
     }
 
     if (timedOut) {
@@ -277,6 +281,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       };
     }
 
+    if (stderr) log(`[claude stderr] ${stderr}`);
     return {
       status: "exit",
       exitCode,
