@@ -1,9 +1,11 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import { observeEngineRun } from "./control_metrics.ts";
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
+import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 
 export const CLAUDE_SETTING_SOURCES = "user";
 export const CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,Bash,Grep,Glob,WebFetch";
@@ -12,6 +14,8 @@ export const CLAUDE_PERMISSION_MODE = "dontAsk";
 const CLAUDE_STDERR_MAX_BYTES = 64_000;
 const SCRUB_ENV_PREFIXES = ["GITEA_", "GITHUB_APP_"] as const;
 const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET"]);
+const CLAUDE_USAGE_LIMIT_RE =
+  /You've hit your (?:session |usage |weekly |5[- ]hour )?limit|Claude AI usage limit reached/i;
 
 function stripAnsi(str: string): string {
   return str.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`, "g"), "");
@@ -152,6 +156,11 @@ function engineExitMessage(exitCode: number | null, detail: string): string {
   return `claude exited with code ${exitCode}${detail ? `:\n${detail}` : ""}`;
 }
 
+export function inspectClaudeUsageLimit(text: string | null | undefined): QuotaClass | undefined {
+  if (!text || !CLAUDE_USAGE_LIMIT_RE.test(text)) return undefined;
+  return "resetting";
+}
+
 export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   const prompt = await resolveOpenCodePrompt(opts);
@@ -228,7 +237,8 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     const stderr = stripAnsi(stderrResult.text).trim();
     const combined = [stderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
-    const auth = !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(combined);
+    const quota = !timedOut ? inspectClaudeUsageLimit(combined) : undefined;
+    const auth = !quota && !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(combined);
 
     if (opts.abortSignal?.aborted) {
       const err = new Error("cancelled");
@@ -241,32 +251,47 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[claude stderr] ${stderr}`);
         const authMessage = providerAuthDeathMessage();
+        observeEngineRun(opts, { status: "exit", infra: false, auth: true, durationMs, message: authMessage });
         throw new EngineFailedError(authMessage, false, { auth: true });
       }
       const isInfra = looksLikeInfraStderr(message);
+      observeEngineRun(opts, { status: "exit", infra: isInfra, durationMs, message });
       if (isInfra) throw new EngineFailedError(message, true);
       throw runError;
     }
 
     if (timedOut) {
-      return {
+      return observeEngineRun(opts, {
         status: "timeout",
         exitCode,
         stdout,
         message: engineExitMessage(exitCode, combined),
         infra: false,
         durationMs,
-      };
+      });
     }
 
     if (exitCode === 0) {
       if (stderr) log(`[claude stderr] ${stderr}`);
-      return { status: "ok", exitCode: 0, stdout, durationMs };
+      return observeEngineRun(opts, { status: "ok", exitCode: 0, stdout, durationMs });
+    }
+
+    if (quota) {
+      if (stderr) log(`[claude stderr] ${stderr}`);
+      return observeEngineRun(opts, {
+        status: "stuck",
+        exitCode,
+        stdout,
+        message: QUOTA_MESSAGE,
+        infra: false,
+        durationMs,
+        quota,
+      });
     }
 
     if (auth) {
       if (stderr) log(`[claude stderr] ${stderr}`);
-      return {
+      return observeEngineRun(opts, {
         status: "exit",
         exitCode,
         stdout,
@@ -274,17 +299,17 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
         infra: false,
         auth: true,
         durationMs,
-      };
+      });
     }
 
-    return {
+    return observeEngineRun(opts, {
       status: "exit",
       exitCode,
       stdout,
       message: engineExitMessage(exitCode, combined),
       infra: looksLikeInfraStderr(combined),
       durationMs,
-    };
+    });
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;

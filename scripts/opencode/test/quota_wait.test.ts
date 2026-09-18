@@ -37,6 +37,16 @@ describe("throwIfQuotaWait", () => {
     expect(isResettingQuotaError(new EngineFailedError(QUOTA_MESSAGE, false, { quota: "hard" }))).toBe(false);
   });
 
+  test("throws wait for Claude resetting usage-limit when fallback is unset", () => {
+    expect(() =>
+      throwIfQuotaWait({
+        result: { status: "stuck", exitCode: 1, message: QUOTA_MESSAGE, quota: "resetting" },
+        model: "claude-opus-5",
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
+  });
+
   test("same-provider fallback is treated as no hop", () => {
     expect(() =>
       throwIfQuotaWait({
