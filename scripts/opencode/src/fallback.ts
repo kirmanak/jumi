@@ -9,7 +9,7 @@ import { CLAUDE_RUNNER_TYPE, type NamedRunner, OPENCODE_RUNNER_TYPE } from "./ru
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 
 const PROVIDER_UNAVAILABLE_RE =
-  /rate[\s_-]*limit|too many requests|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free) limit|overloaded|\b(?:502|503|504)\b|bad gateway|gateway timeout|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model/i;
+  /rate[\s_-]*limit|too many requests|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free|session) limit|overloaded|\b(?:502|503|504)\b|bad gateway|gateway timeout|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model/i;
 
 export interface ModelHopOptions {
   fallbackModel?: string;
@@ -37,8 +37,8 @@ export function shouldHopInsteadOfQuotaStuck(primaryModel: string, fallbackModel
   if (!fallbackModel) return false;
   const primary = modelProviderPrefix(primaryModel);
   const fallback = modelProviderPrefix(fallbackModel);
-  if (!primary || !fallback) return false;
-  return primary !== fallback;
+  if (primary && fallback) return primary !== fallback;
+  return primaryModel !== fallbackModel;
 }
 
 export function isProviderUnavailableResult(result: EngineResult): boolean {
