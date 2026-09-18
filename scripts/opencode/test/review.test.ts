@@ -113,7 +113,7 @@ function reviewOptionsWithSha(workspace: string, sha = REVIEW_SHA) {
 }
 
 describe("reviewPullRequest", () => {
-  test("skips closed, merged, WIP, and skip-review PRs", async () => {
+  test("skips closed, merged, and WIP PRs", async () => {
     const runner = async () => {
       throw new Error("runner should not be called");
     };
@@ -139,13 +139,22 @@ describe("reviewPullRequest", () => {
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "PR title disables review" });
-    await expect(
-      reviewPullRequest({
-        ...skipOptions,
-        api: makeApi({ getPR: async () => makePR({ title: "Add thing [skip review]" }) }),
-        openCodeRunner: runner,
-      })
-    ).resolves.toEqual({ status: "skipped", reason: "PR title disables review" });
+  });
+
+  test("reviews PRs titled [skip review]", async () => {
+    await withWorkspace(async (workspace) => {
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        api: makeApi({
+          getPR: async () => makePR({ title: "Add thing [skip review]", head: makeBranch({ sha: REVIEW_SHA }) }),
+        }),
+        openCodeRunner: async () => {
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "posted" });
+    });
   });
 
   test("stuck repeated finding skips OpenCode without failing jumi/opencode-review", async () => {
