@@ -14,7 +14,13 @@ import {
   sampleMemory,
   trackMemoryPeak,
 } from "./diagnostics.ts";
-import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
+import {
+  type Engine,
+  EngineFailedError,
+  type EngineResult,
+  type EngineRunOptions,
+  redactEngineText,
+} from "./engine.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
 import {
@@ -496,8 +502,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     const dbAfter = await pathSizeBytes(dbPath);
     const parentAfter = await sampleMemory(process.pid);
 
-    const stdout = stripAnsi(stdoutResult.text).trim();
-    const stderr = stripAnsi(stderrResult.text).trim();
+    const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
+    const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);
     const toolishLines = countToolishLines(stderr);
     const durationMs = Date.now() - tracker.startedAtMs;
     const tokensExist = recordOpenCodeDb(dbPath);
@@ -563,7 +569,9 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       opencode_db_bytes: dbAfter,
       opencode_db_h: formatBytes(dbAfter),
       opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
-      run_error: runError instanceof Error ? runError.message.slice(0, 200) : runError ? "true" : null,
+      run_error: runError
+        ? redactEngineText(runError instanceof Error ? runError.message : String(runError), opts).slice(0, 200)
+        : null,
       infra,
       auth,
       quota,
@@ -592,7 +600,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     }
 
     if (runError) {
-      const message = runError instanceof Error ? runError.message : String(runError);
+      const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[opencode stderr] ${stderr}`);
         const authMessage = providerAuthDeathMessage();
@@ -601,8 +609,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       }
       const isInfra = infra || looksLikeInfraStderr(message);
       observeOpenCode(opts, { status: "exit", infra: isInfra, durationMs, message });
-      if (isInfra) throw new EngineFailedError(message, true);
-      throw runError;
+      throw new EngineFailedError(message, isInfra);
     }
 
     if (timedOut) {
@@ -639,6 +646,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       });
     }
 
+    if (stderr) log(`[opencode stderr] ${stderr}`);
     return observeOpenCode(opts, {
       status: "exit",
       exitCode,

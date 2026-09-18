@@ -51,6 +51,7 @@ import {
   checkoutPullRequestWorkspace,
   type GitAuthResolver,
   type GitRunner,
+  redactGitSecrets,
   resolveGitAuth,
   runGit,
 } from "./workspace.ts";
@@ -971,6 +972,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
   let persisted = false;
   let persistFailed = false;
+  const failureSecrets: string[] = [opts.giteaToken];
   const persistOutcome = async (result: PersistReviewResult): Promise<void> => {
     if (!opts.persistResult) return;
     try {
@@ -1060,6 +1062,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
     const gitAuth = await resolveGitAuth(opts);
+    failureSecrets.push(gitAuth.token);
     await prepareWorkspace({
       workdir: opts.workspace,
       repo: repoInfo,
@@ -1268,7 +1271,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       throw err;
     }
     if (!persisted && !persistFailed) {
-      const message = `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`;
+      const message = redactGitSecrets(
+        `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`,
+        failureSecrets
+      );
       await opts.persistResult?.({ kind: "error", error: message });
       if (opts.home) {
         const errorHash = fingerprintError(message);
