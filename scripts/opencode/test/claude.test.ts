@@ -50,12 +50,15 @@ describe("inspectClaudeUsageLimit", () => {
   test("classifies Claude session and usage limits as resetting", () => {
     expect(inspectClaudeUsageLimit("You've hit your session limit · resets 12:50am (UTC)")).toBe("resetting");
     expect(inspectClaudeUsageLimit("You've hit your usage limit")).toBe("resetting");
+    expect(inspectClaudeUsageLimit("You've hit your Opus limit")).toBe("resetting");
+    expect(inspectClaudeUsageLimit("You've hit your Sonnet limit")).toBe("resetting");
     expect(inspectClaudeUsageLimit("You've hit your limit · resets 5pm")).toBe("resetting");
     expect(inspectClaudeUsageLimit("Claude AI usage limit reached")).toBe("resetting");
   });
 
   test("does not guess from generic rate-limit or bare usage-limit text", () => {
     expect(inspectClaudeUsageLimit("429 rate limit exceeded")).toBeUndefined();
+    expect(inspectClaudeUsageLimit("You've hit your spend limit")).toBeUndefined();
     expect(inspectClaudeUsageLimit("Usage limit reached. It will reset in 1 hour")).toBeUndefined();
     expect(inspectClaudeUsageLimit("my-model usage limit reached")).toBeUndefined();
     expect(inspectClaudeUsageLimit("bad things")).toBeUndefined();

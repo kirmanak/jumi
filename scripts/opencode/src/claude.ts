@@ -15,7 +15,7 @@ const CLAUDE_STDERR_MAX_BYTES = 64_000;
 const SCRUB_ENV_PREFIXES = ["GITEA_", "GITHUB_APP_"] as const;
 const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET"]);
 const CLAUDE_USAGE_LIMIT_RE =
-  /You've hit your (?:session |usage |weekly |5[- ]hour )?limit|Claude AI usage limit reached/i;
+  /You've hit your (?:session |usage |weekly |opus |sonnet |5[- ]hour )?limit|Claude AI usage limit reached/i;
 
 function stripAnsi(str: string): string {
   return str.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`, "g"), "");
