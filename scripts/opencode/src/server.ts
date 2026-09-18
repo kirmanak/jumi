@@ -301,6 +301,7 @@ export async function publishPersistedJob(
     expectedHeadSha: row.headSha,
     botUsername: config.botUsername,
     resultMarkdown: row.resultMarkdown,
+    resultRunner: row.resultRunner,
     resultReason: row.resultReason,
     error: row.error,
     logger,

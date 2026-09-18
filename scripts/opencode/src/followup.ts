@@ -36,7 +36,7 @@ import {
   shouldIncrementRound,
   writeConflictLatch,
 } from "./conflict.ts";
-import { throwIfEngineFailed } from "./engine.ts";
+import { type EngineRunOptions, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -47,6 +47,7 @@ import { trustedWriteLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -787,8 +788,12 @@ export async function implementFollowUp(
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };
 
+  // The runner behind the latest spawn; after a hop this is the one that ran.
+  let runner: RunnerStamp | undefined;
   const sticky = (body: string, index: number) =>
-    upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, body, { index });
+    upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
+      index,
+    });
 
   const assigned = await recheckAssignedAndOpen(claimed, opts);
   if (assigned) return assigned;
@@ -1056,6 +1061,7 @@ export async function implementFollowUp(
         prefixMergeThrew = true;
         throw err;
       }
+      runner = mergeResult.runner;
       const persistConflictAttempt = async (result: typeof mergeResult) => {
         if (!shouldIncrementRound(result)) return;
         await writeConflictLatch(latches, latchKey, {
@@ -1149,7 +1155,7 @@ export async function implementFollowUp(
         throwIfAborted(opts.abortSignal);
         log(label);
         followUpEngineRan = true;
-        const result = await engine({
+        const runOpts: EngineRunOptions = {
           model: opts.model,
           variant: opts.variant,
           workdir: worktree,
@@ -1169,7 +1175,9 @@ export async function implementFollowUp(
           logger: log,
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
-        });
+        };
+        const result = await engine(runOpts);
+        runner = resultRunner(result, runOpts);
         // Gate on the message so a future non-quota `stuck` producer uses the
         // fingerprint path instead of the human-clear quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {

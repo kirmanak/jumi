@@ -4,7 +4,7 @@ import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
-import { CLAUDE_RUNNER_TYPE, type NamedRunner, OPENCODE_RUNNER_TYPE } from "./runners.ts";
+import { CLAUDE_RUNNER_TYPE, type NamedRunner, OPENCODE_RUNNER_TYPE, runnerStamp } from "./runners.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 
@@ -143,6 +143,10 @@ function lazyChain(opts: EngineRunOptions, hop: EngineChainOptions): NamedRunner
   ];
 }
 
+function stampRunner(result: EngineResult, runner: NamedRunner): EngineResult {
+  return { ...result, runner: runnerStamp(runner) };
+}
+
 export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
   if (!hop.chain?.length && !hop.fallbackModel) return engine;
 
@@ -162,7 +166,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     const current = runners[index]!;
 
     if (index > 0) {
-      return engine(engineOptsForRunner(opts, current));
+      return stampRunner(await engine(engineOptsForRunner(opts, current)), current);
     }
 
     while (true) {
@@ -175,7 +179,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
 
       let result: EngineResult;
       try {
-        result = await engine(runOpts);
+        result = stampRunner(await engine(runOpts), runner);
       } catch (err) {
         const next = runners[index + 1];
         if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) throw err;

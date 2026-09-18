@@ -1,3 +1,4 @@
+import { type RunnerStamp, runnerStamp } from "./runners.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
 export type TraceKind = "review" | "implement" | "follow-up" | "conflict";
@@ -49,6 +50,8 @@ export interface EngineResult {
   durationMs?: number;
   quota?: QuotaClass;
   retryAfterMs?: number;
+  /** The runner that actually produced this result (after any hop). */
+  runner?: RunnerStamp;
 }
 
 export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;
@@ -84,4 +87,12 @@ export function throwIfEngineFailed(result: EngineResult): void {
     retryAfterMs: result.retryAfterMs,
     auth: result.auth === true,
   });
+}
+
+/** Runner that produced `result`, falling back to the options the caller spawned with. */
+export function resultRunner(
+  result: EngineResult,
+  opts: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort">
+): RunnerStamp {
+  return result.runner ?? runnerStamp(opts);
 }

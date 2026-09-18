@@ -247,6 +247,19 @@ describe("MemoryReviewJobStore", () => {
     expect(store.rows[0]?.publishedAt).toBeNull();
   });
 
+  test("persisted markdown keeps the runner stamp for a reclaimed publish", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("dead-engine", 1, new Date(1_000));
+    await store.saveResult(leased!.id, "dead-engine", {
+      kind: "markdown",
+      markdown: "Persisted review\n<!-- jumi-check: success -->",
+      runner: "_Jumi · opencode · xai/grok-4.6 (high)_",
+    });
+    const reclaimed = await store.reclaimExpired(2, new Date(5_000));
+    expect(reclaimed.publish[0]?.resultRunner).toBe("_Jumi · opencode · xai/grok-4.6 (high)_");
+  });
+
   test("expireLease nulls leasedBy so a late heartbeat cannot restore leasedUntil", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());

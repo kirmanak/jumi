@@ -104,6 +104,12 @@ function reviewWriteup(
   return `${body.trimEnd()}\n\n${checkLine}`;
 }
 
+const DEFAULT_RUNNER_STAMP = "_Jumi · opencode · openai/gpt-5.5_";
+
+function stampedWriteup(prose: string, checkLine: string, sha = "headsha"): string {
+  return reviewWriteup(`${prose.trim()}\n\n${DEFAULT_RUNNER_STAMP}`.trim(), checkLine, sha);
+}
+
 function reviewOptionsWithSha(workspace: string, sha = REVIEW_SHA) {
   return {
     ...skipOptions,
@@ -270,11 +276,13 @@ describe("reviewPullRequest", () => {
         {
           commit_id: REVIEW_SHA,
           event: "APPROVED",
-          body: reviewWriteup("Looks good", "<!-- jumi-check: success -->", REVIEW_SHA),
+          body: stampedWriteup("Looks good", "<!-- jumi-check: success -->", REVIEW_SHA),
         },
       ]);
       expect(isJumiReviewFinding({ body: (reviews[0] as { body: string }).body }, REVIEW_SHA)).toBe(false);
-      expect(persisted).toEqual([{ kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->" }]);
+      expect(persisted).toEqual([
+        { kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->", runner: DEFAULT_RUNNER_STAMP },
+      ]);
       await expect(access(join(workspace, "JUMI_REVIEW.md"))).rejects.toThrow();
       await expect(access(join(workspace, "JUMI_TASK.md"))).rejects.toThrow();
       expect(statuses).toEqual([
@@ -325,7 +333,7 @@ describe("reviewPullRequest", () => {
         {
           commit_id: "headsha",
           event: "APPROVED",
-          body: reviewWriteup("Updated review", "<!-- jumi-check: success -->"),
+          body: stampedWriteup("Updated review", "<!-- jumi-check: success -->"),
         },
       ]);
     });
@@ -863,7 +871,7 @@ describe("reviewPullRequest", () => {
         {
           commit_id: "headsha",
           event: "APPROVED",
-          body: reviewWriteup("", "<!-- jumi-check: success -->"),
+          body: stampedWriteup("", "<!-- jumi-check: success -->"),
           comments: [
             {
               path: "src/demo.ts",
@@ -1017,7 +1025,9 @@ describe("reviewPullRequest", () => {
           },
         })
       ).rejects.toThrow("sticky write failed");
-      expect(persisted).toEqual([{ kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->" }]);
+      expect(persisted).toEqual([
+        { kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->", runner: DEFAULT_RUNNER_STAMP },
+      ]);
       expect(statuses.map((status) => status.state)).toEqual(["pending"]);
     });
   });
@@ -1046,7 +1056,9 @@ describe("reviewPullRequest", () => {
           },
         })
       ).rejects.toThrow("cannot save result");
-      expect(persisted).toEqual([{ kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->" }]);
+      expect(persisted).toEqual([
+        { kind: "markdown", markdown: "Looks good\n<!-- jumi-check: success -->", runner: DEFAULT_RUNNER_STAMP },
+      ]);
       expect(statuses.map((status) => status.state)).toEqual(["pending"]);
     });
   });
@@ -1665,6 +1677,7 @@ optionalEnv(resolved, "DATABASE_URL");
         {
           kind: "markdown",
           markdown: expect.stringContaining("<!-- jumi-check: failure; contract env drift -->"),
+          runner: DEFAULT_RUNNER_STAMP,
         },
       ]);
       expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "contract env drift" });
@@ -1849,6 +1862,27 @@ describe("publishReviewResult", () => {
     expect(reviews[1]).toMatchObject({
       body: reviewWriteup("second", "<!-- jumi-check: success -->"),
     });
+  });
+
+  test("persisted runner stamp sits above the check trailer, which stays last", async () => {
+    const reviews: Array<{ body?: string }> = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      resultRunner: "_Jumi · claude · claude-opus-5 (high)_",
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    const body = reviews[0]?.body ?? "";
+    expect(body).toBe(
+      reviewWriteup("Looks good\n\n_Jumi · claude · claude-opus-5 (high)_", "<!-- jumi-check: success -->")
+    );
+    expect(body).not.toContain("OpenCode");
+    expect(lastNonEmptyLine(body)).toBe("<!-- jumi-check: success -->");
   });
 
   test("publishes an incomplete skip as failure without a review sticky", async () => {

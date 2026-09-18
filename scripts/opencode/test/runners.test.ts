@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseRunnersCatalog, parseRunnersFile, RUNNERS_FILE_ENV, synthesizeRunners } from "../src/runners.ts";
+import {
+  appendRunnerStamp,
+  formatRunnerStamp,
+  parseRunnersCatalog,
+  parseRunnersFile,
+  RUNNERS_FILE_ENV,
+  runnerStamp,
+  synthesizeRunners,
+} from "../src/runners.ts";
 
 describe("parseRunnersCatalog", () => {
   test("unknown type fails closed", () => {
@@ -67,5 +75,29 @@ describe("synthesizeRunners", () => {
       runners: { primary: { type: "opencode", model: "openai/gpt-5.5" } },
       chain: ["primary"],
     });
+  });
+});
+
+describe("runner stamp", () => {
+  test("formats harness, model, and variant or effort", () => {
+    expect(formatRunnerStamp(runnerStamp({ type: "opencode", model: "xai/grok-4.6", variant: "high" }))).toBe(
+      "_Jumi · opencode · xai/grok-4.6 (high)_"
+    );
+    expect(formatRunnerStamp(runnerStamp({ type: "claude", model: "claude-opus-5", effort: "high" }))).toBe(
+      "_Jumi · claude · claude-opus-5 (high)_"
+    );
+  });
+
+  test("defaults to opencode and omits an empty level", () => {
+    expect(formatRunnerStamp(runnerStamp({ model: "openai/gpt-5.5" }))).toBe("_Jumi · opencode · openai/gpt-5.5_");
+    expect(runnerStamp({ type: "claude", model: "opus", variant: "xhigh" })).toEqual({ type: "claude", model: "opus" });
+  });
+
+  test("appends one visible line and leaves the body alone without a runner", () => {
+    const runner = runnerStamp({ type: "opencode", model: "m", variant: "v" });
+    expect(appendRunnerStamp("Opened x\n", runner)).toBe("Opened x\n\n_Jumi · opencode · m (v)_");
+    expect(appendRunnerStamp("", runner)).toBe("_Jumi · opencode · m (v)_");
+    expect(appendRunnerStamp("no changes", undefined)).toBe("no changes");
+    expect(appendRunnerStamp("body", "_Jumi · claude · opus_")).toBe("body\n\n_Jumi · claude · opus_");
   });
 });

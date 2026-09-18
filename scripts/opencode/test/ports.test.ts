@@ -252,7 +252,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       expect(forge.pulls).toEqual([
         {
           title: "Fix the thing",
-          body: "Caches categories.\n\nFixes #12",
+          body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
           head: "jumi/issue-12-fix-the-thing",
           base: "main",
         },

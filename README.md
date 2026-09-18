@@ -49,6 +49,8 @@ The org hook hits the **router** mailbox. Worker pods do not need a public webho
 
 OpenCode is Engine impl #0: run to completion in a workspace. Stdout is logs, not the deliverable. The parent writes `JUMI_TASK.md` / `JUMI_FEEDBACK.md` / `JUMI_CI.md` / `JUMI_CONFLICT.md` and reads `JUMI_PR.md` / `JUMI_REVIEW.md`. The child is started with a sanitized env and does **not** receive `GITEA_BOT_TOKEN` or webhook secrets.
 
+The parent stamps every PR description, review writeup, and worker diary comment with the runner that actually produced it (after any hop), as one visible line such as `_Jumi · opencode · xai/grok-4.6 (high)_` or `_Jumi · claude · claude-opus-5 (high)_`. On reviews the stamp sits above the `jumi-check` trailer, which stays last. Later follow-up rounds stamp their own diary comment and never rewrite the PR description.
+
 ## Point Gitea + Postgres + OpenCode at it
 
 1. Run standing pods: router (ingress), engine (review), worker (implement). Same images this repo builds; pin tags from your registry.
