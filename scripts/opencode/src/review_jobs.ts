@@ -36,6 +36,7 @@ export interface IssueJobPayload {
   cloneUrl: string;
   action: string;
   trigger?: IssueJobTrigger;
+  generation?: number;
 }
 
 export const MAX_ATTEMPTS_REASON = "Jumi review failed: max attempts exceeded";
@@ -255,6 +256,14 @@ export function issueJobPayload(job: IssueJob): IssueJobPayload {
   };
 }
 
+function payloadGeneration(payload: IssueJobPayload | null | undefined): number {
+  return typeof payload?.generation === "number" && Number.isFinite(payload.generation) ? payload.generation : 0;
+}
+
+function issueJobPayloadAt(job: IssueJob, generation: number): IssueJobPayload {
+  return { ...issueJobPayload(job), generation };
+}
+
 export function issueJobFromRecord(row: ReviewJobRecord): IssueJob {
   const payload = row.payload;
   if (!payload) throw new Error(`job ${row.id} missing payload`);
@@ -302,6 +311,7 @@ function parsePayload(value: unknown): IssueJobPayload | null {
     cloneUrl: typeof rec.cloneUrl === "string" ? rec.cloneUrl : "",
     action: typeof rec.action === "string" ? rec.action : "",
     trigger: rec.trigger,
+    ...(typeof rec.generation === "number" && Number.isFinite(rec.generation) ? { generation: rec.generation } : {}),
   };
 }
 
@@ -475,7 +485,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         prNumber: job.prNumber ?? 0,
         headSha: job.headSha ?? "",
         issueNumber: job.issueNumber,
-        payload: issueJobPayload(job),
+        payload: issueJobPayloadAt(
+          job,
+          this.issueSkipLatches.get(issueSkipLatchKey(job.owner, job.repo, job.issueNumber))?.generation ?? 0
+        ),
         delivery: job.delivery,
         state: "queued",
         attempt: 0,
@@ -725,13 +738,15 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number> {
     return this.locked(() => {
+      const generation = this.issueSkipLatches.get(issueSkipLatchKey(owner, repo, issueNumber))?.generation ?? 0;
       return this.rows.filter(
         (row) =>
           rowKind(row) === kind &&
           row.owner === owner &&
           row.repo === repo &&
           row.issueNumber === issueNumber &&
-          row.state === "succeeded"
+          row.state === "succeeded" &&
+          payloadGeneration(row.payload) === generation
       ).length;
     });
   }
@@ -947,7 +962,6 @@ export class PgReviewJobStore implements ReviewJobStore {
   async enqueueIssue(job: IssueJob): Promise<EnqueueResult> {
     const key = workerJobKey(job);
     const kind = workerJobKind(job);
-    const payload = issueJobPayload(job);
     return this.sql.begin(async (tx) => {
       if (kind === "implement") {
         const done = asRows<{ state: unknown; result_reason: unknown; payload: unknown }>(
@@ -983,6 +997,14 @@ export class PgReviewJobStore implements ReviewJobStore {
         )
       );
       if (inflight.length > 0) return { key, queued: false };
+
+      const latchRows = asRows<{ generation: unknown }>(
+        await tx.unsafe(
+          `SELECT generation FROM issue_skip_latches WHERE owner = $1 AND repo = $2 AND issue_number = $3`,
+          [job.owner, job.repo, job.issueNumber]
+        )
+      );
+      const payload = issueJobPayloadAt(job, latchRows[0] ? num(latchRows[0].generation) : 0);
 
       const inserted = asRows<{ id: unknown }>(
         await tx.unsafe(
@@ -1350,7 +1372,13 @@ export class PgReviewJobStore implements ReviewJobStore {
     const rows = asRows<{ n: unknown }>(
       await this.sql.unsafe(
         `SELECT COUNT(*)::bigint AS n FROM review_jobs
-         WHERE kind = $1 AND owner = $2 AND repo = $3 AND issue_number = $4 AND state = 'succeeded'`,
+         WHERE kind = $1 AND owner = $2 AND repo = $3 AND issue_number = $4 AND state = 'succeeded'
+           AND COALESCE((payload->>'generation')::integer, 0) = (
+             SELECT COALESCE(
+               (SELECT generation FROM issue_skip_latches WHERE owner = $2 AND repo = $3 AND issue_number = $4),
+               0
+             )
+           )`,
         [kind, owner, repo, issueNumber]
       )
     );

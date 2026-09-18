@@ -368,6 +368,23 @@ describe("MemoryReviewJobStore", () => {
     });
     expect(await store.clearIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 2, skipReason: null });
   });
+
+  test("countSucceeded scopes follow-ups to the current skip-latch generation", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 7, headSha: "sha0", delivery: "d0" }));
+    const first = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(first?.payload?.generation).toBe(0);
+    await store.markPublished(first!.id, first!.leasedBy!, { state: "succeeded" });
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(1);
+    await store.clearIssueSkipLatch("kirmanak", "demo", 12);
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(0);
+    expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "succeeded")).toHaveLength(1);
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 7, headSha: "sha1", delivery: "d1" }));
+    const second = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(second?.payload?.generation).toBe(1);
+    await store.markPublished(second!.id, second!.leasedBy!, { state: "succeeded" });
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(1);
+  });
 });
 
 type FakeSql = {
@@ -850,5 +867,36 @@ describe("PgReviewJobStore kind ANY() bind", () => {
     expect(clearLatch?.query).toContain("stuck = '{}'::jsonb");
     expect(clearLatch?.params).toEqual(["kirmanak", "demo", 12]);
     expect(captured.some((row) => row.query.includes("DELETE FROM issue_skip_latches"))).toBe(false);
+
+    captured.length = 0;
+    await store.countSucceeded("follow-up", "kirmanak", "demo", 12);
+    const count = captured.find((row) => row.query.includes("COUNT(*)"));
+    expect(count?.query).toContain("payload->>'generation'");
+    expect(count?.query).toContain("issue_skip_latches");
+    expect(count?.params).toEqual(["follow-up", "kirmanak", "demo", 12]);
+  });
+});
+
+describe("PgReviewJobStore.enqueueIssue generation", () => {
+  test("stamps the current skip-latch generation on the payload", async () => {
+    const captured: { query: string; params?: unknown[] }[] = [];
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        captured.push({ query, params });
+        if (query.includes("SELECT generation FROM issue_skip_latches")) return [{ generation: 2 }];
+        if (query.includes("INSERT")) return [{ id: 1 }];
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 7, headSha: "headsha" }))).toEqual({
+      key: "follow-up:kirmanak/demo#7:headsha",
+      queued: true,
+    });
+    const insert = captured.find((row) => row.query.includes("INSERT INTO review_jobs"));
+    expect(JSON.parse(String(insert?.params?.[7]))).toMatchObject({ generation: 2, issueNumber: 12 });
   });
 });

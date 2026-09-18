@@ -27,7 +27,7 @@ assign issue to bot
       → ledger kind conflict (capped, same branch)
 ```
 
-Unassign is the kill switch. Caps: 3 review-comment follow-up rounds and 3 conflict rounds per issue (CI follow-up is a separate per-`{head SHA, failed check}` budget). Missing `JUMI_REVIEW.md` after OpenCode exit 0 retries at most twice on that head, then posts stuck (not worker follow-up). Stuck loops (same finding 4×, same error 3×, A→B→A) skip OpenCode that round and do not fail the review check.
+Unassign is the kill switch. Caps: 3 review-comment follow-up rounds and 3 conflict rounds per skip-latch generation (CI follow-up is a separate per-`{head SHA, failed check}` budget). Cancel/unassign/unlabel bumps generation so a later pickup can handover again; succeeded history may remain. Missing `JUMI_REVIEW.md` after OpenCode exit 0 retries at most twice on that head, then posts stuck (not worker follow-up). Stuck loops (same finding 4×, same error 3×, A→B→A) skip OpenCode that round and do not fail the review check.
 
 ## Control plane
 
@@ -101,7 +101,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `OPENCODE_TIMEOUT_MS` | `900000` | OpenCode run timeout (worker first-run default is 4h) |
 | `FOLLOWUP_TIMEOUT_MS` | `3600000` | Follow-up OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
 | `CONFLICT_TIMEOUT_MS` | `3600000` | Conflict OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
-| `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per issue |
+| `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per skip-latch generation |
 | `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics`. Phoenix project name for OpenCode traces. Worker image sets `jumi-worker` |
 | `PHOENIX_OTLP_ENDPOINT` | unset | In-cluster Phoenix OTLP HTTP base URL (app port, `/v1/traces`). Unset skips export. Use an in-cluster URL, not a public hostname |
