@@ -41,7 +41,7 @@ One `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `confli
 
 Router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). Cheap 202 skips log the reason. After the engine publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned to the bot, persist inserts a `follow-up` row.
 
-`router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` is not required for `engine`; required on `router` / worker. GitOps must set `DATABASE_URL` on the worker; process start stays fail-closed if unset (first-run assign then uses the in-memory queue — do not 202 those jobs into RAM).
+`router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` is not required for `engine`; required on `router` / worker. GitOps must set `DATABASE_URL` on the worker too, but the worker does not fail process start without it: that is local/dev mode (in-process queue, no ledger tick, startup log says `ledger=none`). Production correctness never depends on it — the router is the mailbox and never 202s jobs into worker RAM.
 
 The org hook hits the **router** mailbox. Worker pods do not need a public webhook path. Worker HTTP (`POST /webhooks/gitea`) still exists for local/dev and healthz/metrics.
 
@@ -68,7 +68,7 @@ Required:
 | `GITEA_URL` | all | Trusted Gitea base URL (your origin, not another cluster’s) |
 | `GITEA_BOT_TOKEN` | all | Bot token to fetch PR data and post comments |
 | `GITEA_WEBHOOK_SECRET` | `router` / worker | HMAC-SHA256 of the raw body (`X-Gitea-Signature`). Not required for `engine` |
-| `DATABASE_URL` | `router` / `engine` / worker | Postgres URL for the shared ledger |
+| `DATABASE_URL` | `router` / `engine` / worker | Postgres URL for the shared ledger. `router` / `engine` fail process start without it; GitOps must set it on the worker, which otherwise starts in local/dev mode (no ledger) |
 | `JUMI_ROLE` | reviewer | `router` or `engine`. Unset, empty, or unknown fails process start. Worker is a separate image, not this flag |
 
 Optional (unset keeps the compiled default; set your own owners and well-known origin):

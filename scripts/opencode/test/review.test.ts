@@ -1581,6 +1581,8 @@ describe("reviewPullRequest", () => {
 
 #### required env
 - \`GITEA_URL\`
+
+#### gitops env
 - \`DATABASE_URL\`
 
 #### optional env
