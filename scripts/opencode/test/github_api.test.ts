@@ -89,7 +89,7 @@ describe("GithubAPI", () => {
       description: "skipped",
     });
     expect(JSON.parse(requests[3]?.body ?? "{}")).toEqual({
-      state: "success",
+      state: "failure",
       context: "jumi/opencode-review",
       description: "skipped",
     });

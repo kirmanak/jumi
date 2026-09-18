@@ -938,7 +938,9 @@ export class GithubAPI {
     return toCheckPayload(
       await this.post<GithubStatus>(`/repos/${this.repoPath(owner, repo)}/statuses/${encodeURIComponent(sha)}`, {
         ...status,
-        state: status.state === "warning" ? "success" : status.state,
+        // GitHub statuses have no "warning". Only skipped reviews (no parsed verdict) use it; posting
+        // "success" would let a skip satisfy a required check, and "pending" can wedge the PR forever.
+        state: status.state === "warning" ? "failure" : status.state,
       })
     );
   }
