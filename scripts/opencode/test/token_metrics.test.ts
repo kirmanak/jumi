@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, unlinkSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -137,58 +137,41 @@ describe("recordOpenCodeDb", () => {
 
   test("reads WAL journals left after a killed writer", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-tokens-"));
+    const livePath = join(dir, "live.db");
     const dbPath = join(dir, "opencode-session.db");
     try {
-      const script = join(dir, "writer.ts");
-      const ready = join(dir, "ready");
-      await writeFile(
-        script,
-        `import { Database } from "bun:sqlite";
-import { writeFileSync } from "node:fs";
-const db = new Database(${JSON.stringify(dbPath)});
-db.run("PRAGMA journal_mode = WAL");
-db.run("PRAGMA wal_autocheckpoint = 0");
-db.run(\`CREATE TABLE session (
-  model TEXT,
-  tokens_input INTEGER,
-  tokens_cache_read INTEGER,
-  tokens_output INTEGER,
-  tokens_cache_write INTEGER,
-  tokens_reasoning INTEGER
-)\`);
-db.run("INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)", ["xai/grok-4.6", 42, 0, 9, 0, 1]);
-writeFileSync(${JSON.stringify(ready)}, "ok");
-await Bun.sleep(60_000);
-`
-      );
-      const child = Bun.spawn([process.execPath, "run", script], { stdout: "ignore", stderr: "ignore" });
+      const live = new Database(livePath);
       try {
-        const wal = `${dbPath}-wal`;
-        while (!existsSync(ready) || !existsSync(wal)) {
-          if (child.exitCode !== null) break;
-          await Bun.sleep(20);
-        }
-        expect(existsSync(ready)).toBe(true);
+        live.run("PRAGMA journal_mode = WAL");
+        live.run("PRAGMA wal_autocheckpoint = 0");
+        live.run(`
+          CREATE TABLE session (
+            model TEXT,
+            tokens_input INTEGER,
+            tokens_cache_read INTEGER,
+            tokens_output INTEGER,
+            tokens_cache_write INTEGER,
+            tokens_reasoning INTEGER
+          )
+        `);
+        live.run("INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)", ["xai/grok-4.6", 42, 0, 9, 0, 1]);
+        const wal = `${livePath}-wal`;
         expect(existsSync(wal)).toBe(true);
-        child.kill("SIGKILL");
-        await child.exited;
-        const shm = `${dbPath}-shm`;
-        if (existsSync(shm)) unlinkSync(shm);
-        recordOpenCodeDb(dbPath);
-        const text = renderTokenMetrics();
-        expect(text).toContain('ai_token_exporter_errors{agent_instance="jumi"} 0');
-        expect(text).toContain(
-          'ai_tokens_total{agent_instance="jumi",source="opencode",profile="default",model="xai/grok-4.6",token_type="input"} 42'
-        );
+        copyFileSync(livePath, dbPath);
+        copyFileSync(wal, `${dbPath}-wal`);
       } finally {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // already dead
-        }
+        live.close();
       }
+      const shm = `${dbPath}-shm`;
+      if (existsSync(shm)) unlinkSync(shm);
+      recordOpenCodeDb(dbPath);
+      const text = renderTokenMetrics();
+      expect(text).toContain('ai_token_exporter_errors{agent_instance="jumi"} 0');
+      expect(text).toContain(
+        'ai_tokens_total{agent_instance="jumi",source="opencode",profile="default",model="xai/grok-4.6",token_type="input"} 42'
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 });
