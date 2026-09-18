@@ -1045,6 +1045,9 @@ export async function implementFollowUp(
           jobId: opts.jobId ?? opts.job.delivery,
           ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
           onPid: loop.engineOnPid(opts.onPid),
+          onRunner: (r) => {
+            runner = r;
+          },
         });
       } catch (err: unknown) {
         if (isQuotaError(err)) {

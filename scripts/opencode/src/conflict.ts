@@ -98,6 +98,8 @@ export interface MergeDefaultIntoWorktreeOpts {
   ciMarkdown?: string;
   jobId?: string;
   skipCleanMerge?: boolean;
+  /** Called with the runner that ran, before any engine failure is thrown. */
+  onRunner?: (runner: RunnerStamp) => void;
 }
 
 function logDefault(message: string) {
@@ -469,6 +471,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     };
     const engineResult = await opts.openCodeRunner(runOpts);
     runner = resultRunner(engineResult, runOpts);
+    if (runner) opts.onRunner?.(runner);
     throwIfEngineFailed(engineResult);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
@@ -641,6 +644,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           ciMarkdown,
           jobId: opts.jobId ?? opts.job.delivery,
           onPid: loop.engineOnPid(opts.onPid),
+          onRunner: (r) => {
+            runner = r;
+          },
         });
       } catch (err: unknown) {
         if (isQuotaError(err)) {

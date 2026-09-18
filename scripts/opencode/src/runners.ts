@@ -161,7 +161,7 @@ export function runnerStamp(runner: { type?: string; model: string; variant?: st
 
 /** The one visible attribution line Jumi appends to public artifacts. */
 export function formatRunnerStamp(runner: RunnerStamp): string {
-  const level = runner.type === CLAUDE_RUNNER_TYPE ? runner.effort : runner.variant;
+  const level = runner.effort ?? runner.variant;
   return `_Jumi · ${runner.type} · ${runner.model}${level ? ` (${level})` : ""}_`;
 }
 
