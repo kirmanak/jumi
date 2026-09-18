@@ -36,6 +36,8 @@ const BASE_CONTRACT = `# Deploy contract
 - \`GITEA_BOT_TOKEN\`
 - \`GITEA_WEBHOOK_SECRET\`
 
+#### gitops env
+
 #### optional env
 
 #### ports
@@ -63,6 +65,8 @@ const BASE_CONTRACT = `# Deploy contract
 - \`GITEA_URL\`
 - \`GITEA_BOT_TOKEN\`
 - \`GITEA_WEBHOOK_SECRET\`
+
+#### gitops env
 
 #### optional env
 
@@ -235,17 +239,42 @@ describe("version bump", () => {
     expect(nextVersionFrom("v1.0.0", classifyBump(BASE_CONTRACT, BASE_CONTRACT))).toBe("v1.0.1");
   });
 
-  test("worker DATABASE_URL is GitOps-required, not Breaking, and does not claim crash", () => {
-    const next = addRequiredEnv(BASE_CONTRACT, "worker", "DATABASE_URL");
+  test("gitops env is GitOps-required (major) but does not claim crash", () => {
+    const next = addListItem(BASE_CONTRACT, "worker", "gitops env", "DATABASE_URL");
     expect(classifyBump(BASE_CONTRACT, next)).toBe("major");
     const body = buildReleaseBody({
       previousContract: BASE_CONTRACT,
       currentContract: next,
       changes: ["fff6666 worker DATABASE_URL"],
     });
-    expect(body).toContain("### worker\n- **requires** `DATABASE_URL`\n");
-    expect(body).not.toContain("**requires** `DATABASE_URL` (new; missing → crash)");
+    expect(body).toContain(
+      "### worker\n- **requires** `DATABASE_URL` (new; GitOps must set; unset → local/dev, no crash)\n"
+    );
+    expect(body).not.toContain("(new; missing → crash)");
     expect(body).toContain("## Breaking\nnone\n");
+  });
+
+  test("moving env between required and gitops env is patch; chart still sets it", () => {
+    const required = addRequiredEnv(BASE_CONTRACT, "worker", "DATABASE_URL");
+    const gitOps = addListItem(BASE_CONTRACT, "worker", "gitops env", "DATABASE_URL");
+    expect(classifyBump(required, gitOps)).toBe("patch");
+    expect(classifyBump(gitOps, required)).toBe("patch");
+    const relaxed = buildReleaseBody({ previousContract: required, currentContract: gitOps, changes: ["x"] });
+    expect(relaxed).toContain(
+      "### worker\n- **process start** `DATABASE_URL` no longer fails when unset (GitOps must still set it)\n"
+    );
+    expect(relaxed).toContain("## Breaking\nnone\n");
+    const tightened = buildReleaseBody({ previousContract: gitOps, currentContract: required, changes: ["x"] });
+    expect(tightened).toContain(
+      "### worker\n- **process start** `DATABASE_URL` now fails when unset (was GitOps-only)\n"
+    );
+  });
+
+  test("removed gitops env → major and Breaking", () => {
+    const gitOps = addListItem(BASE_CONTRACT, "worker", "gitops env", "DATABASE_URL");
+    expect(classifyBump(gitOps, BASE_CONTRACT)).toBe("major");
+    const body = buildReleaseBody({ previousContract: gitOps, currentContract: BASE_CONTRACT, changes: ["x"] });
+    expect(body).toContain("- worker: removed required env DATABASE_URL");
   });
 
   test("prose-only contract notes stay patch with GitOps none", () => {
@@ -265,7 +294,14 @@ describe("deploy/contract.md", () => {
   test("parses live contract from origin/main intent", async () => {
     const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
     const parsed = parseContract(markdown);
-    expect(parsed.reviewer.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET", "JUMI_ROLE"]);
+    expect(parsed.reviewer.requiredEnv).toEqual([
+      "GITEA_URL",
+      "GITEA_BOT_TOKEN",
+      "GITEA_WEBHOOK_SECRET",
+      "JUMI_ROLE",
+      "DATABASE_URL",
+    ]);
+    expect(parsed.reviewer.gitOpsEnv).toEqual([]);
     expect(parsed.reviewer.optionalEnv).toEqual([
       "HOST",
       "PORT",
@@ -292,12 +328,12 @@ describe("deploy/contract.md", () => {
       "MAX_OUTPUT_BYTES",
       "MAX_WEBHOOK_BYTES",
       "OPENCODE_TIMEOUT_MS",
-      "DATABASE_URL",
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",
       "PHOENIX_OTLP_ENDPOINT",
     ]);
-    expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET", "DATABASE_URL"]);
+    expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
+    expect(parsed.worker.gitOpsEnv).toEqual(["DATABASE_URL"]);
     expect(parsed.worker.optionalEnv).toEqual([
       "HOST",
       "PORT",
@@ -345,21 +381,21 @@ describe("deploy/contract.md", () => {
     expect(markdown).toContain("workflow_job");
   });
 
-  test("loader env matches contract required and optional headings", async () => {
+  test("loader env matches contract required, gitops, and optional headings", async () => {
     const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
     const parsed = parseContract(markdown);
     const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
     const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
-    const reviewer = gitOpsLoaderEnv("reviewer", reviewerSrc);
-    const worker = gitOpsLoaderEnv("worker", workerSrc);
+    const reviewer = gitOpsLoaderEnv(reviewerSrc);
+    const worker = gitOpsLoaderEnv(workerSrc);
     expect([...parsed.reviewer.requiredEnv].sort()).toEqual(reviewer.required);
-    expect([...parsed.reviewer.optionalEnv].sort()).toEqual(reviewer.optional);
+    expect([...parsed.reviewer.gitOpsEnv, ...parsed.reviewer.optionalEnv].sort()).toEqual(reviewer.optional);
     expect([...parsed.worker.requiredEnv].sort()).toEqual(worker.required);
-    expect([...parsed.worker.optionalEnv].sort()).toEqual(worker.optional);
+    expect([...parsed.worker.gitOpsEnv, ...parsed.worker.optionalEnv].sort()).toEqual(worker.optional);
     expect(contractEnvIssues(parsed, reviewerSrc, workerSrc)).toEqual([]);
-    expect(parsed.worker.requiredEnv).toContain("DATABASE_URL");
-    expect(parsed.reviewer.requiredEnv).not.toContain("DATABASE_URL");
-    expect(parsed.reviewer.optionalEnv).toContain("DATABASE_URL");
+    expect(reviewer.required).toContain("DATABASE_URL");
+    expect(worker.optional).toContain("DATABASE_URL");
+    expect(worker.required).not.toContain("DATABASE_URL");
   });
 
   test("CI fails when a loader env is missing or in the wrong heading", () => {
@@ -412,6 +448,36 @@ optionalEnv(resolved, "HOST");
       { image: "reviewer", name: "HOST", kind: "optional_as_required" },
       { image: "worker", name: "GITEA_URL", kind: "duplicate" },
     ]);
+    const databaseDrift = parseContract(`# Deploy contract
+
+## GitOps
+
+### reviewer
+
+#### required env
+- \`GITEA_URL\`
+
+#### optional env
+- \`DATABASE_URL\`
+
+### worker
+
+#### required env
+- \`GITEA_URL\`
+- \`DATABASE_URL\`
+
+#### gitops env
+- \`GITEA_URL\`
+`);
+    const reviewerWithDb = `${matchingReviewer.replace('optionalEnv(resolved, "HOST");\n', "")}requireEnv(resolved, "DATABASE_URL");
+`;
+    const workerWithDb = `${matchingWorker}optionalEnv(resolved, "DATABASE_URL");
+`;
+    expect(contractEnvIssues(databaseDrift, reviewerWithDb, workerWithDb)).toEqual([
+      { image: "reviewer", name: "DATABASE_URL", kind: "required_as_optional" },
+      { image: "worker", name: "GITEA_URL", kind: "duplicate" },
+      { image: "worker", name: "DATABASE_URL", kind: "optional_as_required" },
+    ]);
   });
 });
 
@@ -444,13 +510,16 @@ describe("computeRelease git adapter", () => {
         expect(patch.bump).toBe("patch");
         expect(patch.body).toContain("## GitOps\nnone\n");
 
-        await writeFile(join(dir, "deploy/contract.md"), addRequiredEnv(BASE_CONTRACT, "worker", "DATABASE_URL"));
+        await writeFile(
+          join(dir, "deploy/contract.md"),
+          addListItem(BASE_CONTRACT, "worker", "gitops env", "DATABASE_URL")
+        );
         git(["add", "deploy/contract.md"], dir);
         git(["commit", "-m", "require worker DATABASE_URL"], dir);
         const major = computeRelease(dir);
         expect(major.version).toBe("v2.0.0");
         expect(major.bump).toBe("major");
-        expect(major.body).toContain("### worker\n- **requires** `DATABASE_URL`\n");
+        expect(major.body).toContain("### worker\n- **requires** `DATABASE_URL` (new; GitOps must set;");
         expect(major.body).toContain("## Breaking\nnone\n");
         expect(major.body).not.toMatch(/^## GitOps\nnone\n/m);
       }

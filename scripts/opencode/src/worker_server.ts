@@ -211,7 +211,11 @@ async function main() {
     void run();
   }
 
-  log(`listening on ${server.hostname}:${server.port}${store ? " ledger=postgres" : ""}`);
+  log(
+    `listening on ${server.hostname}:${server.port} ${
+      store ? "ledger=postgres" : "ledger=none (DATABASE_URL unset; local/dev in-process queue, no ledger tick)"
+    }`
+  );
 }
 
 if (import.meta.main) {
