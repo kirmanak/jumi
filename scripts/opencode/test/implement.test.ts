@@ -1204,6 +1204,7 @@ describe("implementIssue", () => {
       expect(claim?.pid).toBe(0);
       expect(claim?.terminal).toBe(true);
       expect(api.comments.at(-1)).toContain("Jumi failed");
+      expect(api.comments.at(-1)).toContain("_Jumi · opencode · openai/gpt-5.5_");
     });
   });
 

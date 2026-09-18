@@ -504,6 +504,23 @@ describe("withEngineChain", () => {
       withEngineChain(engine, { chain: [spark, grok] })({ model: spark.model, workdir: "/tmp" })
     ).rejects.toBe(infra);
     expect(n).toBe(1);
+    expect(infra.runner).toEqual({ type: "opencode", model: spark.model, variant: spark.variant });
+  });
+
+  test("thrown failure after a hop carries the runner that failed, not the primary", async () => {
+    const err = new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
+    const engine: Engine = async (opts) => {
+      if (opts.model === spark.model) return unavailable;
+      throw err;
+    };
+    await expect(
+      withEngineChain(engine, { chain: [spark, grok] })({
+        model: spark.model,
+        variant: spark.variant,
+        workdir: "/tmp",
+      })
+    ).rejects.toBe(err);
+    expect(err.runner).toEqual({ type: "opencode", model: grok.model, variant: grok.variant });
   });
 
   test("auth class hops", async () => {

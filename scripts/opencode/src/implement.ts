@@ -31,7 +31,7 @@ import {
   type QueueCandidate,
   validateYield,
 } from "./dependencies.ts";
-import { type Engine, type EngineRunOptions, resultRunner, throwIfEngineFailed } from "./engine.ts";
+import { type Engine, type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
@@ -317,8 +317,10 @@ export async function implementIssue(
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
         };
-        const result = await engine(runOpts);
-        runner = resultRunner(result, runOpts);
+        runner = undefined;
+        const result = await runEngineStamped(engine, runOpts, (r) => {
+          runner = r;
+        });
         // Gate on the message: only the quota path returns engine `stuck`
         // today, but a future non-quota producer must not set the quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
@@ -511,6 +513,7 @@ export async function implementIssue(
       return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
     },
     async (err) => {
+      runner = thrownRunner(err) ?? runner;
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,

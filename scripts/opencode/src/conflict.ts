@@ -18,7 +18,7 @@ import {
   throwIfAborted,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
-import { type EngineRunOptions, resultRunner, throwIfEngineFailed } from "./engine.ts";
+import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
@@ -469,9 +469,10 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       abortSignal: opts.abortSignal,
       onPid: opts.onPid,
     };
-    const engineResult = await opts.openCodeRunner(runOpts);
-    runner = resultRunner(engineResult, runOpts);
-    if (runner) opts.onRunner?.(runner);
+    const engineResult = await runEngineStamped(opts.openCodeRunner, runOpts, (r) => {
+      runner = r;
+      opts.onRunner?.(r);
+    });
     throwIfEngineFailed(engineResult);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
@@ -719,8 +720,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               abortSignal: opts.abortSignal,
               onPid: loop.engineOnPid(opts.onPid),
             };
-            const continued = await engine(continuedOpts);
-            runner = resultRunner(continued, continuedOpts);
+            runner = undefined;
+            const continued = await runEngineStamped(engine, continuedOpts, (r) => {
+              runner = r;
+            });
             // Gate on the message so a future non-quota `stuck` producer does
             // not set the human-clear quota flag.
             if (continued.status === "stuck" && isQuotaText(continued.message)) {
@@ -779,6 +782,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
+      runner = thrownRunner(err) ?? runner;
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,

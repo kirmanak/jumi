@@ -36,7 +36,7 @@ import {
   shouldIncrementRound,
   writeConflictLatch,
 } from "./conflict.ts";
-import { type EngineRunOptions, resultRunner, throwIfEngineFailed } from "./engine.ts";
+import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -1152,6 +1152,8 @@ export async function implementFollowUp(
       if (ci.failed.length) {
         await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
       }
+      // No follow-up runner has spawned yet; don't carry the resolver's stamp.
+      runner = undefined;
       await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
       const runEngine = async (label: string): Promise<{ status: "skipped"; reason: string } | undefined> => {
@@ -1179,8 +1181,10 @@ export async function implementFollowUp(
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
         };
-        const result = await engine(runOpts);
-        runner = resultRunner(result, runOpts);
+        runner = undefined;
+        const result = await runEngineStamped(engine, runOpts, (r) => {
+          runner = r;
+        });
         // Gate on the message so a future non-quota `stuck` producer uses the
         // fingerprint path instead of the human-clear quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
@@ -1272,6 +1276,7 @@ export async function implementFollowUp(
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
+      runner = thrownRunner(err) ?? runner;
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,

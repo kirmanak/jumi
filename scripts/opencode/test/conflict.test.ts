@@ -1059,6 +1059,7 @@ describe("implementConflict", () => {
       expect(state.lastBaseSha).toBe("basesha");
       expect(state.round).toBe(1);
       expect(api.comments.at(-1)).toContain("Jumi failed:");
+      expect(api.comments.at(-1)).toContain("_Jumi · opencode · openai/gpt-5.5_");
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
     });
   });

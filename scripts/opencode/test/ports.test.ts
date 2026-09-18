@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GiteaAPI } from "../src/api.ts";
 import type { Engine, EngineRunOptions } from "../src/engine.ts";
-import { resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
+import { EngineFailedError, resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
 import type { Forge, Tracker } from "../src/forge.ts";
 import {
   createForge,
@@ -205,6 +205,17 @@ describe("Engine, Tracker, and Forge ports", () => {
       "opencode exited with code 7"
     );
     expect(() => throwIfEngineFailed({ status: "stuck" })).toThrow("engine stuck");
+  });
+
+  test("throwIfEngineFailed copies result.runner onto the error", () => {
+    const runner = { type: "claude", model: "opus", effort: "high" };
+    try {
+      throwIfEngineFailed({ status: "exit", message: "boom", runner });
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineFailedError);
+      expect((err as EngineFailedError).runner).toEqual(runner);
+    }
   });
 
   test("implement produces a PR via the parent with a fake engine and fake forge", async () => {
