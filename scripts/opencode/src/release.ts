@@ -21,7 +21,10 @@ export interface SemVer {
 }
 
 export interface ImageContract {
+  /** Loader fails process start when unset (`requireEnv`). */
   requiredEnv: string[];
+  /** GitOps must set it, but the loader tolerates unset (local/dev mode). */
+  gitOpsEnv: string[];
   optionalEnv: string[];
   ports: string[];
   runAs: string;
@@ -67,6 +70,7 @@ export function compareSemVer(a: SemVer, b: SemVer): number {
 function emptyImage(): ImageContract {
   return {
     requiredEnv: [],
+    gitOpsEnv: [],
     optionalEnv: [],
     ports: [],
     runAs: "",
@@ -107,6 +111,7 @@ function firstValue(values: string[]): string {
 function parseImage(section: string): ImageContract {
   return {
     requiredEnv: listValues(headingSection(section, 4, "required env")),
+    gitOpsEnv: listValues(headingSection(section, 4, "gitops env")),
     optionalEnv: listValues(headingSection(section, 4, "optional env")),
     ports: listValues(headingSection(section, 4, "ports")),
     runAs: firstValue(listValues(headingSection(section, 4, "runAs"))),
@@ -136,11 +141,10 @@ function requireEnvNames(source: string): Set<string> {
   return names;
 }
 
-export function gitOpsLoaderEnv(image: ImageName, source: string): { required: string[]; optional: string[] } {
+/** Process-start env as the loader sees it: `requireEnv` → required, every other read → optional. */
+export function gitOpsLoaderEnv(source: string): { required: string[]; optional: string[] } {
   const names = loaderEnvNames(source);
   const requiredSet = requireEnvNames(source);
-  if (image === "worker") requiredSet.add("DATABASE_URL");
-  if (image === "reviewer") requiredSet.delete("DATABASE_URL");
   return {
     required: names.filter((name) => requiredSet.has(name)).sort(),
     optional: names.filter((name) => !requiredSet.has(name)).sort(),
@@ -149,18 +153,18 @@ export function gitOpsLoaderEnv(image: ImageName, source: string): { required: s
 
 export function formatContractEnvIssue(issue: ContractEnvIssue): string {
   if (issue.kind === "missing") {
-    return `${issue.image} loader env \`${issue.name}\` is missing from deploy/contract.md required/optional env`;
+    return `${issue.image} loader env \`${issue.name}\` is missing from deploy/contract.md required/gitops/optional env`;
   }
   if (issue.kind === "extra") {
     return `${issue.image} contract env \`${issue.name}\` is not read by the loader`;
   }
   if (issue.kind === "required_as_optional") {
-    return `${issue.image} env \`${issue.name}\` is required GitOps but listed as optional`;
+    return `${issue.image} env \`${issue.name}\` fails process start when unset but is not listed as required env`;
   }
   if (issue.kind === "optional_as_required") {
-    return `${issue.image} env \`${issue.name}\` is optional but listed as required`;
+    return `${issue.image} env \`${issue.name}\` does not fail process start when unset but is listed as required env (use gitops env if GitOps must set it)`;
   }
-  return `${issue.image} env \`${issue.name}\` is listed as both required and optional`;
+  return `${issue.image} env \`${issue.name}\` is listed under more than one of required/gitops/optional env`;
 }
 
 export function contractEnvIssues(
@@ -170,15 +174,18 @@ export function contractEnvIssues(
 ): ContractEnvIssue[] {
   const issues: ContractEnvIssue[] = [];
   for (const image of ["reviewer", "worker"] as const) {
-    const expected = gitOpsLoaderEnv(image, image === "reviewer" ? reviewerSrc : workerSrc);
+    const expected = gitOpsLoaderEnv(image === "reviewer" ? reviewerSrc : workerSrc);
     const listedRequired = contract[image].requiredEnv;
+    const listedGitOps = contract[image].gitOpsEnv;
     const listedOptional = contract[image].optionalEnv;
     const requiredSet = new Set(listedRequired);
-    const optionalSet = new Set(listedOptional);
-    const listed = new Set([...listedRequired, ...listedOptional]);
+    const optionalSet = new Set([...listedGitOps, ...listedOptional]);
+    const listed = new Set([...listedRequired, ...listedGitOps, ...listedOptional]);
     const expectedNames = new Set([...expected.required, ...expected.optional]);
-    for (const name of listedRequired) {
-      if (optionalSet.has(name)) issues.push({ image, name, kind: "duplicate" });
+    const seen = new Set<string>();
+    for (const name of [...listedRequired, ...listedGitOps, ...listedOptional]) {
+      if (seen.has(name)) issues.push({ image, name, kind: "duplicate" });
+      seen.add(name);
     }
     for (const name of expectedNames) {
       if (!listed.has(name)) issues.push({ image, name, kind: "missing" });
@@ -234,9 +241,14 @@ function addedItems(previous: string[], current: string[]): string[] {
   return current.filter((item) => !prev.has(item));
 }
 
+/** Env GitOps must set: fails process start (`required env`) or chart-only (`gitops env`). */
+function gitOpsRequiredEnv(image: ImageContract): string[] {
+  return [...image.requiredEnv, ...image.gitOpsEnv];
+}
+
 export function removedRequiredFields(previous: ImageContract, current: ImageContract): string[] {
   const removed: string[] = [];
-  for (const key of removedItems(previous.requiredEnv, current.requiredEnv)) {
+  for (const key of removedItems(gitOpsRequiredEnv(previous), gitOpsRequiredEnv(current))) {
     removed.push(`env ${key}`);
   }
   for (const port of removedItems(previous.ports, current.ports)) {
@@ -255,8 +267,8 @@ export function removedRequiredFields(previous: ImageContract, current: ImageCon
 
 function hasRequiredGitOpsChange(previous: ImageContract, current: ImageContract): boolean {
   return (
-    addedItems(previous.requiredEnv, current.requiredEnv).length > 0 ||
-    removedItems(previous.requiredEnv, current.requiredEnv).length > 0 ||
+    addedItems(gitOpsRequiredEnv(previous), gitOpsRequiredEnv(current)).length > 0 ||
+    removedItems(gitOpsRequiredEnv(previous), gitOpsRequiredEnv(current)).length > 0 ||
     addedItems(previous.ports, current.ports).length > 0 ||
     removedItems(previous.ports, current.ports).length > 0 ||
     previous.runAs !== current.runAs ||
@@ -305,20 +317,32 @@ export function nextVersionFrom(latestTag: string | null, bump: BumpKind): strin
   return formatSemVerTag({ major: parsed.major, minor: parsed.minor, patch: parsed.patch + 1 });
 }
 
-function requiresEnvBullet(image: ImageName, key: string): string {
-  if (image === "worker" && key === "DATABASE_URL") {
-    return `- **requires** \`${key}\``;
+function requiresEnvBullet(current: ImageContract, key: string): string {
+  if (current.requiredEnv.includes(key)) {
+    return `- **requires** \`${key}\` (new; missing → crash)`;
   }
-  return `- **requires** \`${key}\` (new; missing → crash)`;
+  return `- **requires** \`${key}\` (new; GitOps must set; unset → local/dev, no crash)`;
 }
 
-function gitOpsBullets(image: ImageName, previous: ImageContract, current: ImageContract): string[] {
+function gitOpsBullets(previous: ImageContract, current: ImageContract): string[] {
   const bullets: string[] = [];
-  for (const key of addedItems(previous.requiredEnv, current.requiredEnv)) {
-    bullets.push(requiresEnvBullet(image, key));
+  const prevGitOps = gitOpsRequiredEnv(previous);
+  const nextGitOps = gitOpsRequiredEnv(current);
+  for (const key of addedItems(prevGitOps, nextGitOps)) {
+    bullets.push(requiresEnvBullet(current, key));
   }
-  for (const key of removedItems(previous.requiredEnv, current.requiredEnv)) {
+  for (const key of removedItems(prevGitOps, nextGitOps)) {
     bullets.push(`- **removed** \`${key}\` (was required)`);
+  }
+  for (const key of addedItems(previous.requiredEnv, current.requiredEnv)) {
+    if (previous.gitOpsEnv.includes(key)) {
+      bullets.push(`- **process start** \`${key}\` now fails when unset (was GitOps-only)`);
+    }
+  }
+  for (const key of addedItems(previous.gitOpsEnv, current.gitOpsEnv)) {
+    if (previous.requiredEnv.includes(key)) {
+      bullets.push(`- **process start** \`${key}\` no longer fails when unset (GitOps must still set it)`);
+    }
   }
   for (const port of addedItems(previous.ports, current.ports)) {
     bullets.push(`- **port** \`${port}\` (new)`);
@@ -360,8 +384,8 @@ function formatGitOpsSection(previousMarkdown: string | null, currentMarkdown: s
   if (previousMarkdown === null) return "none";
   const previous = parseContract(previousMarkdown);
   const current = parseContract(currentMarkdown);
-  const reviewer = gitOpsBullets("reviewer", previous.reviewer, current.reviewer);
-  const worker = gitOpsBullets("worker", previous.worker, current.worker);
+  const reviewer = gitOpsBullets(previous.reviewer, current.reviewer);
+  const worker = gitOpsBullets(previous.worker, current.worker);
   if (reviewer.length === 0 && worker.length === 0) return "none";
   const reviewerBlock = reviewer.length > 0 ? reviewer.join("\n") : "- none";
   const workerBlock = worker.length > 0 ? worker.join("\n") : "- none";
