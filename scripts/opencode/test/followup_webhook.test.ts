@@ -172,7 +172,7 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
           id: 38022,
           body: [
             "<!-- jumi-review:kirmanak/demo#127 -->",
-            "### Jumi OpenCode review",
+            "### Jumi review",
             "",
             "Reviewed commit: `a62c750c0ffee000000000000000000000000000`",
             "",

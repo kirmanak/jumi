@@ -7,8 +7,6 @@ description: Use only for PRs that change k3s/, Chart.yaml, or values.yaml, or a
 
 House eyes for Helm/K8s/`k3s/` diffs. Catch "Jumi green, first apply explodes" from the **diff**, not from live cluster state.
 
-Load this skill via the skill tool.
-
 ## Tools in this image
 
 - `python3` — run the **changed chart's** existing unittest if present.

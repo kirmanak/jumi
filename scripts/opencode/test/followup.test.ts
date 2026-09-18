@@ -64,7 +64,7 @@ function jumiReviewSticky(opts: { id?: number; sha?: string; finding?: string; c
     id: opts.id ?? 38022,
     body: [
       "<!-- jumi-review:kirmanak/demo#127 -->",
-      "### Jumi OpenCode review",
+      "### Jumi review",
       "",
       `Reviewed commit: \`${sha}\``,
       "",
@@ -183,7 +183,7 @@ describe("implementFollowUp", () => {
             id: 38022,
             body: [
               "<!-- jumi-review:kirmanak/demo#127 -->",
-              "### Jumi OpenCode review",
+              "### Jumi review",
               "",
               `Reviewed commit: \`${oldSha}\``,
               "",
@@ -1010,7 +1010,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       const writeup = [
         "<!-- jumi-review:kirmanak/demo#127 -->",
-        "### Jumi OpenCode review",
+        "### Jumi review",
         "",
         "Reviewed commit: `headsha`",
         "",
@@ -1087,7 +1087,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       const writeup = [
         "<!-- jumi-review:kirmanak/demo#127 -->",
-        "### Jumi OpenCode review",
+        "### Jumi review",
         "",
         "Reviewed commit: `headsha`",
         "",
@@ -1972,7 +1972,7 @@ describe("implementFollowUp", () => {
             id: 38022,
             body: [
               "<!-- jumi-review:kirmanak/demo#127 -->",
-              "### Jumi OpenCode review",
+              "### Jumi review",
               "",
               `Reviewed commit: \`${sha}\``,
               "",
@@ -2640,7 +2640,7 @@ describe("pickLatestJumiFinding", () => {
       id: opts.id,
       body: [
         "<!-- jumi-review:kirmanak/demo#127 -->",
-        "### Jumi OpenCode review",
+        "### Jumi review",
         "",
         `Reviewed commit: \`${opts.sha}\``,
         "",
@@ -2889,7 +2889,7 @@ describe("collectFollowUpItems", () => {
     const lines: string[] = [];
     if (opts.worker) lines.push("<!-- jumi-worker:kirmanak/demo#12 -->");
     if (opts.review !== false) lines.push("<!-- jumi-review:kirmanak/demo#127 -->");
-    lines.push("### Jumi OpenCode review", "", `Reviewed commit: \`${opts.sha ?? HEAD_SHA}\``, "", "1 blocking");
+    lines.push("### Jumi review", "", `Reviewed commit: \`${opts.sha ?? HEAD_SHA}\``, "", "1 blocking");
     if (opts.trailer !== null) lines.push(opts.trailer ?? "<!-- jumi-check: failure -->");
     return lines.join("\n");
   }
@@ -3179,7 +3179,7 @@ describe("collectFollowUpItems", () => {
   function reviewWriteup(opts: { sha?: string; trailer?: string; prose?: string } = {}) {
     return [
       "<!-- jumi-review:kirmanak/demo#127 -->",
-      "### Jumi OpenCode review",
+      "### Jumi review",
       "",
       `Reviewed commit: \`${opts.sha ?? HEAD_SHA}\``,
       "",
@@ -3429,7 +3429,7 @@ describe("needsFollowUp", () => {
     const headSha = "a62c750c0ffee000000000000000000000000000";
     const stickyBody = [
       "<!-- jumi-review:kirmanak/demo#127 -->",
-      "### Jumi OpenCode review",
+      "### Jumi review",
       "",
       `Reviewed commit: \`${headSha}\``,
       "",
