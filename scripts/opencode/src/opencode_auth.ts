@@ -63,6 +63,12 @@ function isWellKnownEntry(value: unknown): boolean {
   );
 }
 
+function wellKnownCredential(value: unknown): { key: unknown; token: unknown } | undefined {
+  if (!isWellKnownEntry(value)) return undefined;
+  const entry = value as { key?: unknown; token?: unknown };
+  return { key: entry.key, token: entry.token };
+}
+
 export async function ensureOpenCodeWellKnownAuth(options: OpenCodeWellKnownAuthOptions): Promise<string | undefined> {
   const url = options.url === OPENCODE_WELLKNOWN_DISABLED ? undefined : options.url;
   const path = opencodeAuthPath(options.home, options.xdgDataHome);
@@ -81,14 +87,20 @@ export async function ensureOpenCodeWellKnownAuth(options: OpenCodeWellKnownAuth
     return undefined;
   }
 
-  if (auth[url] === undefined) {
+  const existing = wellKnownCredential(auth[url]);
+  if (existing === undefined || existing.key !== options.key || existing.token !== options.token) {
+    const created = auth[url] === undefined;
     auth[url] = {
       type: "wellknown",
       key: options.key,
       token: options.token,
     };
     changed = true;
-    options.logger?.(`seeded OpenCode well-known auth for ${url} at ${path}`);
+    options.logger?.(
+      created
+        ? `seeded OpenCode well-known auth for ${url} at ${path}`
+        : `updated OpenCode well-known auth for ${url} at ${path}`
+    );
   } else {
     options.logger?.(`OpenCode well-known auth for ${url} already present at ${path}`);
   }

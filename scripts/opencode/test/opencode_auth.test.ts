@@ -64,14 +64,42 @@ describe("OpenCode well-known auth seeding", () => {
     expect(auth["https://kirmanak.stream"].type).toBe("wellknown");
   });
 
-  test("does not overwrite an existing well-known entry", async () => {
+  test("rewrites an existing well-known entry when key or token differ", async () => {
     const home = await tempHome();
     const path = opencodeAuthPath(home);
     await mkdir(join(path, ".."), { recursive: true });
     await writeFile(
       path,
       JSON.stringify({
-        "https://kirmanak.stream": { type: "wellknown", key: "CUSTOM_TOKEN", token: "custom" },
+        openai: { type: "oauth", refresh: "keep-me" },
+        "https://kirmanak.stream": { type: "wellknown", key: "CUSTOM_TOKEN", token: "stale" },
+      })
+    );
+
+    await ensureOpenCodeWellKnownAuth({
+      home,
+      url: "https://kirmanak.stream",
+      key: "OPENCODE_WELLKNOWN_TOKEN",
+      token: "rotated",
+    });
+
+    const auth = JSON.parse(await readFile(path, "utf8"));
+    expect(auth.openai).toEqual({ type: "oauth", refresh: "keep-me" });
+    expect(auth["https://kirmanak.stream"]).toEqual({
+      type: "wellknown",
+      key: "OPENCODE_WELLKNOWN_TOKEN",
+      token: "rotated",
+    });
+  });
+
+  test("does not rewrite an existing well-known entry when key and token match", async () => {
+    const home = await tempHome();
+    const path = opencodeAuthPath(home);
+    await mkdir(join(path, ".."), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        "https://kirmanak.stream": { type: "wellknown", key: "OPENCODE_WELLKNOWN_TOKEN", token: "unused" },
       })
     );
 
@@ -83,7 +111,11 @@ describe("OpenCode well-known auth seeding", () => {
     });
 
     const auth = JSON.parse(await readFile(path, "utf8"));
-    expect(auth["https://kirmanak.stream"]).toEqual({ type: "wellknown", key: "CUSTOM_TOKEN", token: "custom" });
+    expect(auth["https://kirmanak.stream"]).toEqual({
+      type: "wellknown",
+      key: "OPENCODE_WELLKNOWN_TOKEN",
+      token: "unused",
+    });
   });
 
   test("does not seed when url is omitted", async () => {
