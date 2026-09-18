@@ -30,6 +30,10 @@ describe("looksLikeProviderUnavailable", () => {
   test("hops on rate limit, quota, 5xx, and model gone", () => {
     expect(looksLikeProviderUnavailable("429 rate limit exceeded")).toBe(true);
     expect(looksLikeProviderUnavailable("You've hit your usage limit")).toBe(true);
+    expect(looksLikeProviderUnavailable("You've hit your session limit · resets 12:50am (UTC)")).toBe(true);
+    expect(
+      looksLikeProviderUnavailable("claude exited with code 1:\nYou've hit your session limit · resets 12:50am (UTC)")
+    ).toBe(true);
     expect(looksLikeProviderUnavailable("insufficient_quota")).toBe(true);
     expect(looksLikeProviderUnavailable("provider overloaded")).toBe(true);
     expect(looksLikeProviderUnavailable("503 service unavailable")).toBe(true);
@@ -76,6 +80,12 @@ describe("shouldHopInsteadOfQuotaStuck", () => {
     expect(shouldHopInsteadOfQuotaStuck("opencode/big-pickle", "opencode/gpt-5.5")).toBe(false);
     expect(shouldHopInsteadOfQuotaStuck("opencode/big-pickle", "anthropic/claude-sonnet-4-6")).toBe(true);
     expect(shouldHopInsteadOfQuotaStuck("openai/gpt-5.5", "openai/gpt-5.4")).toBe(false);
+  });
+
+  test("hops onto an unprefixed catalog model such as claude", () => {
+    expect(shouldHopInsteadOfQuotaStuck("opencode/muse-spark-1.3-contributor-free", "claude-opus-5")).toBe(true);
+    expect(shouldHopInsteadOfQuotaStuck("opencode/muse-spark-1.3-contributor-free", "xai/grok-4.6")).toBe(true);
+    expect(shouldHopInsteadOfQuotaStuck("claude-opus-5", "claude-opus-5")).toBe(false);
   });
 });
 
@@ -538,6 +548,81 @@ describe("withEngineChain", () => {
       { type: "claude", model: claude.model, variant: undefined, effort: "high", hop: undefined },
       { type: "opencode", model: grok.model, variant: "high", effort: undefined, hop: true },
     ]);
+  });
+
+  test("claude session limit hops once to grok from scratch", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const grok = { name: "grok", type: "opencode" as const, model: "xai/grok-4.6", variant: "high" };
+    const sessionLimit: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message: "claude exited with code 1:\nYou've hit your session limit · resets 12:50am (UTC)",
+    };
+    const calls: Array<{ type?: string; model: string; continueSession?: boolean; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({ type: opts.type, model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+      if (opts.type === "claude") return sessionLimit;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [claude, grok] })({
+      model: claude.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(grok.model));
+    expect(calls).toEqual([
+      { type: "claude", model: claude.model, continueSession: undefined, hop: undefined },
+      { type: "opencode", model: grok.model, continueSession: false, hop: true },
+    ]);
+  });
+
+  test("spark quota stuck hops once to unprefixed claude", async () => {
+    const spark = {
+      name: "spark",
+      type: "opencode" as const,
+      model: "opencode/muse-spark-1.3-contributor-free",
+      variant: "xhigh",
+    };
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const grok = { name: "grok", type: "opencode" as const, model: "xai/grok-4.6", variant: "high" };
+    const quotaStuck: EngineResult = { status: "stuck", message: QUOTA_MESSAGE };
+    const calls: Array<{ type?: string; model: string; continueSession?: boolean; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({ type: opts.type, model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+      if (opts.model === spark.model) return quotaStuck;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [spark, claude, grok] })({
+      model: spark.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(claude.model));
+    expect(calls).toEqual([
+      { type: "opencode", model: spark.model, continueSession: undefined, hop: undefined },
+      { type: "claude", model: claude.model, continueSession: false, hop: true },
+    ]);
+  });
+
+  test("spark quota stuck hops once to grok on another provider", async () => {
+    const spark = {
+      name: "spark",
+      type: "opencode" as const,
+      model: "opencode/muse-spark-1.3-contributor-free",
+      variant: "xhigh",
+    };
+    const grok = { name: "grok", type: "opencode" as const, model: "xai/grok-4.6", variant: "high" };
+    const quotaStuck: EngineResult = { status: "stuck", message: QUOTA_MESSAGE };
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === spark.model) return quotaStuck;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [spark, grok] })({
+      model: spark.model,
+      workdir: "/tmp",
+    });
+    expect(result).toEqual(ok(grok.model));
+    expect(models).toEqual([spark.model, grok.model]);
   });
 
   test("exhausting the chain fails closed", async () => {
