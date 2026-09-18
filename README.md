@@ -122,7 +122,7 @@ It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `
 - `failure` if OpenCode crashes, returns empty output, or omits the trailer. Missing/empty `JUMI_REVIEW.md` continues the same session with a write-only turn (see `MAX_INCOMPLETE_RETRIES`) then fails the check and posts `stuck: incomplete review`; stdout/chat is never the artifact
 - `warning` when a queued job is skipped after it already went pending (for example the PR head changed)
 
-The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure. Title-gated skips (`WIP:`, `[skip review]`) still post no status.
+The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure. Title-gated skips (`WIP:`) still post no status.
 
 ## Worker jobs
 
