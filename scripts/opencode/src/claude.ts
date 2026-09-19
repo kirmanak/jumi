@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import { ClaudeStreamParser } from "./claude_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
 import {
   type Engine,
@@ -12,10 +13,13 @@ import {
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import { recordClaudeUsage } from "./token_metrics.ts";
 
 export const CLAUDE_SETTING_SOURCES = "user";
 export const CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,Bash,Grep,Glob,WebFetch";
 export const CLAUDE_PERMISSION_MODE = "dontAsk";
+/** stream-json keeps per-message usage even when the child is killed before `result`. */
+export const CLAUDE_OUTPUT_FORMAT = "stream-json";
 
 const CLAUDE_STDERR_MAX_BYTES = 64_000;
 const SCRUB_ENV_PREFIXES = ["GITEA_", "GITHUB_APP_"] as const;
@@ -112,6 +116,27 @@ async function readStreamLimited(
   return { text: output, totalBytes };
 }
 
+function limitText(text: string, label: string, maxBytes?: number): { text: string; totalBytes: number } {
+  const bytes = new TextEncoder().encode(text);
+  if (!maxBytes || maxBytes <= 0 || bytes.byteLength <= maxBytes) return { text, totalBytes: bytes.byteLength };
+  const head = new TextDecoder().decode(bytes.slice(0, maxBytes));
+  return { text: `${head}${truncateNote(label, maxBytes, "head")}`, totalBytes: bytes.byteLength };
+}
+
+async function readClaudeStdout(stream: ReadableStream<Uint8Array>, parser: ClaudeStreamParser): Promise<void> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+    parser.end();
+  }
+}
+
 function scrubbedKey(key: string): boolean {
   if (SCRUB_ENV_KEYS.has(key)) return true;
   return SCRUB_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
@@ -150,6 +175,9 @@ export function claudeArgv(opts: EngineRunOptions): string[] {
     CLAUDE_PERMISSION_MODE,
     "--allowedTools",
     CLAUDE_ALLOWED_TOOLS,
+    "--output-format",
+    CLAUDE_OUTPUT_FORMAT,
+    "--verbose",
     "--model",
     opts.model,
   ];
@@ -222,13 +250,13 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
           }, opts.timeoutMs)
         : undefined;
 
-    let stdoutResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
+    const parser = new ClaudeStreamParser();
     let stderrResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
     let exitCode: number | null = null;
     let runError: unknown;
     try {
-      [stdoutResult, stderrResult, exitCode] = await Promise.all([
-        readStreamLimited(proc.stdout, "claude output", opts.maxOutputBytes),
+      [, stderrResult, exitCode] = await Promise.all([
+        readClaudeStdout(proc.stdout, parser),
         readStreamLimited(proc.stderr, "claude stderr", CLAUDE_STDERR_MAX_BYTES, "tail"),
         proc.exited,
       ]);
@@ -239,6 +267,14 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       if (timeout) clearTimeout(timeout);
     }
 
+    // Parent-held usage at child end, whatever the outcome (ok, non-zero,
+    // timeout, 143, cancel). Fail-open: no usage never fails the job.
+    try {
+      recordClaudeUsage(parser.usage());
+    } catch {
+      // Token metrics are best-effort.
+    }
+    const stdoutResult = limitText(parser.text(), "claude output", opts.maxOutputBytes);
     const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
     const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);
     const combined = [stderr, stdout].filter(Boolean).join("\n");
