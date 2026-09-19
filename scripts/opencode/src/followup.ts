@@ -842,7 +842,7 @@ export async function implementFollowUp(
     issueNumber,
     skipLatches: latches,
   };
-  let ci: CiInspection = { sha: pr.head.sha, pending: false, failed: [], unhandled: [] };
+  let ci: CiInspection = { sha: pr.head.sha, pending: false, failed: [], unhandled: [], empty: true };
   try {
     ci = await inspectCi(inspectOpts);
   } catch (err) {

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "../src/ci_webhook.ts";
+import {
+  parseWorkflowJobPayload,
+  shouldEnqueueWorkflowJobFollowUp,
+  shouldEnqueueWorkflowJobReview,
+} from "../src/ci_webhook.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
@@ -275,6 +279,49 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
       );
       expect(decision.type).toBe("enqueue");
     }
+  });
+});
+
+describe("shouldEnqueueWorkflowJobReview", () => {
+  test("enqueues review for a matching open PR", async () => {
+    const decision = await shouldEnqueueWorkflowJobReview(makeWorkflowJobPayload(), policy, makeApi());
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs).toHaveLength(1);
+    expect(decision.jobs[0]?.prNumber).toBe(127);
+    expect(decision.jobs[0]?.headSha).toBe("headsha");
+  });
+
+  test("skips draft or WIP PRs", async () => {
+    const decision = await shouldEnqueueWorkflowJobReview(
+      makeWorkflowJobPayload(),
+      policy,
+      makeApi({
+        listOpenPulls: async () => [jumiPr(), makePR({ number: 8, title: "WIP: later", head: jumiPr().head })],
+      })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs.map((job) => job.prNumber)).toEqual([127]);
+  });
+
+  test("skips in_progress jobs without listing pulls", async () => {
+    let listed = 0;
+    const decision = await shouldEnqueueWorkflowJobReview(
+      makeWorkflowJobPayload({
+        action: "in_progress",
+        workflow_job: { id: 99, name: "build", status: "in_progress", head_sha: "headsha" },
+      }),
+      policy,
+      makeApi({
+        listOpenPulls: async () => {
+          listed++;
+          return [jumiPr()];
+        },
+      })
+    );
+    expect(decision).toEqual({ type: "skip", reason: "workflow_job in_progress" });
+    expect(listed).toBe(0);
   });
 });
 

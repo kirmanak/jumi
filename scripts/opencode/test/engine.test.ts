@@ -11,7 +11,7 @@ import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY } from "../src/re
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { stuckMarker } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
+import { emptyCiMethods, makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   comments: string[];
@@ -51,6 +51,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
       statuses.push({ sha, state: status.state, description: status.description });
       return status;
     },
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments, reviews, statuses };
 }

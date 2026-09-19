@@ -3,6 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
+import { CI_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
@@ -15,7 +16,16 @@ import {
 } from "../src/review.ts";
 import { fingerprintReviewArtifact, readStuckState, stuckMarker, writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import {
+  emptyCiMethods,
+  makeBranch,
+  makeComment,
+  makeFile,
+  makeIssue,
+  makePR,
+  makeRepo,
+  makeUser,
+} from "./fixtures.ts";
 
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
@@ -45,6 +55,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     unresolvePullComment: async () => undefined,
     dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides };
 }
@@ -145,6 +156,61 @@ describe("reviewPullRequest", () => {
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "PR title disables review" });
+  });
+
+  test("skips pending or failed non-jumi checks without OpenCode or status", async () => {
+    const runner = async () => {
+      throw new Error("runner should not be called");
+    };
+    const statuses: Array<{ state: string }> = [];
+    const pendingApi = makeApi({
+      listCommitStatuses: async () => [{ id: 1, context: "build", status: "pending" }],
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+    await expect(reviewPullRequest({ ...skipOptions, api: pendingApi, openCodeRunner: runner })).resolves.toEqual({
+      status: "skipped",
+      reason: CI_PENDING_REASON,
+    });
+    expect(statuses).toEqual([]);
+
+    const failedStatuses: Array<{ state: string }> = [];
+    await expect(
+      reviewPullRequest({
+        ...skipOptions,
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            failedStatuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: runner,
+      })
+    ).resolves.toEqual({ status: "skipped", reason: CI_FAILED_REASON });
+    expect(failedStatuses).toEqual([]);
+  });
+
+  test("re-lists once when no other checks have appeared yet", async () => {
+    const runner = async () => {
+      throw new Error("runner should not be called");
+    };
+    let looks = 0;
+    const result = await reviewPullRequest({
+      ...skipOptions,
+      api: makeApi({
+        listActionJobs: async () => {
+          looks++;
+          if (looks === 1) return [];
+          return [{ id: 9, name: "build", head_sha: "headsha", status: "in_progress" }];
+        },
+      }),
+      openCodeRunner: runner,
+    });
+    expect(result).toEqual({ status: "skipped", reason: CI_PENDING_REASON });
+    expect(looks).toBe(2);
   });
 
   test("reviews PRs titled [skip review]", async () => {

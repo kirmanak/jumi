@@ -251,6 +251,10 @@ export type ReviewApi = Pick<
   | "unresolvePullComment"
   | "dismissPullReview"
   | "createCommitStatus"
+  | "listCommitStatuses"
+  | "listCheckRuns"
+  | "listActionJobs"
+  | "getActionJobLogs"
   | "getCollaboratorPermission"
 > &
   Pick<Tracker, "getIssue">;

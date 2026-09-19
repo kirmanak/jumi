@@ -51,6 +51,7 @@ function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { commen
     unresolvePullComment: async () => undefined,
     dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments };
 }
@@ -101,6 +102,24 @@ describe("job envelope kinds", () => {
     });
     expect(store.rows.find((row) => row.headSha === "old")?.state).toBe("cancelled");
     expect(store.rows.find((row) => row.headSha === "new")?.state).toBe("queued");
+  });
+
+  test("CI pending skip can re-enqueue the same review SHA", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI still pending" });
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+  });
+
+  test("succeeded review is not re-enqueued for the same SHA", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.markPublished(leased!.id, "engine-1", { state: "succeeded" });
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
   });
 
   test("review enqueue does not cancel a queued follow-up", async () => {

@@ -356,6 +356,7 @@ describe("createFetchHandler router mailbox", () => {
           logger,
           worker: {
             queue: { enqueue: (job: IssueJob) => store.enqueueIssue(job) },
+            review: store,
             api,
             cancel:
               extras.cancel ??
@@ -480,6 +481,15 @@ describe("createFetchHandler router mailbox", () => {
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["follow-up:kirmanak/demo#127:headsha:99"] });
     expect(store.rows[0]?.kind).toBe("follow-up");
     expect(logs.some((line) => line.includes("queued follow-up:"))).toBe(true);
+  });
+
+  test("workflow_job also enqueues a review for the matching PR", async () => {
+    const { handler, store, logs } = mailboxHandler();
+    const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "workflow_job" }));
+    expect(response.status).toBe(202);
+    expect(store.rows.find((row) => row.kind === "review")?.jobKey).toBe("kirmanak/demo#127:headsha");
+    expect(store.rows.find((row) => row.kind === "follow-up")?.state).toBe("queued");
+    expect(logs.some((line) => line.includes("queued kirmanak/demo#127:headsha"))).toBe(true);
   });
 
   test("pull_request opened still enqueues review", async () => {

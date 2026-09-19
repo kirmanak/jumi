@@ -661,6 +661,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         getPR: (owner, repo, index) => api.getPR(owner, repo, index),
         worker: {
           queue: { enqueue: (job) => store.enqueueIssue(job) },
+          review: store,
           api: workerMailboxApi(api),
           cancel: (owner, repo, issueNumber) =>
             cancelLedgerWorkerJobs({

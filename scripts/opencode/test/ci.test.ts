@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  actionJobCheckState,
   buildCiMarkdown,
   capFailedJobLog,
   classifyInfraFlake,
@@ -267,6 +268,70 @@ describe("inspectCi", () => {
       });
       expect(inspection.pending).toBe(true);
       expect(inspection.failed.map((c) => c.name)).toEqual(["build"]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("treats in-progress Actions jobs as pending when statuses have not appeared", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", status: "in_progress" }],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(true);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("no other checks and no matching jobs is empty", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi(),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(true);
+      expect(inspection.failed).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("skipped completed jobs are not pending or red", async () => {
+    expect(actionJobCheckState({ id: 1, name: "build", status: "completed", conclusion: "skipped" })).toBe("success");
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "skipped" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed).toEqual([]);
     } finally {
       await rm(home, { recursive: true, force: true });
     }

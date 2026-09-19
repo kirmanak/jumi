@@ -1,5 +1,6 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { inspectCi, reviewSkipReasonForCi } from "./ci.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
@@ -700,6 +701,29 @@ function skipReasonForPR(pr: Pull): string | undefined {
   }
 }
 
+async function skipReasonForOtherChecks(
+  opts: ReviewOptions,
+  sha: string,
+  log: (message: string) => void
+): Promise<string | undefined> {
+  const inspectOpts = {
+    api: opts.api,
+    owner: opts.owner,
+    repo: opts.repo,
+    sha,
+    home: opts.home ?? "",
+    issueNumber: opts.prNumber,
+  };
+  try {
+    let ci = await inspectCi(inspectOpts);
+    if (ci.empty) ci = await inspectCi(inspectOpts);
+    return reviewSkipReasonForCi(ci);
+  } catch (err) {
+    log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
+    return undefined;
+  }
+}
+
 export function skipReasonForHeadChange(pr: Pull, expectedHeadSha: string): string | undefined {
   if (pr.head.sha === expectedHeadSha) return undefined;
   return `PR head changed from ${expectedHeadSha} to ${pr.head.sha}`;
@@ -980,6 +1004,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       return { status: "skipped", reason: stuckComment(stuckReason) };
     }
   }
+
+  const ciSkip = await skipReasonForOtherChecks(opts, reviewedHeadSha, log);
+  if (ciSkip) return { status: "skipped", reason: ciSkip };
 
   await postReviewStatus(
     opts.api,
