@@ -439,8 +439,12 @@ export async function inspectCi(opts: {
     try {
       const live = checksFromActionJobs(await opts.api.listActionJobs(opts.owner, opts.repo), opts.sha);
       if (live.length > 0) sawShaJobs = true;
-      jobChecks = live.filter((status) => commitStatusState(status) === "pending");
-      pending = jobChecks.length > 0;
+      jobChecks = live.filter((status) => {
+        if (commitStatusState(status) === "pending") return true;
+        const job = { id: status.jobId ?? 0, name: status.context ?? "", head_sha: opts.sha };
+        return !fromForge.some((forge) => jobMatchesCheck(job, forge.context ?? "", opts.sha));
+      });
+      pending = live.some((status) => commitStatusState(status) === "pending");
     } catch {
       jobChecks = [];
     }

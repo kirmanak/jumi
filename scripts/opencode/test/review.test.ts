@@ -191,6 +191,24 @@ describe("reviewPullRequest", () => {
       })
     ).resolves.toEqual({ status: "skipped", reason: CI_FAILED_REASON });
     expect(failedStatuses).toEqual([]);
+
+    const liveFailedStatuses: Array<{ state: string }> = [];
+    await expect(
+      reviewPullRequest({
+        ...skipOptions,
+        api: makeApi({
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
+          ],
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            liveFailedStatuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: runner,
+      })
+    ).resolves.toEqual({ status: "skipped", reason: CI_FAILED_REASON });
+    expect(liveFailedStatuses).toEqual([]);
   });
 
   test("re-lists once when no other checks have appeared yet", async () => {

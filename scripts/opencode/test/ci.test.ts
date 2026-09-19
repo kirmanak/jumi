@@ -7,6 +7,7 @@ import {
   buildCiMarkdown,
   capFailedJobLog,
   classifyInfraFlake,
+  CI_FAILED_REASON,
   dropUnpackNoise,
   flakeSkipReason,
   hashText,
@@ -17,6 +18,7 @@ import {
   latestStatuses,
   needsCiFollowUp,
   recordCiHandled,
+  reviewSkipReasonForCi,
 } from "../src/ci.ts";
 import { followUpStatePath } from "../src/claim.ts";
 import { writeFollowUpState } from "../src/followup.ts";
@@ -289,6 +291,31 @@ describe("inspectCi", () => {
       expect(inspection.pending).toBe(true);
       expect(inspection.empty).toBe(false);
       expect(inspection.failed).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("treats completed failed Actions jobs as red when statuses have not appeared", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
+          ],
+          getActionJobLogs: async () => "##[error]boom\n",
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed.map((c) => c.name)).toEqual(["build"]);
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_FAILED_REASON);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
