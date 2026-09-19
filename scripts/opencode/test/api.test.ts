@@ -255,6 +255,18 @@ describe("GiteaAPI", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("findStickyIssueComment matches the bot login case-insensitively", async () => {
+    globalThis.fetch = (async () =>
+      Response.json([
+        { id: 1, body: "<!-- jumi-review:owner/repo#7 -->\nforeign", user: { login: "tapio" } },
+        { id: 2, body: "<!-- jumi-review:owner/repo#7 -->\nold", user: { login: "Jumi" } },
+      ])) as unknown as typeof fetch;
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(
+      api.findStickyIssueComment("owner", "repo", 7, "JUMI", "<!-- jumi-review:owner/repo#7 -->")
+    ).resolves.toEqual({ id: 2 });
+  });
+
   test("lists issue comments with exact-50 paging", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
