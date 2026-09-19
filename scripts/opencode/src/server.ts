@@ -12,7 +12,13 @@ import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfra
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
-import { publishReviewResult, reviewJobKey, reviewPullRequest } from "./review.ts";
+import {
+  CI_RELIST_DELAY_MS,
+  publishReviewResult,
+  reviewJobKey,
+  reviewPullRequest,
+  skipReasonForOtherChecks,
+} from "./review.ts";
 import {
   createPgReviewJobStore,
   HEARTBEAT_MS,
@@ -80,6 +86,7 @@ export interface RunReviewJobExtras {
   heartbeatMs?: number;
   jobId?: string;
   breaker?: InfraCircuitBreaker;
+  ciRelistDelayMs?: number;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
 }
@@ -91,6 +98,23 @@ export async function runReviewJob(
   logger: (message: string) => void = log,
   extras: RunReviewJobExtras = {}
 ): Promise<ReviewResult> {
+  const ciSkip = await skipReasonForOtherChecks(
+    {
+      api,
+      owner: job.owner,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      home: config.home,
+      abortSignal: extras.abortSignal,
+      ciRelistDelayMs: extras.ciRelistDelayMs,
+    },
+    job.headSha,
+    logger
+  );
+  if (ciSkip) {
+    logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${ciSkip}`);
+    return { status: "skipped", reason: ciSkip };
+  }
   const workspace = await createReviewWorkspace(config.workdir, job);
   try {
     const result = await reviewPullRequest({
@@ -125,6 +149,8 @@ export async function runReviewJob(
       gitRunner: extras.gitRunner,
       abortSignal: extras.abortSignal,
       jobId: extras.jobId ?? job.delivery,
+      ciRelistDelayMs: extras.ciRelistDelayMs,
+      inspectOtherChecks: false,
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;
@@ -661,6 +687,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         getPR: (owner, repo, index) => api.getPR(owner, repo, index),
         worker: {
           queue: { enqueue: (job) => store.enqueueIssue(job) },
+          review: store,
           api: workerMailboxApi(api),
           cancel: (owner, repo, issueNumber) =>
             cancelLedgerWorkerJobs({
@@ -732,7 +759,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
             config,
             api,
             leasedBy,
-            { ...deps.extras, abortSignal: shutdown.signal },
+            { ciRelistDelayMs: CI_RELIST_DELAY_MS, ...deps.extras, abortSignal: shutdown.signal },
             logger
           );
           if (result === "idle") await sleep(QUEUE_POLL_MS, shutdown.signal);

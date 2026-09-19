@@ -1,3 +1,4 @@
+import { CI_LOOKUP_FAILED_REASON, CI_LOOKUP_RETRY_MS, isCiWaitSkipReason } from "./ci.ts";
 import { isInfraRetryMarker } from "./infra.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
@@ -69,6 +70,8 @@ export interface ReviewJobRecord {
   pendingStatusAt: number | null;
   publishedAt: number | null;
   prUpdatedAt: number | null;
+  /** A same-key review wake arrived while this row was leased; a CI-wait skip requeues instead of finishing. */
+  rewakeRequested?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -165,6 +168,7 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'rev
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS payload JSONB;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_runner TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS rewake_requested BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
@@ -202,6 +206,16 @@ export function hasPersistedResult(row: ReviewJobRecord): boolean {
 
 function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefined): boolean {
   return state === "succeeded" || (state === "skipped" && isTerminalSkipReason(reason));
+}
+
+// The completed workflow_job is the only wake after a CI skip, so one that lands while the
+// row is leased (and is deduped against it) must not be lost when the lease ends in a CI wait.
+function isCiRewakeOutcome(outcome: { state: string; reason?: string }): boolean {
+  return outcome.state === "skipped" && isCiWaitSkipReason(outcome.reason);
+}
+
+function isCiLookupFailedOutcome(outcome: { state: string; reason?: string }): boolean {
+  return outcome.state === "skipped" && outcome.reason === CI_LOOKUP_FAILED_REASON;
 }
 
 function jobPrUpdatedAtMs(job: ReviewJob): number | null {
@@ -412,6 +426,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         return { key, queued: false };
       }
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
+        for (const row of sameKey) if (row.state === "leased") row.rewakeRequested = true;
         return { key, queued: false };
       }
       if (hasNewerInflight(this.rows, job, key)) {
@@ -631,6 +646,18 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark published for job ${id}`);
       const ts = Date.now();
+      const lookupFailed = isCiLookupFailedOutcome(outcome);
+      const rewake = lookupFailed || (Boolean(row.rewakeRequested) && isCiRewakeOutcome(outcome));
+      const backoffMs = lookupFailed && !row.rewakeRequested ? CI_LOOKUP_RETRY_MS : 0;
+      row.rewakeRequested = false;
+      if (rewake) {
+        row.state = "queued";
+        row.resultReason = null;
+        row.leasedBy = null;
+        row.leasedUntil = backoffMs > 0 ? ts + backoffMs : null;
+        row.updatedAt = ts;
+        return;
+      }
       row.state = outcome.state;
       if (outcome.reason) row.resultReason = outcome.reason;
       row.publishedAt = ts;
@@ -808,6 +835,7 @@ type ReviewJobRow = {
   pending_status_at: unknown;
   published_at: unknown;
   pr_updated_at: unknown;
+  rewake_requested?: unknown;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -889,6 +917,7 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     pendingStatusAt: epoch(row.pending_status_at),
     publishedAt: epoch(row.published_at),
     prUpdatedAt: epoch(row.pr_updated_at),
+    rewakeRequested: row.rewake_requested === true || row.rewake_requested === "t",
     createdAt: epochRequired(row.created_at),
     updatedAt: epochRequired(row.updated_at),
   };
@@ -933,7 +962,14 @@ export class PgReviewJobStore implements ReviewJobStore {
           [job.owner, job.repo, job.prNumber, REVIEW_KIND]
         )
       );
-      if (inflight.some((row) => str(row.job_key) === key)) return { key, queued: false };
+      if (inflight.some((row) => str(row.job_key) === key)) {
+        await tx.unsafe(
+          `UPDATE review_jobs SET rewake_requested = TRUE, updated_at = NOW()
+           WHERE job_key = $1 AND state = 'leased'`,
+          [key]
+        );
+        return { key, queued: false };
+      }
       const incomingTs = jobPrUpdatedAtMs(job);
       if (
         incomingTs != null &&
@@ -1227,15 +1263,27 @@ export class PgReviewJobStore implements ReviewJobStore {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
-         SET state = $3,
-             result_reason = COALESCE($4, result_reason),
-             published_at = NOW(),
+         SET state = CASE WHEN $6::boolean OR ($5::boolean AND rewake_requested) THEN 'queued' ELSE $3 END,
+             result_reason = CASE WHEN $6::boolean OR ($5::boolean AND rewake_requested) THEN NULL ELSE COALESCE($4, result_reason) END,
+             published_at = CASE WHEN $6::boolean OR ($5::boolean AND rewake_requested) THEN published_at ELSE NOW() END,
+             rewake_requested = FALSE,
              leased_by = NULL,
-             leased_until = NULL,
+             leased_until = CASE
+               WHEN $6::boolean AND NOT rewake_requested THEN NOW() + ($7::bigint * interval '1 millisecond')
+               ELSE NULL
+             END,
              updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
          RETURNING id`,
-        [id, leasedBy, outcome.state, outcome.reason ?? null]
+        [
+          id,
+          leasedBy,
+          outcome.state,
+          outcome.reason ?? null,
+          isCiRewakeOutcome(outcome),
+          isCiLookupFailedOutcome(outcome),
+          CI_LOOKUP_RETRY_MS,
+        ]
       )
     );
     if (rows.length === 0) throw new Error(`cannot mark published for job ${id}`);

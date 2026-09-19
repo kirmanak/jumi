@@ -1,4 +1,8 @@
-import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_webhook.ts";
+import {
+  parseWorkflowJobPayload,
+  shouldEnqueueWorkflowJobFollowUp,
+  shouldEnqueueWorkflowJobReview,
+} from "./ci_webhook.ts";
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
@@ -18,7 +22,7 @@ import {
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
-import type { IssueJob } from "./types.ts";
+import type { IssueJob, ReviewJob } from "./types.ts";
 import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
 export type WorkerWebhookPolicy = WebhookPolicy & {
@@ -35,8 +39,13 @@ export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
+export interface WorkerReviewQueue {
+  enqueue(job: ReviewJob): EnqueueResult | Promise<EnqueueResult>;
+}
+
 export interface HandleWorkerWebhookDeps {
   queue: WorkerWebhookQueue;
+  review?: WorkerReviewQueue;
   api?: WorkerWebhookApi;
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
@@ -262,17 +271,32 @@ export async function handleWorkerWebhookEvent(
       return skipped("malformed workflow_job payload", logger);
     }
     try {
-      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api, logger);
-      if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
+      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.api, logger);
       const keys: string[] = [];
-      for (const partial of decision.jobs) {
-        const job: IssueJob = { ...partial, delivery, receivedAt };
-        const result: EnqueueResult = await deps.queue.enqueue(job);
-        keys.push(result.key);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      if (decision.type === "enqueue") {
+        for (const partial of decision.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const result: EnqueueResult = await deps.queue.enqueue(job);
+          keys.push(result.key);
+          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        }
       }
-      return json(202, { queued: true, keys });
+      const reviewResults: EnqueueResult[] = [];
+      if (deps.review) {
+        const reviewDecision = await shouldEnqueueWorkflowJobReview(payload, policy, deps.api, logger);
+        if (reviewDecision.type === "enqueue") {
+          for (const partial of reviewDecision.jobs) {
+            const result: EnqueueResult = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+            reviewResults.push(result);
+            logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+          }
+        }
+      }
+      if (keys.length > 0) return json(202, { queued: true, keys });
+      if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
+      if (reviewResults.length > 1) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      return skipped(decision.type === "skip" ? decision.reason : "no matching pull request", logger);
     } catch (err) {
       if (isQueueUnavailable(err)) {
         logger(`queue unavailable: ${err.message}`);

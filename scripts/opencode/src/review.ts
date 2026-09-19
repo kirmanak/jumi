@@ -1,5 +1,6 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { CI_LOOKUP_FAILED_REASON, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
@@ -121,6 +122,10 @@ export interface ReviewOptions {
   abortSignal?: AbortSignal;
   jobId?: string;
   maxIncompleteRetries?: number;
+  /** Wait before the single CI re-list when the first look finds no checks or a lookup failed. */
+  ciRelistDelayMs?: number;
+  /** When false, the caller already applied `skipReasonForOtherChecks`. */
+  inspectOtherChecks?: boolean;
 }
 
 export type PersistReviewResult =
@@ -700,6 +705,54 @@ function skipReasonForPR(pr: Pull): string | undefined {
   }
 }
 
+/** Production wait before the one CI re-list; tests default to no wait. */
+export const CI_RELIST_DELAY_MS = 5_000;
+
+export async function skipReasonForOtherChecks(
+  opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs">,
+  sha: string,
+  log: (message: string) => void
+): Promise<string | undefined> {
+  const inspectOpts = {
+    api: opts.api,
+    owner: opts.owner,
+    repo: opts.repo,
+    sha,
+    home: opts.home ?? "",
+    issueNumber: opts.prNumber,
+  };
+  try {
+    let ci = await inspectCi(inspectOpts);
+    if (ci.empty || ci.lookupFailed) {
+      // Actions may not have created the push's jobs yet, or a list call blipped;
+      // give it one short beat, then re-list once.
+      await delay(opts.ciRelistDelayMs ?? 0, opts.abortSignal);
+      ci = await inspectCi(inspectOpts);
+    }
+    return reviewSkipReasonForCi(ci);
+  } catch (err) {
+    if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
+    log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
+    return CI_LOOKUP_FAILED_REASON;
+  }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function skipReasonForHeadChange(pr: Pull, expectedHeadSha: string): string | undefined {
   if (pr.head.sha === expectedHeadSha) return undefined;
   return `PR head changed from ${expectedHeadSha} to ${pr.head.sha}`;
@@ -979,6 +1032,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       await upsertStuckComment(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckReason);
       return { status: "skipped", reason: stuckComment(stuckReason) };
     }
+  }
+
+  if (opts.inspectOtherChecks !== false) {
+    const ciSkip = await skipReasonForOtherChecks(opts, reviewedHeadSha, log);
+    if (ciSkip) return { status: "skipped", reason: ciSkip };
   }
 
   await postReviewStatus(

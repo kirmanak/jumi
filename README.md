@@ -39,7 +39,7 @@ One `review_jobs` ledger (`kind`: `review` | `implement` | `follow-up` | `confli
 | `engine` | reviewer image, `JUMI_ROLE=engine` | Lease `review` only, run OpenCode, persist `JUMI_REVIEW.md` before workspace teardown, publish sticky/status. |
 | `worker` | worker image (`bun run src/worker_server.ts`) | Lease `implement` / `follow-up` / `conflict`. Not `JUMI_ROLE=router`. |
 
-Router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). Cheap 202 skips log the reason. After the engine publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned to the bot, persist inserts a `follow-up` row.
+Router writes every kind: `pull_request` opened/reopened/synchronize enqueue `review`; assign/comment/red CI enqueue `implement` / `follow-up`; default-branch `push` enqueue `conflict`; unassign cancels queued and leased worker rows for that issue and posts `stopped`. Ping is `200`. Unknown events `202`-skip. Ledger down is `503` (never `202` into RAM). Cheap 202 skips log the reason. After the engine publishes a current-head `<!-- jumi-check: failure -->` trailer on a jumi closing PR whose issue is still assigned to the bot, persist inserts a `follow-up` row. Review does not start OpenCode while any other (non-jumi) check on that head SHA is pending or red; a completed `workflow_job` re-enqueues the same SHA (deduped) so the review runs once CI is green. A PR with no other checks is still reviewed on open/synchronize.
 
 `router` and `engine` need `DATABASE_URL` and `GITEA_BOT_TOKEN`. `GITEA_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` is not required for `engine`; required on `router` / worker. GitOps must set `DATABASE_URL` on the worker too, but the worker does not fail process start without it: that is local/dev mode (in-process queue, no ledger tick, startup log says `ledger=none`). Production correctness never depends on it — the router is the mailbox and never 202s jobs into worker RAM.
 
@@ -124,7 +124,9 @@ It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `
 - `failure` if OpenCode crashes, returns empty output, or omits the trailer. Missing/empty `JUMI_REVIEW.md` continues the same session with a write-only turn (see `MAX_INCOMPLETE_RETRIES`) then fails the check and posts `stuck: incomplete review`; stdout/chat is never the artifact
 - `warning` when a queued job is skipped after it already went pending (for example the PR head changed)
 
-The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure. Title-gated skips (`WIP:`) still post no status.
+The engine inspects live non-jumi commit statuses / check-runs (and in-progress Actions jobs) before that pending status. Pending or red CI is a cheap skip with no model and no `jumi/opencode-review` status — not success for “waiting” or “CI failed”. Title-gated skips (`WIP:`) still post no status. Plan summaries stay the existing PR-thread comments (Tapio sticky) once the review actually starts.
+
+The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure.
 
 ## Worker jobs
 
@@ -172,7 +174,7 @@ Event map (router mailbox):
 - `issue_comment` / `pull_request_comment` `created` on an open jumi closing PR or an assigned foreign PR (human sender, non-empty body, not a jumi sticky) → enqueue follow-up
 - `pull_request_rejected` on an open jumi closing PR or assigned foreign PR → enqueue follow-up
 - `push` on `refs/heads/<repository.default_branch>` → mechanical HTTP filter (list open managed jumi closers and assigned foreign PRs; no git, no OpenCode). Enqueue `mode: "conflict"`. Tags, deletes, and non-default branches skip
-- `workflow_job` → wake only (202 immediately). Malformed / not-ours → 202 skip, never 400. Do not use `status` (also fires for Jumi reviews). Re-reads **live** commit statuses for `pr.head.sha` (Gitea) and GitHub Actions check-runs, ignores `jumi/opencode-review`, skips if any other context is `pending`, and on a non-jumi `failure` injects `JUMI_CI.md` then follow-up
+- `workflow_job` → wake only (202 immediately). Malformed / not-ours → 202 skip, never 400. Do not use `status` (also fires for Jumi reviews). Re-enqueues `review` for matching open non-WIP PRs (deduped per head SHA). Re-reads **live** commit statuses for `pr.head.sha` (Gitea) and GitHub Actions check-runs, ignores `jumi/opencode-review`, skips if any other context is `pending`, and on a non-jumi `failure` injects `JUMI_CI.md` then follow-up
 - `pull_request` / `pull_request_assign` `assigned` (bot still assigned) → enqueue follow-up keyed by the PR number, except when the PR closes a same-repo issue that is open and assigned to the bot: skip (202), live GET, fail closed on GET failure; the issue job owns the work. `unassigned` when the bot is no longer an assignee → cancel that PR. If that PR was an assigned foreign PR and no assigned foreign PR remains, enqueue first-run for other open issues still assigned to the bot (fresh GET). `closed` / `merged` of an assigned (or merged) foreign PR with no remaining assigned foreign PR does the same, and also `GET`s `/blocks` on the PR and on issues it closes. Unassign of the waiting issue remains the kill switch. Other `pull_request` actions: reviewer owns opened/synchronize; the rest `202` skip, never 400
 - `ping` → `200 {"ok":true}`
 - other events → `202` skip

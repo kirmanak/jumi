@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
+import { CI_PENDING_REASON } from "../src/ci.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
@@ -11,7 +12,7 @@ import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY } from "../src/re
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { stuckMarker } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
+import { emptyCiMethods, makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   comments: string[];
@@ -51,6 +52,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
       statuses.push({ sha, state: status.state, description: status.description });
       return status;
     },
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments, reviews, statuses };
 }
@@ -462,6 +464,21 @@ describe("processEngineTick", () => {
     });
   });
 
+  test("CI pending skip does not create a review workspace", async () => {
+    await withWorkspace(async (workspace) => {
+      const blocker = join(workspace, "not-a-dir");
+      await writeFile(blocker, "x");
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi({
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "pending" }],
+      });
+      await processEngineTick(store, makeConfig({ workdir: blocker }), api, "engine-1");
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe(CI_PENDING_REASON);
+    });
+  });
+
   test("throw before persist expires the lease so reclaim can retry", async () => {
     await withWorkspace(async (workspace) => {
       const blocker = join(workspace, "not-a-dir");
@@ -514,6 +531,7 @@ describe("processEngineTick", () => {
           signal: shutdown.signal,
           ensureAuth: async () => undefined,
           extras: {
+            ciRelistDelayMs: 0,
             gitRunner: frozenGit(),
             workspacePreparer: async () => undefined,
             openCodeRunner: async (opts) => {
