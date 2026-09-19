@@ -113,6 +113,43 @@ describe("job envelope kinds", () => {
     expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
   });
 
+  test("same-SHA wake during a leased CI-pending review requeues it instead of dropping it", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI still pending" });
+    const row = store.rows.find((item) => item.id === leased!.id);
+    expect(row?.state).toBe("queued");
+    expect(row?.resultReason).toBeNull();
+    expect(row?.rewakeRequested).toBe(false);
+    const again = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    expect(again?.id).toBe(leased!.id);
+    await store.markPublished(again!.id, "engine-1", { state: "skipped", reason: "CI still pending" });
+    expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("skipped");
+  });
+
+  test("same-SHA wake during a leased CI-lookup skip requeues it", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.enqueue(job);
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI lookup failed" });
+    expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("queued");
+  });
+
+  test("same-SHA wake during a leased review does not requeue a finished review", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.enqueue(job);
+    await store.markPublished(leased!.id, "engine-1", { state: "succeeded" });
+    expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("succeeded");
+  });
+
   test("succeeded review is not re-enqueued for the same SHA", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeJob();

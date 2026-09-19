@@ -736,6 +736,25 @@ describe("GithubAPI", () => {
     expect(authed[4]).toBe(false);
   });
 
+  test("scopes workflow runs to head_sha when listing action jobs", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("/actions/runs/") && String(url).includes("/jobs")) {
+        return Response.json({ jobs: [{ id: 9, name: "build", status: "in_progress", run_id: 44 }] });
+      }
+      if (String(url).includes("/actions/runs")) {
+        return Response.json({ workflow_runs: [{ id: 44, head_branch: "main" }], total_count: 1 });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listActionJobs("owner", "repo", { headSha: "abc/def" })).resolves.toEqual([
+      { id: 9, name: "build", status: "in_progress", head_branch: "main", run_id: 44 },
+    ]);
+    expect(urls[0]).toContain("/actions/runs?per_page=50&page=1&head_sha=abc%2Fdef");
+  });
+
   test("lists check-runs for a SHA and maps conclusions", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {

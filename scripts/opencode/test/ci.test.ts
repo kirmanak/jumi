@@ -6,6 +6,7 @@ import {
   actionJobCheckState,
   buildCiMarkdown,
   CI_FAILED_REASON,
+  CI_LOOKUP_FAILED_REASON,
   capFailedJobLog,
   classifyInfraFlake,
   dropUnpackNoise,
@@ -416,6 +417,32 @@ describe("inspectCi", () => {
         issueNumber: 12,
       });
       expect(inspection.pending).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a thrown forge list call is lookupFailed, not empty success", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      let listed: { headSha?: string } | undefined;
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async (_owner, _repo, opts) => {
+            listed = opts;
+            throw new Error("rate limited");
+          },
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(listed).toEqual({ headSha: "headsha" });
+      expect(inspection.empty).toBe(true);
+      expect(inspection.lookupFailed).toBe(true);
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_LOOKUP_FAILED_REASON);
     } finally {
       await rm(home, { recursive: true, force: true });
     }

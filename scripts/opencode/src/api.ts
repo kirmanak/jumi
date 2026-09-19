@@ -571,7 +571,11 @@ export class GiteaAPI {
     return [];
   }
 
-  async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]> {
+  async listActionJobs(
+    owner: string,
+    repo: string,
+    opts?: { status?: string; headSha?: string }
+  ): Promise<ActionJob[]> {
     const results: ActionJob[] = [];
     let page = 1;
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";

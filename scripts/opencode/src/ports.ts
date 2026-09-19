@@ -230,7 +230,7 @@ export interface Forge {
   createCommitStatus(owner: string, repo: string, sha: string, status: CheckPayload): Promise<CheckPayload>;
   listCommitStatuses(owner: string, repo: string, sha: string): Promise<Check[]>;
   listCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]>;
-  listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]>;
+  listActionJobs(owner: string, repo: string, opts?: { status?: string; headSha?: string }): Promise<ActionJob[]>;
   getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
 }
 

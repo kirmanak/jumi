@@ -39,10 +39,18 @@ export interface CiInspection {
   failed: FailedCheck[];
   unhandled: FailedCheck[];
   empty: boolean;
+  /** A forge list call threw, so `empty` / `pending` / `failed` may be incomplete. */
+  lookupFailed?: boolean;
 }
 
 export const CI_PENDING_REASON = "CI still pending";
 export const CI_FAILED_REASON = "CI failed";
+export const CI_LOOKUP_FAILED_REASON = "CI lookup failed";
+
+/** Non-terminal review skips that wait for a later workflow_job wake. */
+export function isCiWaitSkipReason(reason: string | null | undefined): boolean {
+  return reason === CI_PENDING_REASON || reason === CI_FAILED_REASON || reason === CI_LOOKUP_FAILED_REASON;
+}
 
 const PENDING_JOB_STATUS = new Set([
   "queued",
@@ -97,6 +105,7 @@ function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
 export function reviewSkipReasonForCi(ci: CiInspection): string | undefined {
   if (ci.pending) return CI_PENDING_REASON;
   if (ci.failed.length > 0) return CI_FAILED_REASON;
+  if (ci.lookupFailed) return CI_LOOKUP_FAILED_REASON;
   return undefined;
 }
 
@@ -417,26 +426,30 @@ export async function inspectCi(opts: {
   skipLatches?: SkipLatchStore;
 }): Promise<CiInspection> {
   if (!opts.sha) return emptyInspection(opts.sha);
+  let lookupFailed = false;
   let statuses: Check[] = [];
   try {
     statuses = await opts.api.listCommitStatuses(opts.owner, opts.repo, opts.sha);
   } catch {
     statuses = [];
+    lookupFailed = true;
   }
   let checkRuns: Check[] = [];
   try {
     checkRuns = await opts.api.listCheckRuns(opts.owner, opts.repo, opts.sha);
   } catch {
     checkRuns = [];
+    lookupFailed = true;
   }
   const fromForge = latestStatuses([...statuses, ...checkRuns]).filter(
     (status) => !isJumiReviewContext(status.context)
   );
   let live: Check[] = [];
   try {
-    live = checksFromActionJobs(await opts.api.listActionJobs(opts.owner, opts.repo), opts.sha);
+    live = checksFromActionJobs(await opts.api.listActionJobs(opts.owner, opts.repo, { headSha: opts.sha }), opts.sha);
   } catch {
     live = [];
+    lookupFailed = true;
   }
   const sawShaJobs = fromForge.length > 0 || live.length > 0;
   // Live Action jobs are fresher than forge rows (status / check-run lag), and the
@@ -461,11 +474,13 @@ export async function inspectCi(opts: {
     const state = commitStatusState(status);
     return state === "failure" || state === "error";
   });
-  if (red.length === 0) return { sha: opts.sha, pending, failed: [], unhandled: [], empty: !sawShaJobs };
+  if (red.length === 0) {
+    return { sha: opts.sha, pending, failed: [], unhandled: [], empty: !sawShaJobs, lookupFailed };
+  }
 
   let jobs: ActionJob[] = [];
   try {
-    jobs = await opts.api.listActionJobs(opts.owner, opts.repo, { status: "failure" });
+    jobs = await opts.api.listActionJobs(opts.owner, opts.repo, { status: "failure", headSha: opts.sha });
   } catch {
     jobs = [];
   }
@@ -494,7 +509,7 @@ export async function inspectCi(opts: {
     });
   }
   const unhandled = failed.filter((check) => !isCheckHandled(ciState, opts.sha, check.name, check.logHash));
-  return { sha: opts.sha, pending, failed, unhandled, empty: false };
+  return { sha: opts.sha, pending, failed, unhandled, empty: false, lookupFailed };
 }
 
 export async function needsCiFollowUp(opts: {

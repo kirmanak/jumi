@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
-import { CI_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
+import { CI_FAILED_REASON, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
@@ -229,6 +229,22 @@ describe("reviewPullRequest", () => {
     });
     expect(result).toEqual({ status: "skipped", reason: CI_PENDING_REASON });
     expect(looks).toBe(2);
+  });
+
+  test("skips instead of reviewing when a CI lookup fails", async () => {
+    const runner = async () => {
+      throw new Error("runner should not be called");
+    };
+    const result = await reviewPullRequest({
+      ...skipOptions,
+      api: makeApi({
+        listActionJobs: async () => {
+          throw new Error("rate limited");
+        },
+      }),
+      openCodeRunner: runner,
+    });
+    expect(result).toEqual({ status: "skipped", reason: CI_LOOKUP_FAILED_REASON });
   });
 
   test("reviews PRs titled [skip review]", async () => {
