@@ -432,30 +432,31 @@ export async function inspectCi(opts: {
   const fromForge = latestStatuses([...statuses, ...checkRuns]).filter(
     (status) => !isJumiReviewContext(status.context)
   );
-  let pending = fromForge.some((status) => commitStatusState(status) === "pending");
-  let jobChecks: Check[] = [];
-  let sawShaJobs = fromForge.length > 0;
-  if (!pending) {
-    try {
-      const live = checksFromActionJobs(await opts.api.listActionJobs(opts.owner, opts.repo), opts.sha);
-      if (live.length > 0) sawShaJobs = true;
-      jobChecks = live.filter((status) => {
-        const state = commitStatusState(status);
-        if (state === "pending") return true;
-        const job = { id: status.jobId ?? 0, name: status.context ?? "", head_sha: opts.sha };
-        const matched = fromForge.find((forge) => jobMatchesCheck(job, forge.context ?? "", opts.sha));
-        if (!matched) return true;
-        if (state !== "failure" && state !== "error") return false;
-        const matchedState = commitStatusState(matched);
-        return matchedState !== "failure" && matchedState !== "error";
-      });
-      pending = live.some((status) => commitStatusState(status) === "pending");
-    } catch {
-      jobChecks = [];
-    }
+  let live: Check[] = [];
+  try {
+    live = checksFromActionJobs(await opts.api.listActionJobs(opts.owner, opts.repo), opts.sha);
+  } catch {
+    live = [];
   }
-  const others = latestStatuses([...fromForge, ...jobChecks]).filter((status) => !isJumiReviewContext(status.context));
-  pending = pending || others.some((status) => commitStatusState(status) === "pending");
+  const sawShaJobs = fromForge.length > 0 || live.length > 0;
+  // Live Action jobs are fresher than forge rows (status / check-run lag), and the
+  // completed workflow_job is the only wake, so a matching live job's state wins.
+  const matchedLive = new Set<Check>();
+  const merged = fromForge.map((forge) => {
+    const matches = live.filter((check) => {
+      const job = { id: check.jobId ?? 0, name: check.context ?? "", head_sha: opts.sha };
+      return jobMatchesCheck(job, forge.context ?? "", opts.sha);
+    });
+    if (matches.length === 0) return forge;
+    for (const check of matches) matchedLive.add(check);
+    const latest = matches.reduce((a, b) => ((b.jobId ?? 0) > (a.jobId ?? 0) ? b : a));
+    const state = commitStatusState(latest);
+    return { ...forge, state, status: state };
+  });
+  const others = latestStatuses([...merged, ...live.filter((check) => !matchedLive.has(check))]).filter(
+    (status) => !isJumiReviewContext(status.context)
+  );
+  const pending = others.some((status) => commitStatusState(status) === "pending");
   const red = others.filter((status) => {
     const state = commitStatusState(status);
     return state === "failure" || state === "error";
