@@ -448,6 +448,32 @@ describe("inspectCi", () => {
     }
   });
 
+  test("terminal forge checks proceed when listing jobs throws", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
+          listActionJobs: async () => {
+            throw new Error("rate limited");
+          },
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.empty).toBe(false);
+      expect(inspection.lookupFailed).toBe(true);
+      expect(inspection.pending).toBe(false);
+      expect(inspection.failed).toEqual([]);
+      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("no other checks and no matching jobs is empty", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {

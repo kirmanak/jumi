@@ -122,8 +122,10 @@ export interface ReviewOptions {
   abortSignal?: AbortSignal;
   jobId?: string;
   maxIncompleteRetries?: number;
-  /** Wait before the single CI re-list when the first look finds no checks (synchronize-vs-queue race). */
+  /** Wait before the single CI re-list when the first look finds no checks or a lookup failed. */
   ciRelistDelayMs?: number;
+  /** When false, the caller already applied `skipReasonForOtherChecks`. */
+  inspectOtherChecks?: boolean;
 }
 
 export type PersistReviewResult =
@@ -706,8 +708,8 @@ function skipReasonForPR(pr: Pull): string | undefined {
 /** Production wait before the one CI re-list; tests default to no wait. */
 export const CI_RELIST_DELAY_MS = 5_000;
 
-async function skipReasonForOtherChecks(
-  opts: ReviewOptions,
+export async function skipReasonForOtherChecks(
+  opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs">,
   sha: string,
   log: (message: string) => void
 ): Promise<string | undefined> {
@@ -721,8 +723,9 @@ async function skipReasonForOtherChecks(
   };
   try {
     let ci = await inspectCi(inspectOpts);
-    if (ci.empty) {
-      // Actions may not have created the push's jobs yet; give it one short beat, then re-list once.
+    if (ci.empty || ci.lookupFailed) {
+      // Actions may not have created the push's jobs yet, or a list call blipped;
+      // give it one short beat, then re-list once.
       await delay(opts.ciRelistDelayMs ?? 0, opts.abortSignal);
       ci = await inspectCi(inspectOpts);
     }
@@ -1031,8 +1034,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     }
   }
 
-  const ciSkip = await skipReasonForOtherChecks(opts, reviewedHeadSha, log);
-  if (ciSkip) return { status: "skipped", reason: ciSkip };
+  if (opts.inspectOtherChecks !== false) {
+    const ciSkip = await skipReasonForOtherChecks(opts, reviewedHeadSha, log);
+    if (ciSkip) return { status: "skipped", reason: ciSkip };
+  }
 
   await postReviewStatus(
     opts.api,

@@ -46,6 +46,8 @@ export interface CiInspection {
 export const CI_PENDING_REASON = "CI still pending";
 export const CI_FAILED_REASON = "CI failed";
 export const CI_LOOKUP_FAILED_REASON = "CI lookup failed";
+/** Backoff before retrying a review whose CI lookup failed with no further wake. */
+export const CI_LOOKUP_RETRY_MS = 15_000;
 
 /** Non-terminal review skips that wait for a later workflow_job wake. */
 export function isCiWaitSkipReason(reason: string | null | undefined): boolean {
@@ -105,7 +107,7 @@ function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
 export function reviewSkipReasonForCi(ci: CiInspection): string | undefined {
   if (ci.pending) return CI_PENDING_REASON;
   if (ci.failed.length > 0) return CI_FAILED_REASON;
-  if (ci.lookupFailed) return CI_LOOKUP_FAILED_REASON;
+  if (ci.lookupFailed && ci.empty) return CI_LOOKUP_FAILED_REASON;
   return undefined;
 }
 

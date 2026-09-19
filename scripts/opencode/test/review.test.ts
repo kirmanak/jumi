@@ -235,16 +235,59 @@ describe("reviewPullRequest", () => {
     const runner = async () => {
       throw new Error("runner should not be called");
     };
+    let looks = 0;
     const result = await reviewPullRequest({
       ...skipOptions,
       api: makeApi({
         listActionJobs: async () => {
+          looks++;
           throw new Error("rate limited");
         },
       }),
       openCodeRunner: runner,
     });
     expect(result).toEqual({ status: "skipped", reason: CI_LOOKUP_FAILED_REASON });
+    expect(looks).toBe(2);
+  });
+
+  test("re-lists when the first CI lookup fails", async () => {
+    const runner = async () => {
+      throw new Error("runner should not be called");
+    };
+    let looks = 0;
+    const result = await reviewPullRequest({
+      ...skipOptions,
+      api: makeApi({
+        listActionJobs: async () => {
+          looks++;
+          if (looks === 1) throw new Error("rate limited");
+          return [{ id: 9, name: "build", head_sha: "headsha", status: "in_progress" }];
+        },
+      }),
+      openCodeRunner: runner,
+    });
+    expect(result).toEqual({ status: "skipped", reason: CI_PENDING_REASON });
+    expect(looks).toBe(2);
+  });
+
+  test("reviews when forge checks are green even if listing jobs fails", async () => {
+    await withWorkspace(async (workspace) => {
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
+          listActionJobs: async () => {
+            throw new Error("rate limited");
+          },
+        }),
+        openCodeRunner: async () => {
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "posted" });
+    });
   });
 
   test("reviews PRs titled [skip review]", async () => {
