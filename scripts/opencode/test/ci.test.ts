@@ -5,9 +5,9 @@ import { join } from "node:path";
 import {
   actionJobCheckState,
   buildCiMarkdown,
+  CI_FAILED_REASON,
   capFailedJobLog,
   classifyInfraFlake,
-  CI_FAILED_REASON,
   dropUnpackNoise,
   flakeSkipReason,
   hashText,
@@ -301,6 +301,32 @@ describe("inspectCi", () => {
     try {
       const inspection = await inspectCi({
         api: makeApi({
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
+          ],
+          getActionJobLogs: async () => "##[error]boom\n",
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed.map((c) => c.name)).toEqual(["build"]);
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_FAILED_REASON);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("treats live failed jobs as red even when a matching forge status is still green", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "success" }],
           listActionJobs: async () => [
             { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
           ],
