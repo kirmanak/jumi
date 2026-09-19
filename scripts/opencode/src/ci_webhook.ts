@@ -1,6 +1,6 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { extractClosingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
-import type { GiteaWorkflowJobPayload, IssueJob } from "./types.ts";
+import type { GiteaWorkflowJobPayload, IssueJob, IssueJobTrigger } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
@@ -35,6 +35,14 @@ export function parseWorkflowJobPayload(rawBody: Uint8Array): GiteaWorkflowJobPa
 
 function workflowJobSender(payload: GiteaWorkflowJobPayload): string {
   return payload.sender?.login || "workflow_job";
+}
+
+function workflowJobTrigger(payload: GiteaWorkflowJobPayload, sender: string): IssueJobTrigger {
+  const id = payload.workflow_job?.id;
+  if (typeof id === "number" && Number.isFinite(id)) {
+    return { event: "workflow_job", sender, workflowJobId: id };
+  }
+  return { event: "workflow_job", sender };
 }
 
 function jobHeadMatches(
@@ -104,7 +112,7 @@ export async function shouldEnqueueWorkflowJobFollowUp(
         mode: "follow-up",
         prNumber: pr.number,
         headSha: pr.head.sha,
-        trigger: { event: "workflow_job", sender },
+        trigger: workflowJobTrigger(payload, sender),
       });
       continue;
     }
@@ -128,7 +136,7 @@ export async function shouldEnqueueWorkflowJobFollowUp(
         mode: "follow-up",
         prNumber: pr.number,
         headSha: pr.head.sha,
-        trigger: { event: "workflow_job", sender },
+        trigger: workflowJobTrigger(payload, sender),
       });
     } catch (err) {
       if (err instanceof Error && /→ 404\b/.test(err.message)) continue;

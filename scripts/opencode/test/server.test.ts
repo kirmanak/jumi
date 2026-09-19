@@ -477,7 +477,7 @@ describe("createFetchHandler router mailbox", () => {
     const { handler, store, logs } = mailboxHandler();
     const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "workflow_job" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ queued: true, keys: ["follow-up:kirmanak/demo#127:headsha"] });
+    expect(await responseJson(response)).toEqual({ queued: true, keys: ["follow-up:kirmanak/demo#127:headsha:99"] });
     expect(store.rows[0]?.kind).toBe("follow-up");
     expect(logs.some((line) => line.includes("queued follow-up:"))).toBe(true);
   });

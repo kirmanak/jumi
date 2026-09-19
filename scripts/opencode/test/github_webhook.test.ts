@@ -25,6 +25,7 @@ import {
   makeRepo,
   makeUser,
   makeWorkerConfig,
+  makeWorkflowJobPayload,
   responseJson,
   signBody,
 } from "./fixtures.ts";
@@ -836,6 +837,66 @@ describe("POST /webhooks/github", () => {
     expect(await responseJson(await handler(await signedGithubRequest({}, { event: "check_run" })))).toEqual({
       skipped: "unsupported event check_run",
     });
+  });
+
+  test("later sibling workflow_job is not same-SHA deduped while the first follow-up is leased", async () => {
+    const store = new MemoryReviewJobStore();
+    const closer = makePR({
+      number: 102,
+      title: "Fix biome",
+      body: "Fixes #81",
+      user: makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" }),
+      html_url: "https://github.com/kirmanak/demo/pull/102",
+      head: {
+        label: "kirmanak:jumi/issue-81-fix-biome",
+        ref: "jumi/issue-81-fix-biome",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [closer],
+          getIssue: async () => githubIssue({ number: 81 }),
+        },
+      },
+    });
+    const jobPayload = (id: number, name: string) =>
+      makeWorkflowJobPayload({
+        repository: githubRepo,
+        workflow_job: {
+          id,
+          name,
+          status: "completed",
+          conclusion: name === "checks" ? "failure" : "success",
+          head_sha: "headsha",
+          head_branch: "jumi/issue-81-fix-biome",
+        },
+      });
+    const first = await handler(await signedGithubRequest(jobPayload(11, "checks"), { event: "workflow_job" }));
+    expect(first.status).toBe(202);
+    expect(await responseJson(first)).toEqual({
+      key: "follow-up:kirmanak/demo#102:headsha:11",
+      queued: true,
+    });
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leased?.state).toBe("leased");
+    const duplicate = await handler(await signedGithubRequest(jobPayload(11, "checks"), { event: "workflow_job" }));
+    expect(await responseJson(duplicate)).toEqual({
+      key: "follow-up:kirmanak/demo#102:headsha:11",
+      queued: false,
+    });
+    const sibling = await handler(await signedGithubRequest(jobPayload(12, "Analyze"), { event: "workflow_job" }));
+    expect(await responseJson(sibling)).toEqual({
+      key: "follow-up:kirmanak/demo#102:headsha:12",
+      queued: true,
+    });
+    await store.markPublished(leased!.id, "worker-1", { state: "skipped", reason: "CI still pending" });
+    expect(store.rows.find((row) => row.jobKey === "follow-up:kirmanak/demo#102:headsha:12")?.state).toBe("queued");
   });
 
   test("Gitea mailbox still accepts Gitea signatures on /webhooks/gitea", async () => {

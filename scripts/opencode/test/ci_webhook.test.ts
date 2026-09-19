@@ -93,7 +93,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     expect(decision.jobs[0]?.issueNumber).toBe(12);
     expect(decision.jobs[0]?.prNumber).toBe(127);
     expect(decision.jobs[0]?.headSha).toBe("headsha");
-    expect(decision.jobs[0]?.trigger).toEqual({ event: "workflow_job", sender: "alice" });
+    expect(decision.jobs[0]?.trigger).toEqual({ event: "workflow_job", sender: "alice", workflowJobId: 99 });
   });
 
   test("matches head branch when sha differs from live PR head", async () => {
