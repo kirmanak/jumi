@@ -1,4 +1,4 @@
-import { type RunnerStamp, runnerStamp } from "./runners.ts";
+import { type RunnerStamp, type RunnerType, runnerStamp } from "./runners.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
 export type TraceKind = "review" | "implement" | "follow-up" | "conflict";
@@ -12,7 +12,7 @@ export interface TraceContext {
 }
 
 export interface EngineRunOptions {
-  type?: "opencode" | "claude";
+  type?: RunnerType;
   model: string;
   variant?: string;
   effort?: string;

@@ -131,6 +131,8 @@ jobs:
           echo "Verified worker env: ${config} ${instance}"
 
           docker run --rm "${TEST_TAG}" claude --version
+
+          docker run --rm "${TEST_TAG}" agy --version
           docker run --rm "${TEST_TAG}" test -f /app/review-skills/gitea-pull-review/SKILL.md
           echo "Verified gitea-pull-review skill"
 

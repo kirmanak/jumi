@@ -1,15 +1,17 @@
-import { rm } from "node:fs/promises";
+import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
-import { CLAUDE_RUNNER_TYPE, type NamedRunner, OPENCODE_RUNNER_TYPE, runnerStamp } from "./runners.ts";
+import { type NamedRunner, OPENCODE_RUNNER_TYPE, runnerStamp, usesEffort } from "./runners.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
+/** Conversation id of the last `agy` child in this worktree; resumed only by the same runner. */
+export const AGY_CONVERSATION_FILE = "agy-conversation-id";
 
 const PROVIDER_UNAVAILABLE_RE =
-  /rate[\s_-]*limit|too many requests|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free|session) limit|overloaded|\b(?:502|503|504)\b|bad gateway|gateway timeout|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model/i;
+  /rate[\s_-]*limit|too many requests|resource[_\s-]*exhausted|out of quota|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free|session) limit|overloaded|\b(?:502|503|504)\b|bad gateway|gateway timeout|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model/i;
 
 export interface ModelHopOptions {
   fallbackModel?: string;
@@ -57,8 +59,25 @@ export function openCodeLogDirPath(workdir: string): string {
   return join(workdir, ".jumi-tmp", "xdg-data", "opencode", "log");
 }
 
+export function agyConversationPath(workdir: string): string {
+  return join(workdir, ".jumi-tmp", AGY_CONVERSATION_FILE);
+}
+
+async function pathIsFile(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export async function hasResumableSession(workdir: string): Promise<boolean> {
+  return (await pathIsFile(openCodeSessionDbPath(workdir))) || (await pathIsFile(agyConversationPath(workdir)));
+}
+
 export async function clearOpenCodeSession(workdir: string): Promise<void> {
   await rm(openCodeSessionDbPath(workdir), { force: true });
+  await rm(agyConversationPath(workdir), { force: true });
   await rm(openCodeLogDirPath(workdir), { recursive: true, force: true });
 }
 
@@ -129,10 +148,19 @@ function engineOptsForRunner(
   runner: NamedRunner,
   extra?: Partial<EngineRunOptions>
 ): EngineRunOptions {
-  const fields: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort"> =
-    runner.type === CLAUDE_RUNNER_TYPE
-      ? { type: CLAUDE_RUNNER_TYPE, model: runner.model, effort: runner.effort, variant: undefined }
-      : { type: OPENCODE_RUNNER_TYPE, model: runner.model, variant: runner.variant, effort: undefined };
+  const fields: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort"> = usesEffort(runner.type)
+    ? {
+        type: runner.type,
+        model: runner.model,
+        effort: "effort" in runner ? runner.effort : undefined,
+        variant: undefined,
+      }
+    : {
+        type: runner.type,
+        model: runner.model,
+        variant: "variant" in runner ? runner.variant : undefined,
+        effort: undefined,
+      };
   return { ...opts, ...fields, ...extra };
 }
 

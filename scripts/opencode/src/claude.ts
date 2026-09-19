@@ -27,7 +27,7 @@ const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET"]);
 const CLAUDE_USAGE_LIMIT_RE =
   /You've hit your (?:session |usage |weekly |opus |sonnet |5[- ]hour )?limit|Claude AI usage limit reached/i;
 
-function stripAnsi(str: string): string {
+export function stripAnsi(str: string): string {
   return str.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`, "g"), "");
 }
 
@@ -78,7 +78,7 @@ function retainChunk(
   }
 }
 
-async function readStreamLimited(
+export async function readStreamLimited(
   stream: ReadableStream<Uint8Array>,
   label: string,
   maxBytes?: number,
@@ -116,7 +116,7 @@ async function readStreamLimited(
   return { text: output, totalBytes };
 }
 
-function limitText(text: string, label: string, maxBytes?: number): { text: string; totalBytes: number } {
+export function limitText(text: string, label: string, maxBytes?: number): { text: string; totalBytes: number } {
   const bytes = new TextEncoder().encode(text);
   if (!maxBytes || maxBytes <= 0 || bytes.byteLength <= maxBytes) return { text, totalBytes: bytes.byteLength };
   const head = new TextDecoder().decode(bytes.slice(0, maxBytes));
@@ -137,7 +137,7 @@ async function readClaudeStdout(stream: ReadableStream<Uint8Array>, parser: Clau
   }
 }
 
-function scrubbedKey(key: string): boolean {
+export function scrubbedKey(key: string): boolean {
   if (SCRUB_ENV_KEYS.has(key)) return true;
   return SCRUB_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }

@@ -1156,7 +1156,10 @@ export async function implementFollowUp(
       runner = undefined;
       await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
 
-      const runEngine = async (label: string): Promise<{ status: "skipped"; reason: string } | undefined> => {
+      const runEngine = async (
+        label: string,
+        extra?: { continueSession?: boolean }
+      ): Promise<{ status: "skipped"; reason: string } | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
         followUpEngineRan = true;
@@ -1177,6 +1180,7 @@ export async function implementFollowUp(
             sha: pr.head.sha,
             jobId: opts.jobId ?? opts.job.delivery,
           },
+          ...(extra?.continueSession ? { continueSession: true } : {}),
           logger: log,
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
@@ -1220,7 +1224,8 @@ export async function implementFollowUp(
           continueOpenCode: async (issue) => {
             await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
             const quotaContinued = await runEngine(
-              `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`
+              `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
+              { continueSession: true }
             );
             if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
           },

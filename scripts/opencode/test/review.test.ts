@@ -730,6 +730,33 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("incomplete extras resume an agy conversation id with a write-only prompt", async () => {
+    await withWorkspace(async (workspace) => {
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi(),
+        openCodeRunner: async (opts) => {
+          ran++;
+          const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
+          if (ran === 1) {
+            expect(opts.continueSession).toBeFalsy();
+            await mkdir(join(workspace, ".jumi-tmp"), { recursive: true });
+            await writeFile(join(workspace, ".jumi-tmp", "agy-conversation-id"), "conv-123\n");
+            return { status: "ok", stdout: "I'll inspect and dump the review here" };
+          }
+          expect(opts.continueSession).toBe(true);
+          expect(task).toContain("Write JUMI_REVIEW.md");
+          expect(task).not.toContain("I'll inspect");
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(2);
+      expect(result).toEqual({ status: "posted" });
+    });
+  });
+
   test("incomplete extras keep the session DB and continue with a write-only prompt", async () => {
     await withWorkspace(async (workspace) => {
       const comments: string[] = [];

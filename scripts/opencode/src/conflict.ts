@@ -709,6 +709,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               timeoutMs,
               maxOutputBytes: opts.maxOutputBytes,
               reviewLabel: `${owner}/${repo}#${issueNumber}`,
+              continueSession: true,
               trace: {
                 kind: "follow-up",
                 owner,
