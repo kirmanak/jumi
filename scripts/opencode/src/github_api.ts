@@ -1001,10 +1001,15 @@ export class GithubAPI {
     return checks;
   }
 
-  async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]> {
+  async listActionJobs(
+    owner: string,
+    repo: string,
+    opts?: { status?: string; headSha?: string }
+  ): Promise<ActionJob[]> {
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
+    const shaQ = opts?.headSha ? `&head_sha=${encodeURIComponent(opts.headSha)}` : "";
     const body = await this.get<{ workflow_runs?: GithubWorkflowRun[] }>(
-      `/repos/${this.repoPath(owner, repo)}/actions/runs?per_page=${PAGE_SIZE}&page=1${statusQ}`
+      `/repos/${this.repoPath(owner, repo)}/actions/runs?per_page=${PAGE_SIZE}&page=1${statusQ}${shaQ}`
     );
     const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
     const jobs: ActionJob[] = [];

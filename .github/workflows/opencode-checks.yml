@@ -76,6 +76,7 @@ jobs:
           docker run --rm jumi-reviewer:ci python3 --version
           docker run --rm jumi-reviewer:ci helm version --short
           docker run --rm jumi-reviewer:ci claude --version
+          docker run --rm jumi-reviewer:ci agy --version
           docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-reviewer:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
@@ -118,6 +119,7 @@ jobs:
           printf '%s\n' "$java_version" | grep -E 'version "21(\.|$)'
           printf '%s\n' "$java_version" | grep -F Temurin
           docker run --rm jumi-worker:ci claude --version
+          docker run --rm jumi-worker:ci agy --version
           docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-worker:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null

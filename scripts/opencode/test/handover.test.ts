@@ -4,7 +4,16 @@ import { enqueueFollowUpFromReview, shouldHandoverFollowUp, TOO_MANY_FOLLOWUP_RO
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { stuckMarker } from "../src/stuck.ts";
-import { makeComment, makeIssue, makeIssueJob, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import {
+  emptyCiMethods,
+  makeComment,
+  makeIssue,
+  makeIssueJob,
+  makeJob,
+  makePR,
+  makeRepo,
+  makeUser,
+} from "./fixtures.ts";
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: string[] } {
   const comments: string[] = [];
@@ -37,6 +46,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: st
     unresolvePullComment: async () => undefined,
     dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments };
 }

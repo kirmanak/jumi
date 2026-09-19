@@ -475,6 +475,19 @@ describe("PgReviewJobStore.enqueue", () => {
     expect(queries.some((query) => query.includes("INSERT"))).toBe(true);
   });
 
+  test("same-key leased inflight sets rewake_requested instead of inserting", async () => {
+    const { sql, queries } = recordingSql({
+      inflightRows: [{ job_key: "kirmanak/demo#7:headsha", pr_updated_at: null }],
+    });
+    const store = new PgReviewJobStore(sql);
+    expect(await store.enqueue(makeJob())).toEqual({
+      key: "kirmanak/demo#7:headsha",
+      queued: false,
+    });
+    expect(queries.some((query) => query.includes("rewake_requested = TRUE"))).toBe(true);
+    expect(queries.some((query) => query.includes("INSERT"))).toBe(false);
+  });
+
   test("locks inflight rows FOR UPDATE in id order", async () => {
     const { sql, queries } = recordingSql();
     const store = new PgReviewJobStore(sql);
@@ -591,6 +604,7 @@ describe("PgReviewJobStore saveResult and markPublished", () => {
     expect(queries.some((query) => query.includes("leased_by = $2") && query.includes("state = 'leased'"))).toBe(true);
     await expect(store.markPublished(1, "engine-1", { state: "succeeded" })).rejects.toThrow("cannot mark published");
     expect(queries.some((query) => query.includes("leased_by = $2") && query.includes("state = 'leased'"))).toBe(true);
+    expect(queries.some((query) => query.includes("rewake_requested"))).toBe(true);
   });
 });
 

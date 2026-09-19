@@ -899,6 +899,54 @@ describe("POST /webhooks/github", () => {
     expect(store.rows.find((row) => row.jobKey === "follow-up:kirmanak/demo#102:headsha:12")?.state).toBe("queued");
   });
 
+  test("workflow_job enqueues review when the PR is not in-scope for follow-up", async () => {
+    const store = new MemoryReviewJobStore();
+    const human = makePR({
+      number: 55,
+      title: "Add feature",
+      body: "please review",
+      user: makeUser({ login: "alice", type: "User" }),
+      html_url: "https://github.com/kirmanak/demo/pull/55",
+      head: {
+        label: "kirmanak:feature",
+        ref: "feature",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [human],
+          getIssue: async () => githubIssue(),
+        },
+      },
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        makeWorkflowJobPayload({
+          repository: githubRepo,
+          workflow_job: {
+            id: 11,
+            name: "checks",
+            status: "completed",
+            conclusion: "success",
+            head_sha: "headsha",
+            head_branch: "feature",
+          },
+        }),
+        { event: "workflow_job" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#55:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "review")?.state).toBe("queued");
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+  });
+
   test("Gitea mailbox still accepts Gitea signatures on /webhooks/gitea", async () => {
     const queue = makeReviewQueue();
     const handler = createFetchHandler(makeConfig(), { queue });

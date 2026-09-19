@@ -1,6 +1,12 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
-import { extractClosingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
-import type { GiteaWorkflowJobPayload, IssueJob, IssueJobTrigger } from "./types.ts";
+import {
+  extractClosingIssueNumber,
+  type IssueApi,
+  isAssignedForeignPR,
+  isInScopeJumiPR,
+  isWipOrDraft,
+} from "./gitea_issues.ts";
+import type { GiteaWorkflowJobPayload, IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
@@ -145,5 +151,53 @@ export async function shouldEnqueueWorkflowJobFollowUp(
   }
 
   if (jobs.length === 0) return { type: "skip", reason: "not an in-scope jumi pull request" };
+  return { type: "enqueue", jobs };
+}
+
+export type CiReviewWebhookDecision =
+  | { type: "enqueue"; jobs: Omit<ReviewJob, "delivery" | "receivedAt">[] }
+  | { type: "skip"; reason: string };
+
+export async function shouldEnqueueWorkflowJobReview(
+  payload: GiteaWorkflowJobPayload,
+  policy: WebhookPolicy,
+  api: Pick<IssueApi, "listOpenPulls">,
+  logger?: (message: string) => void
+): Promise<CiReviewWebhookDecision> {
+  let owner: string;
+  let repo: string;
+  try {
+    ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
+  } catch (err) {
+    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    return { type: "skip", reason: "repository not allowed" };
+  }
+
+  if (!isWorkflowJobCompleted(payload)) {
+    return { type: "skip", reason: workflowJobNotCompletedReason(payload) };
+  }
+
+  const job = payload.workflow_job;
+  if (!job || (!job.head_sha && !job.head_branch)) {
+    return { type: "skip", reason: "no matching pull request" };
+  }
+
+  const pulls = await api.listOpenPulls(owner, repo);
+  const jobs: Omit<ReviewJob, "delivery" | "receivedAt">[] = [];
+  for (const pr of pulls) {
+    if (!jobHeadMatches(pr.head.sha, pr.head.ref, job)) continue;
+    if (pr.state !== "open" || pr.merged) continue;
+    if (isWipOrDraft(pr)) continue;
+    if (!pr.head?.sha) continue;
+    jobs.push({
+      owner,
+      repo,
+      prNumber: pr.number,
+      action: payload.action || "completed",
+      headSha: pr.head.sha,
+      prUpdatedAt: pr.updated_at,
+    });
+  }
+  if (jobs.length === 0) return { type: "skip", reason: "no matching pull request" };
   return { type: "enqueue", jobs };
 }

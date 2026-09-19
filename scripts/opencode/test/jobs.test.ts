@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CI_LOOKUP_RETRY_MS } from "../src/ci.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, REVIEW_KIND, WORKER_JOB_KINDS, workerJobKey } from "../src/review_jobs.ts";
@@ -51,6 +52,7 @@ function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { commen
     unresolvePullComment: async () => undefined,
     dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
+    ...emptyCiMethods(),
   };
   return { ...defaults, ...overrides, comments };
 }
@@ -102,6 +104,89 @@ describe("job envelope kinds", () => {
     });
     expect(store.rows.find((row) => row.headSha === "old")?.state).toBe("cancelled");
     expect(store.rows.find((row) => row.headSha === "new")?.state).toBe("queued");
+  });
+
+  test("CI pending skip can re-enqueue the same review SHA", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI still pending" });
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+  });
+
+  test("same-SHA wake during a leased CI-pending review requeues it instead of dropping it", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI still pending" });
+    const row = store.rows.find((item) => item.id === leased!.id);
+    expect(row?.state).toBe("queued");
+    expect(row?.resultReason).toBeNull();
+    expect(row?.rewakeRequested).toBe(false);
+    const again = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    expect(again?.id).toBe(leased!.id);
+    await store.markPublished(again!.id, "engine-1", { state: "skipped", reason: "CI still pending" });
+    expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("skipped");
+  });
+
+  test("same-SHA wake during a leased CI-failed skip requeues it", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.enqueue(job);
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI failed" });
+    expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("queued");
+  });
+
+  test("same-SHA wake during a leased CI-lookup skip requeues it", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.enqueue(job);
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI lookup failed" });
+    const row = store.rows.find((item) => item.id === leased!.id);
+    expect(row?.state).toBe("queued");
+    expect(row?.leasedUntil).toBeNull();
+  });
+
+  test("CI lookup skip requeues with backoff when no wake arrived", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    const before = Date.now();
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI lookup failed" });
+    const row = store.rows.find((item) => item.id === leased!.id);
+    expect(row?.state).toBe("queued");
+    expect(row?.resultReason).toBeNull();
+    expect(row?.leasedUntil).toBeGreaterThanOrEqual(before + CI_LOOKUP_RETRY_MS);
+    expect(await store.lease("engine-1", 60_000, new Date(before), [REVIEW_KIND])).toBeUndefined();
+    const again = await store.lease("engine-1", 60_000, new Date((row?.leasedUntil ?? 0) + 1), [REVIEW_KIND]);
+    expect(again?.id).toBe(leased!.id);
+  });
+
+  test("same-SHA wake during a leased review does not requeue a finished review", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.enqueue(job);
+    await store.markPublished(leased!.id, "engine-1", { state: "succeeded" });
+    expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("succeeded");
+  });
+
+  test("succeeded review is not re-enqueued for the same SHA", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.markPublished(leased!.id, "engine-1", { state: "succeeded" });
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
   });
 
   test("review enqueue does not cancel a queued follow-up", async () => {

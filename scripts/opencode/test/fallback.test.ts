@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Engine, EngineFailedError, type EngineResult } from "../src/engine.ts";
 import {
+  agyConversationPath,
   clearOpenCodeSession,
+  hasResumableSession,
   isProviderUnavailableResult,
   looksLikeProviderUnavailable,
   openCodeLogDirPath,
@@ -707,6 +709,23 @@ describe("withEngineChain", () => {
     });
     expect(isProviderUnavailableResult(result)).toBe(true);
     expect(models).toEqual([spark.model, grok.model]);
+  });
+});
+
+describe("hasResumableSession", () => {
+  test("is true for OpenCode sqlite or an agy conversation id", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-resume-"));
+    try {
+      expect(await hasResumableSession(dir)).toBe(false);
+      await mkdir(join(dir, ".jumi-tmp"), { recursive: true });
+      await writeFile(agyConversationPath(dir), "conv-123\n");
+      expect(await hasResumableSession(dir)).toBe(true);
+      await rm(agyConversationPath(dir), { force: true });
+      await writeFile(openCodeSessionDbPath(dir), "db");
+      expect(await hasResumableSession(dir)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

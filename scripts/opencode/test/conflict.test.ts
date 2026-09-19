@@ -425,6 +425,7 @@ describe("implementConflict", () => {
         openCodeRunner: async (opts) => {
           kinds.push(opts.trace?.kind ?? "");
           expect("prompt" in opts).toBe(false);
+          expect(opts.continueSession).toBe(kinds.length === 2 ? true : undefined);
           return { status: "ok" };
         },
         logger: () => undefined,

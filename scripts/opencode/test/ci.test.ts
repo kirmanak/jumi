@@ -3,7 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  actionJobCheckState,
   buildCiMarkdown,
+  CI_FAILED_REASON,
+  CI_LOOKUP_FAILED_REASON,
   capFailedJobLog,
   classifyInfraFlake,
   dropUnpackNoise,
@@ -16,6 +19,7 @@ import {
   latestStatuses,
   needsCiFollowUp,
   recordCiHandled,
+  reviewSkipReasonForCi,
 } from "../src/ci.ts";
 import { followUpStatePath } from "../src/claim.ts";
 import { writeFollowUpState } from "../src/followup.ts";
@@ -268,6 +272,247 @@ describe("inspectCi", () => {
       });
       expect(inspection.pending).toBe(true);
       expect(inspection.failed.map((c) => c.name)).toEqual(["build"]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("treats in-progress Actions jobs as pending when statuses have not appeared", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", status: "in_progress" }],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(true);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("treats completed failed Actions jobs as red when statuses have not appeared", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
+          ],
+          getActionJobLogs: async () => "##[error]boom\n",
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed.map((c) => c.name)).toEqual(["build"]);
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_FAILED_REASON);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("treats live failed jobs as red even when a matching forge status is still green", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "success" }],
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
+          ],
+          getActionJobLogs: async () => "##[error]boom\n",
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed.map((c) => c.name)).toEqual(["ci.yml / build (pull_request)"]);
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_FAILED_REASON);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("completed live success clears a lagging pending forge status", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [
+            { id: 1, context: "ci.yml / build (pull_request)", status: "pending" },
+            { id: 2, context: "codecov", status: "success" },
+          ],
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "success" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.failed).toEqual([]);
+      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("green rerun clears a stale failed forge status", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "failure" }],
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
+            { id: 12, name: "build", head_sha: "headsha", status: "completed", conclusion: "success" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.failed).toEqual([]);
+      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("unmatched pending forge context still keeps CI pending", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "codecov", status: "pending" }],
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "success" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a thrown forge list call is lookupFailed, not empty success", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      let listed: { headSha?: string } | undefined;
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async (_owner, _repo, opts) => {
+            listed = opts;
+            throw new Error("rate limited");
+          },
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(listed).toEqual({ headSha: "headsha" });
+      expect(inspection.empty).toBe(true);
+      expect(inspection.lookupFailed).toBe(true);
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_LOOKUP_FAILED_REASON);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("terminal forge checks proceed when listing jobs throws", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
+          listActionJobs: async () => {
+            throw new Error("rate limited");
+          },
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.empty).toBe(false);
+      expect(inspection.lookupFailed).toBe(true);
+      expect(inspection.pending).toBe(false);
+      expect(inspection.failed).toEqual([]);
+      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("no other checks and no matching jobs is empty", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi(),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(true);
+      expect(inspection.failed).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("skipped completed jobs are not pending or red", async () => {
+    expect(actionJobCheckState({ id: 1, name: "build", status: "completed", conclusion: "skipped" })).toBe("success");
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listActionJobs: async () => [
+            { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "skipped" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.empty).toBe(false);
+      expect(inspection.failed).toEqual([]);
     } finally {
       await rm(home, { recursive: true, force: true });
     }

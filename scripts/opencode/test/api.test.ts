@@ -520,8 +520,29 @@ describe("GiteaAPI", () => {
     ]);
     await expect(api.getActionJobLogs("owner", "repo", 9)).resolves.toBe("##[error]boom\n");
     expect(urls[0]).toContain("/commits/sha%2F1/statuses");
-    expect(urls[1]).toContain("/actions/jobs?limit=50&page=1&status=failure");
+    expect(urls[1]).toContain("/actions/jobs?limit=50&page=1&order=desc&status=failure");
     expect(urls[2]).toContain("/actions/jobs/9/logs");
+  });
+
+  test("lists action jobs newest-first and filters head_sha client-side", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json({
+        jobs: [
+          { id: 12, name: "build", head_sha: "abc/def" },
+          { id: 11, name: "other", head_sha: "ffff" },
+        ],
+        total_count: 2,
+      });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listActionJobs("owner", "repo", { headSha: "abc/def" })).resolves.toEqual([
+      { id: 12, name: "build", head_sha: "abc/def" },
+    ]);
+    expect(urls[0]).toContain("/actions/jobs?limit=50&page=1&order=desc");
+    expect(urls[0]).not.toContain("head_sha");
   });
 
   test("throws useful errors for non-2xx responses", async () => {

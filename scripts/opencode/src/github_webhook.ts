@@ -1,5 +1,9 @@
 import { hasLabel, type IssueAssignees, type PickupPolicy } from "./assignee.ts";
-import { parseWorkflowJobPayload, shouldEnqueueWorkflowJobFollowUp } from "./ci_webhook.ts";
+import {
+  parseWorkflowJobPayload,
+  shouldEnqueueWorkflowJobFollowUp,
+  shouldEnqueueWorkflowJobReview,
+} from "./ci_webhook.ts";
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
@@ -397,11 +401,26 @@ export async function handleGithubWebhookEvent(
       } catch {
         return skipped("malformed workflow_job payload", logger);
       }
-      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.worker.api, logger);
-      if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
-      const jobs: IssueJob[] = decision.jobs.map((partial) => ({ ...partial, delivery, receivedAt }));
-      return enqueueJobs(jobs, deps.worker.queue, delivery, logger);
+      const decision = await shouldEnqueueWorkflowJobFollowUp(payload, policy, deps.worker.api, logger);
+      const reviewResults: EnqueueResult[] = [];
+      if (deps.review) {
+        const reviewDecision = await shouldEnqueueWorkflowJobReview(payload, policy, deps.worker.api, logger);
+        if (reviewDecision.type === "enqueue") {
+          for (const partial of reviewDecision.jobs) {
+            const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+            reviewResults.push(result);
+            logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+          }
+        }
+      }
+      if (decision.type === "enqueue") {
+        const jobs: IssueJob[] = decision.jobs.map((partial) => ({ ...partial, delivery, receivedAt }));
+        return enqueueJobs(jobs, deps.worker.queue, delivery, logger);
+      }
+      if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
+      if (reviewResults.length > 1) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      return skipped(decision.reason, logger);
     }
 
     if (event === "push") {

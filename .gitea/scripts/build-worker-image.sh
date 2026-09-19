@@ -144,7 +144,12 @@ verify_worker_skills() {
     echo "claude missing in worker image" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude, and opencode debug config"
+  if ! buildah run "${ctr}" -- agy --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "agy missing in worker image" >&2
+    exit 1
+  fi
+  echo "Verified gitea-pull-review skill, claude, agy, and opencode debug config"
   buildah rm "${ctr}" >/dev/null
 }
 

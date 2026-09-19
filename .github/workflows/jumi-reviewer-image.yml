@@ -123,6 +123,7 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" python3 --version
           docker run --rm "${IMAGE}:${VERSION}" helm version --short
           docker run --rm "${IMAGE}:${VERSION}" claude --version
+          docker run --rm "${IMAGE}:${VERSION}" agy --version
           docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/gitops-apply-review/SKILL.md
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}:${VERSION}" sh -c 'cd /work && git init -q && opencode debug config')"
           printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null

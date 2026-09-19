@@ -331,7 +331,8 @@ export async function implementIssue(
       const runEngine = async (
         label: string,
         kind: "implement" | "follow-up" = "implement",
-        prompt?: string
+        prompt?: string,
+        extra?: { continueSession?: boolean }
       ): Promise<ImplementResult | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
@@ -353,6 +354,7 @@ export async function implementIssue(
             jobId: opts.jobId ?? opts.job.delivery,
           },
           ...(prompt != null ? { prompt } : {}),
+          ...(extra?.continueSession ? { continueSession: true } : {}),
           logger: log,
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
@@ -497,7 +499,9 @@ export async function implementIssue(
             await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
             const quotaContinued = await runEngine(
               `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
-              "follow-up"
+              "follow-up",
+              undefined,
+              { continueSession: true }
             );
             if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
           },

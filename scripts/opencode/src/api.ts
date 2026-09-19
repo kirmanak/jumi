@@ -575,16 +575,24 @@ export class GiteaAPI {
     return [];
   }
 
-  async listActionJobs(owner: string, repo: string, opts?: { status?: string }): Promise<ActionJob[]> {
+  async listActionJobs(
+    owner: string,
+    repo: string,
+    opts?: { status?: string; headSha?: string }
+  ): Promise<ActionJob[]> {
     const results: ActionJob[] = [];
     let page = 1;
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
+    const needle = opts?.headSha?.toLowerCase();
     while (page <= 40) {
       const body = await this.get<{ jobs?: GiteaActionJob[] }>(
-        `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}${statusQ}`
+        `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}&order=desc${statusQ}`
       );
       const batch = Array.isArray(body?.jobs) ? body.jobs : [];
-      results.push(...batch.map(toActionJob));
+      for (const job of batch) {
+        if (needle && (job.head_sha ?? "").toLowerCase() !== needle) continue;
+        results.push(toActionJob(job));
+      }
       if (batch.length !== 50) break;
       page += 1;
     }
