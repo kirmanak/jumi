@@ -810,7 +810,11 @@ export class GithubAPI {
     while (page <= MAX_PAGES) {
       const batch = await this.get<GithubComment[]>(`${path}?per_page=${PAGE_SIZE}&page=${page}`);
       for (const comment of batch) {
-        if (comment.user?.login === botUsername && typeof comment.body === "string" && comment.body.includes(marker)) {
+        if (
+          loginEquals(comment.user?.login, botUsername) &&
+          typeof comment.body === "string" &&
+          comment.body.includes(marker)
+        ) {
           return { id: comment.id };
         }
       }
