@@ -116,10 +116,7 @@ export function agyArgv(opts: EngineRunOptions, prompt: string, conversationId?:
   if (opts.effort) args.push("--effort", opts.effort);
   const printTimeout = agyPrintTimeout(opts.timeoutMs);
   if (printTimeout) args.push("--print-timeout", printTimeout);
-  if (opts.continueSession) {
-    if (conversationId) args.push("--conversation", conversationId);
-    else args.push("--continue");
-  }
+  if (opts.continueSession && conversationId) args.push("--conversation", conversationId);
   return args;
 }
 

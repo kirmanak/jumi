@@ -115,10 +115,10 @@ describe("agyArgv", () => {
     expect(AGY_OUTPUT_FORMAT).toBe("stream-json");
   });
 
-  test("resumes a known conversation by id, else --continue, and only on continueSession", () => {
+  test("resumes a known conversation by id only, never --continue", () => {
     expect(agyArgv({ model: "m", workdir: "/w" }, "p", "conv-1")).not.toContain("--conversation");
     expect(agyArgv({ model: "m", workdir: "/w" }, "p", "conv-1")).not.toContain("--continue");
-    expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p")).toContain("--continue");
+    expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p")).not.toContain("--continue");
     expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p")).not.toContain("--conversation");
     expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p", "conv-1").slice(-2)).toEqual([
       "--conversation",
@@ -673,6 +673,22 @@ describe("agy dispatch and chain", () => {
     );
   });
 
+  test("continueSession without a worktree conversation id is a fresh run, never --continue", async () => {
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${SUCCESS_RESULT}'`) }, async ({ workdir, argsLog }) => {
+      await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+        continueSession: true,
+      });
+      const [line] = await argLines(argsLog);
+      expect(line).not.toContain("--continue");
+      expect(line).not.toContain("--conversation");
+    });
+  });
+
   test("same-runner extras resume the agy conversation", async () => {
     await withFakeBins(
       {
@@ -689,7 +705,9 @@ describe("agy dispatch and chain", () => {
         const lines = await argLines(argsLog);
         expect(lines.map((line) => line.split(" ")[0])).toEqual(["agy", "agy"]);
         expect(lines[0]).not.toContain("--conversation");
+        expect(lines[0]).not.toContain("--continue");
         expect(lines[1]).toContain("--conversation conv-123");
+        expect(lines[1]).not.toContain("--continue");
       }
     );
   });
