@@ -40,6 +40,30 @@ describe("parseRunnersCatalog", () => {
     });
   });
 
+  test("registers type agy with model and optional effort", () => {
+    expect(
+      parseRunnersCatalog({
+        runners: {
+          agy: { type: "agy", model: "gemini-3-pro", effort: "high", variant: "ignored" },
+          grok: { type: "opencode", model: "opencode/grok-4.6" },
+        },
+        chain: ["agy", "grok"],
+      })
+    ).toEqual({
+      runners: {
+        agy: { type: "agy", model: "gemini-3-pro", effort: "high" },
+        grok: { type: "opencode", model: "opencode/grok-4.6" },
+      },
+      chain: ["agy", "grok"],
+    });
+    expect(() => parseRunnersCatalog({ runners: { a: { type: "agy", model: "m", effort: 3 } }, chain: ["a"] })).toThrow(
+      "invalid effort"
+    );
+    expect(formatRunnerStamp(runnerStamp({ type: "agy", model: "gemini-3-pro", effort: "high" }))).toBe(
+      "_Jumi · agy · gemini-3-pro (high)_"
+    );
+  });
+
   test("empty chain, missing runner, and duplicate chain fail closed", () => {
     expect(() => parseRunnersCatalog({ runners: { a: { type: "opencode", model: "a/b" } }, chain: [] })).toThrow(
       "chain must not be empty"

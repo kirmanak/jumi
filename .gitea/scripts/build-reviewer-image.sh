@@ -120,7 +120,12 @@ verify_reviewer_runtime() {
     echo "claude missing in reviewer image" >&2
     exit 1
   fi
-  echo "Verified python3, helm, claude, gitops-apply-review skill, and opencode debug config"
+  if ! buildah run "${ctr}" -- agy --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "agy missing in reviewer image" >&2
+    exit 1
+  fi
+  echo "Verified python3, helm, claude, agy, gitops-apply-review skill, and opencode debug config"
   buildah rm "${ctr}" >/dev/null
 }
 

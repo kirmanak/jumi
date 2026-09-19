@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
 export const OPENCODE_RUNNER_TYPE = "opencode";
 export const CLAUDE_RUNNER_TYPE = "claude";
+export const AGY_RUNNER_TYPE = "agy";
 export const SYNTHESIZED_PRIMARY = "primary";
 export const SYNTHESIZED_FALLBACK = "fallback";
 
@@ -18,7 +19,19 @@ export interface ClaudeRunnerConfig {
   effort?: string;
 }
 
-export type RunnerConfig = OpenCodeRunnerConfig | ClaudeRunnerConfig;
+export interface AgyRunnerConfig {
+  type: typeof AGY_RUNNER_TYPE;
+  model: string;
+  effort?: string;
+}
+
+export type RunnerConfig = OpenCodeRunnerConfig | ClaudeRunnerConfig | AgyRunnerConfig;
+export type RunnerType = RunnerConfig["type"];
+
+/** First-party CLI runners that take `effort` rather than OpenCode's `variant`. */
+export function usesEffort(type: string | undefined): type is typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE {
+  return type === CLAUDE_RUNNER_TYPE || type === AGY_RUNNER_TYPE;
+}
 
 export type NamedRunner = RunnerConfig & { name: string };
 
@@ -46,8 +59,12 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
-function claudeRunner(model: string, effort?: string): ClaudeRunnerConfig {
-  return effort ? { type: CLAUDE_RUNNER_TYPE, model, effort } : { type: CLAUDE_RUNNER_TYPE, model };
+function effortRunner(
+  type: typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE,
+  model: string,
+  effort?: string
+): ClaudeRunnerConfig | AgyRunnerConfig {
+  return effort ? { type, model, effort } : { type, model };
 }
 
 function parseRunner(name: string, spec: unknown): RunnerConfig {
@@ -62,12 +79,16 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
     }
     return opencodeRunner(spec.model, typeof variant === "string" && variant ? variant : undefined);
   }
-  if (spec.type === CLAUDE_RUNNER_TYPE) {
+  if (usesEffort(spec.type as string | undefined)) {
     const effort = spec.effort;
     if (effort != null && typeof effort !== "string") {
       fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid effort`);
     }
-    return claudeRunner(spec.model, typeof effort === "string" && effort ? effort : undefined);
+    return effortRunner(
+      spec.type as typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE,
+      spec.model,
+      typeof effort === "string" && effort ? effort : undefined
+    );
   }
   fail(`Unknown runner type: ${String(spec.type)}`);
 }
@@ -152,9 +173,9 @@ export interface RunnerStamp {
 
 export function runnerStamp(runner: { type?: string; model: string; variant?: string; effort?: string }): RunnerStamp {
   const type = runner.type ?? OPENCODE_RUNNER_TYPE;
-  const level = type === CLAUDE_RUNNER_TYPE ? runner.effort : runner.variant;
+  const level = usesEffort(type) ? runner.effort : runner.variant;
   if (!level) return { type, model: runner.model };
-  return type === CLAUDE_RUNNER_TYPE
+  return usesEffort(type)
     ? { type, model: runner.model, effort: level }
     : { type, model: runner.model, variant: level };
 }
