@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AgyStreamParser } from "./agy_usage.ts";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
@@ -28,9 +28,33 @@ export const AGY_ARGV_PROMPT_MAX_BYTES = 96_000;
 export const AGY_SETTINGS_DIR = join(".gemini", "antigravity-cli");
 /** Only seeded when absent: never overwrite a logged-in settings file. */
 export const AGY_SEED_SETTINGS = { enableTelemetry: false, useG1Credits: false } as const;
+const AGY_PROJECT_AGENT_NAMES = [".agents", ".agent"] as const;
 
 const AGY_STDERR_MAX_BYTES = 64_000;
 const AGY_AUTH_RE = /Please sign in|authentication required/i;
+
+function isEnoent(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
+}
+
+async function stashAgyProjectAgents(workdir: string, stashRoot: string): Promise<string[]> {
+  const moved: string[] = [];
+  for (const name of AGY_PROJECT_AGENT_NAMES) {
+    try {
+      await rename(join(workdir, name), join(stashRoot, name));
+      moved.push(name);
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+  }
+  return moved;
+}
+
+async function restoreAgyProjectAgents(workdir: string, stashRoot: string, moved: string[]): Promise<void> {
+  for (const name of moved) {
+    await rename(join(stashRoot, name), join(workdir, name)).catch(() => {});
+  }
+}
 
 function agyEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string> {
   if (!opts.sanitizeEnv) {
@@ -92,8 +116,10 @@ export function agyArgv(opts: EngineRunOptions, prompt: string, conversationId?:
   if (opts.effort) args.push("--effort", opts.effort);
   const printTimeout = agyPrintTimeout(opts.timeoutMs);
   if (printTimeout) args.push("--print-timeout", printTimeout);
-  // Resume only this runner's own conversation; a hop clears the id file.
-  if (opts.continueSession && conversationId) args.push("--conversation", conversationId);
+  if (opts.continueSession) {
+    if (conversationId) args.push("--conversation", conversationId);
+    else args.push("--continue");
+  }
   return args;
 }
 
@@ -154,6 +180,8 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
 
   const tmpDir = await mkdtemp(join(tempRoot, "agy-prompt-"));
   const startedAtMs = Date.now();
+  const stashRoot = join(tmpDir, "project-agents");
+  let movedAgents: string[] = [];
 
   if (opts.abortSignal?.aborted) {
     await rm(tmpDir, { recursive: true, force: true });
@@ -171,6 +199,10 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     await seedAgySettings(env.HOME);
     const conversationId = opts.continueSession ? await readConversationId(opts.workdir) : undefined;
     const args = agyArgv(opts, promptArg, conversationId);
+    if (opts.trace?.kind === "review") {
+      await mkdir(stashRoot, { recursive: true });
+      movedAgents = await stashAgyProjectAgents(opts.workdir, stashRoot);
+    }
     const proc = (() => {
       try {
         return Bun.spawn(args, {
@@ -318,6 +350,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
   } finally {
+    await restoreAgyProjectAgents(opts.workdir, stashRoot, movedAgents);
     await rm(tmpDir, { recursive: true, force: true });
   }
 }

@@ -4,7 +4,7 @@ import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
-import { type NamedRunner, OPENCODE_RUNNER_TYPE, runnerStamp } from "./runners.ts";
+import { type NamedRunner, OPENCODE_RUNNER_TYPE, runnerStamp, usesEffort } from "./runners.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 /** Conversation id of the last `agy` child in this worktree; resumed only by the same runner. */
@@ -148,10 +148,19 @@ function engineOptsForRunner(
   runner: NamedRunner,
   extra?: Partial<EngineRunOptions>
 ): EngineRunOptions {
-  const fields: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort"> =
-    runner.type !== OPENCODE_RUNNER_TYPE
-      ? { type: runner.type, model: runner.model, effort: runner.effort, variant: undefined }
-      : { type: OPENCODE_RUNNER_TYPE, model: runner.model, variant: runner.variant, effort: undefined };
+  const fields: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort"> = usesEffort(runner.type)
+    ? {
+        type: runner.type,
+        model: runner.model,
+        effort: "effort" in runner ? runner.effort : undefined,
+        variant: undefined,
+      }
+    : {
+        type: runner.type,
+        model: runner.model,
+        variant: "variant" in runner ? runner.variant : undefined,
+        effort: undefined,
+      };
   return { ...opts, ...fields, ...extra };
 }
 

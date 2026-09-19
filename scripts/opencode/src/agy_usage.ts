@@ -2,12 +2,14 @@
  * Parent-side parser for `agy -p --output-format stream-json`.
  *
  * Events are NDJSON objects keyed by `event` (`init`, `step_update`, `result`).
+ * Live `agy --output-format stream-json` nests the payload under that name
+ * (`event.result`, `event.step_update`); a flat shape is accepted as fallback.
  * Token usage comes from the terminal `result` event's cumulative `usage`.
  * When the child is killed before `result` (timeout, 143), fall back to the
- * per-step `usage` seen so far. The `result` envelope also carries `status`,
- * `response`, `error`, and `denied_actions`, which the runner needs to fail
- * closed on an empty SUCCESS. Everything is fail-open: lines that are not
- * stream-json are kept as plain output text.
+ * per-step `usage` keyed by `step_index`. The `result` envelope also carries
+ * `status`, `response`, `error`, and `denied_actions`, which the runner needs
+ * to fail closed on an empty SUCCESS. Everything is fail-open: lines that are
+ * not stream-json are kept as plain output text.
  */
 
 import { type ModelTokenUsage, TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
@@ -35,6 +37,15 @@ function nonEmptyString(value: unknown): string | undefined {
 
 function eventName(event: JsonObject): string | undefined {
   return nonEmptyString(event.event) ?? nonEmptyString(event.type);
+}
+
+function nestedPayload(event: JsonObject, key: string): JsonObject {
+  const nested = event[key];
+  return isObject(nested) ? nested : event;
+}
+
+function pickString(payload: JsonObject, event: JsonObject, key: string): string | undefined {
+  return nonEmptyString(payload[key]) ?? (payload === event ? undefined : nonEmptyString(event[key]));
 }
 
 export function parseAgyUsage(usage: unknown): Record<TokenType, number> | undefined {
@@ -141,30 +152,44 @@ export class AgyStreamParser {
   }
 
   private recordResult(event: JsonObject): void {
-    const response = typeof event.response === "string" ? event.response : undefined;
-    const error = errorText(event.error);
+    const payload = nestedPayload(event, "result");
+    this.conversation ??= nonEmptyString(payload.conversation_id);
+    const response =
+      typeof payload.response === "string"
+        ? payload.response
+        : typeof event.response === "string"
+          ? event.response
+          : undefined;
+    const error = errorText(payload.error) ?? (payload === event ? undefined : errorText(event.error));
     this.envelope = {
-      status: nonEmptyString(event.status),
+      status: pickString(payload, event, "status"),
       response,
       error,
-      deniedActions: deniedActions(event.denied_actions),
+      deniedActions: deniedActions(payload.denied_actions ?? event.denied_actions),
     };
     if (response?.trim()) this.textParts.push(response);
     if (error) this.textParts.push(error);
-    this.resultModel = nonEmptyString(event.model) ?? this.resultModel;
-    this.resultUsage = parseAgyUsage(event.usage) ?? this.resultUsage;
+    this.resultModel = pickString(payload, event, "model") ?? this.resultModel;
+    this.resultUsage = parseAgyUsage(payload.usage) ?? parseAgyUsage(event.usage) ?? this.resultUsage;
   }
 
   private recordStep(event: JsonObject): void {
-    const step = isObject(event.step) ? event.step : undefined;
-    const tokens = parseAgyUsage(event.usage) ?? parseAgyUsage(step?.usage);
+    const payload = nestedPayload(event, "step_update");
+    this.conversation ??= nonEmptyString(payload.conversation_id);
+    const step = isObject(payload.step) ? payload.step : isObject(event.step) ? event.step : undefined;
+    const tokens = parseAgyUsage(payload.usage) ?? parseAgyUsage(event.usage) ?? parseAgyUsage(step?.usage);
     if (!tokens) return;
-    // A step can be updated more than once; keep its latest usage rather than
-    // summing repeats. Distinct steps accumulate.
+    const index =
+      typeof payload.step_index === "number"
+        ? payload.step_index
+        : typeof event.step_index === "number"
+          ? event.step_index
+          : undefined;
     const id =
+      (index != null ? `index-${index}` : undefined) ??
+      nonEmptyString(payload.step_id) ??
       nonEmptyString(event.step_id) ??
       nonEmptyString(step?.id) ??
-      (typeof event.step_index === "number" ? `index-${event.step_index}` : undefined) ??
       `anonymous-${this.anonymousSteps++}`;
     this.stepUsage.set(id, tokens);
   }

@@ -115,13 +115,16 @@ describe("agyArgv", () => {
     expect(AGY_OUTPUT_FORMAT).toBe("stream-json");
   });
 
-  test("resumes only a known conversation, and only on continueSession", () => {
+  test("resumes a known conversation by id, else --continue, and only on continueSession", () => {
     expect(agyArgv({ model: "m", workdir: "/w" }, "p", "conv-1")).not.toContain("--conversation");
+    expect(agyArgv({ model: "m", workdir: "/w" }, "p", "conv-1")).not.toContain("--continue");
+    expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p")).toContain("--continue");
     expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p")).not.toContain("--conversation");
     expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p", "conv-1").slice(-2)).toEqual([
       "--conversation",
       "conv-1",
     ]);
+    expect(agyArgv({ model: "m", workdir: "/w", continueSession: true }, "p", "conv-1")).not.toContain("--continue");
   });
 
   test("never lets the print prompt start with a slash command", () => {
@@ -178,6 +181,103 @@ describe("AgyStreamParser", () => {
     const parser = parse(["{not json", resultEvent({ status: "SUCCESS", response: "ok", usage: "nope" })]);
     expect(parser.usage()).toBeUndefined();
     expect(parser.text()).toBe("{not json\nok");
+  });
+
+  test("unwraps documented nested result and step_update payloads", () => {
+    const parser = parse([
+      JSON.stringify({
+        event: "init",
+        conversation_id: "c3b66b04-872b-4fbe-a3a4-058a026ef20a",
+        init: { cwd: "/home/user/project", tools: ["run_command"], permission_mode: "always-proceed" },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "c3b66b04-872b-4fbe-a3a4-058a026ef20a",
+          step_index: 3,
+          state: "DONE",
+          step_type: "agent_response",
+          usage: {
+            input_tokens: 10302,
+            output_tokens: 582,
+            thinking_tokens: 551,
+            cache_read_tokens: 8113,
+            total_tokens: 10884,
+          },
+        },
+      }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "c3b66b04-872b-4fbe-a3a4-058a026ef20a",
+          status: "SUCCESS",
+          response: "Git rebase destructively rewrites a branch's commit history.\n",
+          usage: {
+            input_tokens: 10418,
+            output_tokens: 589,
+            thinking_tokens: 551,
+            cache_read_tokens: 8113,
+            total_tokens: 11007,
+          },
+        },
+      }),
+    ]);
+    expect(parser.conversationId()).toBe("c3b66b04-872b-4fbe-a3a4-058a026ef20a");
+    expect(parser.result()).toEqual({
+      status: "SUCCESS",
+      response: "Git rebase destructively rewrites a branch's commit history.\n",
+      error: undefined,
+      deniedActions: [],
+    });
+    expect(parser.text()).toBe("Git rebase destructively rewrites a branch's commit history.\n");
+    expect(parser.usage()).toEqual(
+      new Map([["fallback-model", { input: 10418, cached_input: 8113, output: 589, cache_write: 0, reasoning: 551 }]])
+    );
+  });
+
+  test("nested step_update usage is keyed by step_index when killed before result", () => {
+    const parser = parse([
+      JSON.stringify({
+        event: "step_update",
+        step_update: { step_index: 3, usage: { input_tokens: 10, output_tokens: 1 } },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: { step_index: 3, usage: { input_tokens: 10, output_tokens: 4, thinking_tokens: 2 } },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: { step_index: 4, usage: { input_tokens: 5, cache_read_tokens: 7 } },
+      }),
+    ]);
+    expect(parser.result()).toBeUndefined();
+    expect(parser.usage()).toEqual(
+      new Map([["fallback-model", { input: 15, cached_input: 7, output: 4, cache_write: 0, reasoning: 2 }]])
+    );
+  });
+
+  test("nested error and denied_actions fail closed", () => {
+    const errorParser = parse([
+      JSON.stringify({ event: "result", result: { status: "ERROR", error: "RESOURCE_EXHAUSTED", response: "" } }),
+    ]);
+    expect(errorParser.result()).toEqual({
+      status: "ERROR",
+      response: "",
+      error: "RESOURCE_EXHAUSTED",
+      deniedActions: [],
+    });
+    const deniedParser = parse([
+      JSON.stringify({
+        event: "result",
+        result: { status: "SUCCESS", response: "", denied_actions: ["RunCommand"] },
+      }),
+    ]);
+    expect(deniedParser.result()).toEqual({
+      status: "SUCCESS",
+      response: "",
+      error: undefined,
+      deniedActions: ["RunCommand"],
+    });
   });
 });
 
@@ -237,6 +337,108 @@ describe("runAgy", () => {
       });
       expect(result.status).toBe("ok");
       expect(await argLines(argsLog)).toHaveLength(1);
+    });
+  });
+
+  test("reviewer spawn stashes checkout .agents and .agent, then restores them", async () => {
+    const seen =
+      'if [ -e .agents ] || [ -e .agent ]; then echo yes >> "$ARGS_LOG.seen"; else echo no >> "$ARGS_LOG.seen"; fi';
+    await withFakeBins(
+      { agy: fakeBin("agy", `${seen}\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
+      async ({ workdir, argsLog }) => {
+        await mkdir(join(workdir, ".agents", "skills"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
+        await writeFile(join(workdir, ".agent"), "plugin");
+        const result = await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "review", owner: "o", repo: "r" },
+        });
+        expect(result.status).toBe("ok");
+        expect(await readFile(`${argsLog}.seen`, "utf8")).toBe("no\n");
+        expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
+        expect(await readFile(join(workdir, ".agent"), "utf8")).toBe("plugin");
+      }
+    );
+  });
+
+  test("implementer spawn leaves checkout .agents in cwd", async () => {
+    const seen = 'if [ -e .agents ]; then echo yes >> "$ARGS_LOG.seen"; else echo no >> "$ARGS_LOG.seen"; fi';
+    await withFakeBins(
+      { agy: fakeBin("agy", `${seen}\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
+      async ({ workdir, argsLog }) => {
+        await mkdir(join(workdir, ".agents"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
+        const result = await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "implement", owner: "o", repo: "r" },
+        });
+        expect(result.status).toBe("ok");
+        expect(await readFile(`${argsLog}.seen`, "utf8")).toBe("yes\n");
+        expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
+      }
+    );
+  });
+
+  test("reviewer restore happens after a failed spawn", async () => {
+    const seen = 'if [ -e .agents ]; then echo yes >> "$ARGS_LOG.seen"; else echo no >> "$ARGS_LOG.seen"; fi';
+    await withFakeBins(
+      { agy: fakeBin("agy", `${seen}\nprintf 'Please sign in to continue\\n' >&2\nexit 1`) },
+      async ({ workdir, argsLog }) => {
+        await mkdir(join(workdir, ".agents"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
+        const result = await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "review", owner: "o", repo: "r" },
+        });
+        expect(result.auth).toBe(true);
+        expect(await readFile(`${argsLog}.seen`, "utf8")).toBe("no\n");
+        expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
+      }
+    );
+  });
+
+  test("records nested stream-json result usage under source=agy", async () => {
+    const nested = JSON.stringify({
+      event: "result",
+      result: {
+        conversation_id: "conv-nested",
+        status: "SUCCESS",
+        response: "wrote JUMI_PR.md",
+        usage: {
+          input_tokens: 10418,
+          output_tokens: 589,
+          thinking_tokens: 551,
+          cache_read_tokens: 8113,
+          total_tokens: 11007,
+        },
+      },
+    });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${nested}'`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "gemini-3-pro",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("ok");
+      expect(result.stdout).toBe("wrote JUMI_PR.md");
+      const text = renderTokenMetrics();
+      expect(text).toContain(tokenLine("gemini-3-pro", "input", 10418));
+      expect(text).toContain(tokenLine("gemini-3-pro", "output", 589));
+      expect((await readFile(agyConversationPath(workdir), "utf8")).trim()).toBe("conv-nested");
     });
   });
 
