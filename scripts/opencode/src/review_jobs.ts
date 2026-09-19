@@ -242,7 +242,11 @@ export function workerJobKind(job: IssueJob): JobKind {
 export function workerJobKey(job: IssueJob): string {
   const kind = workerJobKind(job);
   if (kind === "implement") return `implement:${job.owner}/${job.repo}#${job.issueNumber}`;
-  return `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
+  const base = `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
+  if (kind !== "follow-up" || job.trigger?.event !== "workflow_job") return base;
+  const jobId = job.trigger.workflowJobId;
+  if (typeof jobId === "number" && Number.isFinite(jobId)) return `${base}:${jobId}`;
+  return base;
 }
 
 export function issueJobPayload(job: IssueJob): IssueJobPayload {

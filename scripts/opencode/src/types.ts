@@ -207,6 +207,7 @@ export interface IssueJobTrigger {
   reviewId?: number;
   sender: string;
   body?: string;
+  workflowJobId?: number;
 }
 
 export interface IssueJob {

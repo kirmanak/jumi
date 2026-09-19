@@ -134,6 +134,36 @@ describe("job envelope kinds", () => {
     expect(await store.enqueueIssue(job)).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
   });
 
+  test("later sibling workflow_job follow-up is not same-SHA deduped while leased", async () => {
+    const store = new MemoryReviewJobStore();
+    const first = makeIssueJob({
+      mode: "follow-up",
+      prNumber: 7,
+      headSha: "headsha",
+      trigger: { event: "workflow_job", sender: "alice", workflowJobId: 99 },
+    });
+    const sibling = makeIssueJob({
+      ...first,
+      delivery: "delivery-2",
+      trigger: { event: "workflow_job", sender: "alice", workflowJobId: 100 },
+    });
+    expect(await store.enqueueIssue(first)).toEqual({
+      key: "follow-up:kirmanak/demo#7:headsha:99",
+      queued: true,
+    });
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(await store.enqueueIssue(first)).toEqual({
+      key: "follow-up:kirmanak/demo#7:headsha:99",
+      queued: false,
+    });
+    expect(await store.enqueueIssue(sibling)).toEqual({
+      key: "follow-up:kirmanak/demo#7:headsha:100",
+      queued: true,
+    });
+    await store.markPublished(leased!.id, "worker-1", { state: "skipped", reason: "CI still pending" });
+    expect(store.rows.find((row) => row.jobKey === "follow-up:kirmanak/demo#7:headsha:100")?.state).toBe("queued");
+  });
+
   test("human comment follow-up lands on the same envelope", async () => {
     const store = new MemoryReviewJobStore();
     const result = await store.enqueueIssue(
