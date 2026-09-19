@@ -515,6 +515,7 @@ describe("processEngineTick", () => {
           signal: shutdown.signal,
           ensureAuth: async () => undefined,
           extras: {
+            ciRelistDelayMs: 0,
             gitRunner: frozenGit(),
             workspacePreparer: async () => undefined,
             openCodeRunner: async (opts) => {

@@ -130,6 +130,16 @@ describe("job envelope kinds", () => {
     expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("skipped");
   });
 
+  test("same-SHA wake during a leased CI-failed skip requeues it", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    await store.enqueue(job);
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI failed" });
+    expect(store.rows.find((item) => item.id === leased!.id)?.state).toBe("queued");
+  });
+
   test("same-SHA wake during a leased CI-lookup skip requeues it", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeJob();
