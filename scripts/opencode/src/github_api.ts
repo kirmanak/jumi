@@ -725,6 +725,10 @@ export class GithubAPI {
     );
   }
 
+  async updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull> {
+    return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
+  }
+
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {
     return toTask(await this.get<GithubIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
   }

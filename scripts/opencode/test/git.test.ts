@@ -995,6 +995,7 @@ describe("worker prompts", () => {
       expect(prompt).toContain("Grep is ripgrep syntax, not JavaScript");
       expect(prompt).toContain("Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt");
       expect(prompt).toContain("JUMI_QUEUE.md");
+      expect(prompt).toContain("JUMI_PR.md");
       expect(prompt).toContain("Verify once at the end");
       expect(prompt).toContain("Do not ask questions");
       expect(prompt).not.toContain("denied");
