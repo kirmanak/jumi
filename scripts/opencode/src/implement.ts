@@ -59,7 +59,7 @@ export { HEARTBEAT_INTERVAL_MS } from "./claimed_worktree.ts";
 export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 
 const PR_BODY_MAX_CHARS = 8000;
-const PR_DESCRIPTION_FILE = "JUMI_PR.md";
+export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
 
 export type OpenCodeRunner = Engine;
 
@@ -151,7 +151,47 @@ function pullRequestText(issueNumber: number, fileContents: string | null | unde
   return `${text}\n\n${fallback}`;
 }
 
-async function readPullRequestDescription(worktree: string): Promise<string | null> {
+/** Jumi owns only the text between these markers; the rest of the PR body is left alone. */
+export const PR_BODY_FENCE_START = "<!-- jumi-pr-body:start -->";
+export const PR_BODY_FENCE_END = "<!-- jumi-pr-body:end -->";
+
+export function wrapJumiPrBody(text: string): string {
+  return `${PR_BODY_FENCE_START}\n${text.trim()}\n${PR_BODY_FENCE_END}`;
+}
+
+function fenceBounds(body: string): { start: number; end: number } | undefined {
+  const start = body.indexOf(PR_BODY_FENCE_START);
+  if (start < 0) return undefined;
+  const end = body.indexOf(PR_BODY_FENCE_END, start + PR_BODY_FENCE_START.length);
+  if (end < 0) return undefined;
+  return { start, end: end + PR_BODY_FENCE_END.length };
+}
+
+/** The jumi-owned text of a PR body, or undefined when the body was never fenced. */
+export function jumiPrBodyRegion(body: string | null | undefined): string | undefined {
+  const text = body ?? "";
+  const bounds = fenceBounds(text);
+  if (!bounds) return undefined;
+  return text.slice(bounds.start + PR_BODY_FENCE_START.length, bounds.end - PR_BODY_FENCE_END.length).trim();
+}
+
+/** Replace only the fenced region; undefined when there is no fence to own. */
+export function replaceJumiPrBodyRegion(body: string | null | undefined, text: string): string | undefined {
+  const current = body ?? "";
+  const bounds = fenceBounds(current);
+  if (!bounds) return undefined;
+  return `${current.slice(0, bounds.start)}${wrapJumiPrBody(text)}${current.slice(bounds.end)}`;
+}
+
+const RUNNER_STAMP_LINE = /\n*_Jumi · [^\n]*_\s*$/;
+
+/** What the follow-up child sees in JUMI_PR.md: the posted region without the runner stamp. */
+export function seedPullRequestDescription(region: string): string {
+  const text = region.replace(RUNNER_STAMP_LINE, "").trim();
+  return text ? `${text}\n` : "";
+}
+
+export async function readPullRequestDescription(worktree: string): Promise<string | null> {
   const path = join(worktree, PR_DESCRIPTION_FILE);
   try {
     const info = await lstat(path);
@@ -506,7 +546,7 @@ export async function implementIssue(
 
       const pr = await opts.api.createPullRequest(owner, repo, {
         title: liveJob.title,
-        body: buildPullRequestBody(issueNumber, prFileContents, runner),
+        body: wrapJumiPrBody(buildPullRequestBody(issueNumber, prFileContents, runner)),
         head: branch,
         base: opts.job.defaultBranch,
       });

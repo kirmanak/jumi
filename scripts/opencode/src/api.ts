@@ -350,6 +350,10 @@ export class GiteaAPI {
     );
   }
 
+  async updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull> {
+    return toPull(await this.patch<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
+  }
+
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {
     return toTask(await this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
   }

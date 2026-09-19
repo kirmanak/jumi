@@ -30,6 +30,7 @@ import {
   writeFollowUpState,
 } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { PR_BODY_FENCE_END, PR_BODY_FENCE_START } from "../src/implement.ts";
 import { fingerprintFollowUpText, writeStuckState } from "../src/stuck.ts";
 import type { GiteaPullReview } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -94,6 +95,7 @@ function makeApi(
       return makePR({ number: 3, title: pull.title, body: pull.body });
     },
     closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, index, body) => {
       commentIndexes.push(index);
@@ -224,6 +226,107 @@ describe("implementFollowUp", () => {
       expect(result.status).toBe("pushed");
       expect(feedback).toContain("please fix the tests");
       expect(feedback).toContain(oldSha);
+    });
+  });
+
+  describe("PR body refresh", () => {
+    const fenced = (text: string) => `${PR_BODY_FENCE_START}\n${text}\n${PR_BODY_FENCE_END}`;
+    const posted = `Human note above.\n\n${fenced("Old writeup.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_")}\n\nHuman note below.`;
+
+    async function runFollowUp(opts: {
+      body: string;
+      porcelain?: string;
+      writePr?: (current: string | null) => string | null;
+      updateBody?: IssueApi["updatePullRequestBody"];
+    }) {
+      const patches: string[] = [];
+      let seeded: string | null = null;
+      let statusSawPrFile = false;
+      let result: Awaited<ReturnType<typeof implementFollowUp>> | undefined;
+      await withDirs(async (home, workdir) => {
+        const worktree = join(workdir, "kirmanak/demo/12");
+        const pr = { ...jumiPr(), body: opts.body };
+        const api = makeApi({
+          listOpenPulls: async () => [pr],
+          getPR: async () => pr,
+          updatePullRequestBody:
+            opts.updateBody ??
+            (async (_owner, _repo, index, body) => {
+              patches.push(body);
+              return makePR({ number: index, body });
+            }),
+        });
+        result = await implementFollowUp({
+          api,
+          job: followUpJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async (args) => {
+            const gitArgs = stripGitConfigArgs(args);
+            if (gitArgs[0] === "rev-parse") return "abc123";
+            if (gitArgs[0] === "status") {
+              if (await Bun.file(join(worktree, "JUMI_PR.md")).exists()) statusSawPrFile = true;
+              return opts.porcelain ?? " M src/demo.ts";
+            }
+            return "";
+          },
+          openCodeRunner: async () => {
+            const path = join(worktree, "JUMI_PR.md");
+            seeded = (await Bun.file(path).exists()) ? await readFile(path, "utf8") : null;
+            const next = opts.writePr?.(seeded);
+            if (next != null) await writeFile(path, next);
+            else if (opts.writePr) await rm(path, { force: true });
+            return { status: "ok" };
+          },
+          logger: () => undefined,
+        });
+      });
+      return { result, patches, seeded: seeded as string | null, statusSawPrFile };
+    }
+
+    test("seeds the posted region and replaces only the fence after a push", async () => {
+      const run = await runFollowUp({ body: posted, writePr: () => "New writeup with lifecycle." });
+      expect(run.result?.status).toBe("pushed");
+      expect(run.seeded).toBe("Old writeup.\n\nFixes #12\n");
+      expect(run.statusSawPrFile).toBe(false);
+      expect(run.patches).toEqual([
+        `Human note above.\n\n${fenced("New writeup with lifecycle.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_")}\n\nHuman note below.`,
+      ]);
+    });
+
+    test("does not touch an unfenced body", async () => {
+      const run = await runFollowUp({ body: "Fixes #12", writePr: () => "Should not land." });
+      expect(run.result?.status).toBe("pushed");
+      expect(run.seeded).toBeNull();
+      expect(run.statusSawPrFile).toBe(false);
+      expect(run.patches).toEqual([]);
+    });
+
+    test("leaves the posted body when JUMI_PR.md is removed or empty", async () => {
+      expect((await runFollowUp({ body: posted, writePr: () => null })).patches).toEqual([]);
+      expect((await runFollowUp({ body: posted, writePr: () => "  \n" })).patches).toEqual([]);
+    });
+
+    test("does not refresh when the follow-up has no changes", async () => {
+      const run = await runFollowUp({ body: posted, porcelain: "", writePr: () => "New writeup." });
+      expect(run.result?.status).toBe("no-changes");
+      expect(run.patches).toEqual([]);
+    });
+
+    test("a failed body PATCH does not fail the pushed fix", async () => {
+      const run = await runFollowUp({
+        body: posted,
+        writePr: () => "New writeup.",
+        updateBody: async () => {
+          throw new Error("gitea 500");
+        },
+      });
+      expect(run.result?.status).toBe("pushed");
     });
   });
 

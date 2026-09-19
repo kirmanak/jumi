@@ -8,7 +8,15 @@ import type { OpenCodeRunOptions } from "../src/git.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
-import { buildPullRequestBody, cancelIssueWork, implementIssue } from "../src/implement.ts";
+import {
+  buildPullRequestBody,
+  cancelIssueWork,
+  implementIssue,
+  jumiPrBodyRegion,
+  replaceJumiPrBodyRegion,
+  seedPullRequestDescription,
+  wrapJumiPrBody,
+} from "../src/implement.ts";
 import { isQuotaWaitError, QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import { isQuotaStuck, readStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -57,6 +65,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
       });
     },
     closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
@@ -116,6 +125,27 @@ describe("buildPullRequestBody", () => {
 
   test("strips NUL bytes", () => {
     expect(buildPullRequestBody(12, "Caches\0 categories.")).toBe("Caches categories.\n\nFixes #12");
+  });
+});
+
+describe("jumi PR body fence", () => {
+  const body = `Above.\n\n${wrapJumiPrBody("Old.\n\nFixes #12\n\n_Jumi · opencode · m_")}\n\nBelow.`;
+
+  test("reads and replaces only the fenced region", () => {
+    expect(jumiPrBodyRegion(body)).toBe("Old.\n\nFixes #12\n\n_Jumi · opencode · m_");
+    expect(replaceJumiPrBodyRegion(body, "New.")).toBe(`Above.\n\n${wrapJumiPrBody("New.")}\n\nBelow.`);
+  });
+
+  test("an unfenced or half-fenced body is not jumi-owned", () => {
+    expect(jumiPrBodyRegion("Fixes #12")).toBeUndefined();
+    expect(replaceJumiPrBodyRegion("Fixes #12", "New.")).toBeUndefined();
+    expect(replaceJumiPrBodyRegion("<!-- jumi-pr-body:start -->\nOld.", "New.")).toBeUndefined();
+    expect(jumiPrBodyRegion(null)).toBeUndefined();
+  });
+
+  test("seeds the child without the runner stamp", () => {
+    expect(seedPullRequestDescription("Old.\n\nFixes #12\n\n_Jumi · opencode · m_")).toBe("Old.\n\nFixes #12\n");
+    expect(seedPullRequestDescription("_Jumi · opencode · m_")).toBe("");
   });
 });
 
@@ -928,7 +958,7 @@ describe("implementIssue", () => {
       expect(api.pulls).toEqual([
         {
           title: "Fix the thing",
-          body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+          body: "<!-- jumi-pr-body:start -->\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
           head: "jumi/issue-12-fix-the-thing",
           base: "main",
         },
@@ -1266,7 +1296,7 @@ describe("implementIssue", () => {
       });
       expect(result.status).toBe("pr");
       expect(api.pulls[0]).toMatchObject({
-        body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+        body: "<!-- jumi-pr-body:start -->\nCaches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
       });
       expect(statusSawPrFile).toBe(false);
       await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
@@ -1302,7 +1332,7 @@ describe("implementIssue", () => {
         logger: () => undefined,
       });
       expect(api.pulls[0]).toMatchObject({
-        body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+        body: "<!-- jumi-pr-body:start -->\nCaches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
       });
     });
   });
@@ -1335,7 +1365,9 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_" });
+      expect(api.pulls[0]).toMatchObject({
+        body: "<!-- jumi-pr-body:start -->\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
+      });
     });
   });
 
@@ -1413,7 +1445,7 @@ describe("implementIssue", () => {
       });
       expect(result.status).toBe("pr");
       expect(api.pulls[0]).toMatchObject({
-        body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+        body: "<!-- jumi-pr-body:start -->\nCaches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
       });
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
@@ -1449,7 +1481,9 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_" });
+      expect(api.pulls[0]).toMatchObject({
+        body: "<!-- jumi-pr-body:start -->\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
+      });
     });
   });
 
@@ -1490,7 +1524,9 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(api.pulls[0]).toMatchObject({ body: "Fixes #12\n\n_Jumi · opencode · openai/gpt-5.5_" });
+      expect(api.pulls[0]).toMatchObject({
+        body: "<!-- jumi-pr-body:start -->\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
+      });
       expect(statusSawPrDir).toBe(false);
       await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
     });
@@ -1910,7 +1946,9 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
       });
       expect(result.status).toBe("pr");
       const stamp = "_Jumi · opencode · xai/grok-4.6 (high)_";
-      expect(api.pulls[0]).toMatchObject({ body: `Fixes #12\n\n${stamp}` });
+      expect(api.pulls[0]).toMatchObject({
+        body: `<!-- jumi-pr-body:start -->\nFixes #12\n\n${stamp}\n<!-- jumi-pr-body:end -->`,
+      });
       expect(api.comments.at(-1)).toContain(`Opened https://gitea.kirmanak.stream/kirmanak/demo/pulls/3\n\n${stamp}`);
       expect(api.comments.join("\n")).not.toContain("claude-opus-5");
     });
