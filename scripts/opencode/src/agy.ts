@@ -32,16 +32,6 @@ export const AGY_SEED_SETTINGS = { enableTelemetry: false, useG1Credits: false }
 const AGY_STDERR_MAX_BYTES = 64_000;
 const AGY_AUTH_RE = /Please sign in|authentication required/i;
 
-export class AgyReviewDisabledError extends EngineFailedError {
-  constructor() {
-    super(
-      "agy runner refuses review spawns: print mode is not proven to ignore checkout .agents/ plugins on untrusted HEAD",
-      false
-    );
-    this.name = "AgyReviewDisabledError";
-  }
-}
-
 function agyEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string> {
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: tempRoot } as Record<string, string>;
@@ -157,7 +147,6 @@ function cancelled(): Error {
 }
 
 export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
-  if (opts.trace?.kind === "review") throw new AgyReviewDisabledError();
   const log = opts.logger ?? ((message: string) => console.log(message));
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
@@ -243,9 +232,11 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     const stdoutResult = limitText(parser.text(), "agy output", opts.maxOutputBytes);
     const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
     const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);
+    const envelope = parser.result();
     const combined = [stderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
-    const auth = !timedOut && exitCode !== 143 && looksLikeAgyAuthDeath(combined);
+    const auth =
+      !timedOut && exitCode !== 143 && looksLikeAgyAuthDeath([stderr, envelope?.error].filter(Boolean).join("\n"));
 
     if (opts.abortSignal?.aborted) throw cancelled();
 
@@ -263,7 +254,6 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (stderr) log(`[agy stderr] ${stderr}`);
-    const envelope = parser.result();
     if (exitCode !== 0 || envelope?.error) {
       // Record the exact envelope so the first live quota/5xx miss is known verbatim.
       logDiagnostic(log, "agy_error", {

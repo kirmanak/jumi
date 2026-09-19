@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
-import { withEngineChain } from "./fallback.ts";
+import { hasResumableSession, withEngineChain } from "./fallback.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { isInfraFailure } from "./infra.ts";
 import { resolvePermissions } from "./permissions.ts";
@@ -573,15 +573,6 @@ function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
     if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT && !isReviewEngineTempPath(path))) return false;
   }
   return true;
-}
-
-async function hasOpenCodeSession(workspace: string): Promise<boolean> {
-  try {
-    const info = await lstat(join(workspace, ".jumi-tmp", "opencode-session.db"));
-    return info.isFile();
-  } catch {
-    return false;
-  }
 }
 
 function porcelainIncludesReviewArtifact(porcelain: string): boolean {
@@ -1268,7 +1259,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         extrasUsed++;
         log(`Incomplete review: no output; write-only OpenCode retry (${extrasUsed}/${extraCap})`);
         await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
-        const continueSession = await hasOpenCodeSession(opts.workspace);
+        const continueSession = await hasResumableSession(opts.workspace);
         const writePrompt = buildIncompleteWritePrompt(continueSession ? undefined : lastStdout);
         lastStdout = (await runOpenCode({ prompt: writePrompt, continueSession })).stdout;
       }

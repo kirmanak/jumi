@@ -7,7 +7,6 @@ import {
   AGY_SEED_SETTINGS,
   AGY_SETTINGS_DIR,
   AGY_SKIP_PERMISSIONS,
-  AgyReviewDisabledError,
   agyArgv,
   agyPrintTimeout,
   agyPromptArg,
@@ -226,19 +225,18 @@ describe("runAgy", () => {
     );
   });
 
-  test("reviewer spawn is fail-closed and never execs agy", async () => {
-    await withFakeBins({ agy: fakeBin("agy", "exit 0") }, async ({ workdir, argsLog }) => {
-      await expect(
-        runAgy({
-          prompt: "p",
-          model: "m",
-          workdir,
-          sanitizeEnv: true,
-          extraEnv: { ARGS_LOG: argsLog },
-          trace: { kind: "review", owner: "o", repo: "r" },
-        })
-      ).rejects.toBeInstanceOf(AgyReviewDisabledError);
-      expect(await argLines(argsLog)).toEqual([]);
+  test("reviewer spawn execs agy", async () => {
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${SUCCESS_RESULT}'`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+        trace: { kind: "review", owner: "o", repo: "r" },
+      });
+      expect(result.status).toBe("ok");
+      expect(await argLines(argsLog)).toHaveLength(1);
     });
   });
 
@@ -343,6 +341,42 @@ exec sleep 30`
       }
     );
   });
+
+  test("result error authentication required is auth death", async () => {
+    const failed = resultEvent({ status: "ERROR", error: "authentication required" });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("exit");
+      expect(result.auth).toBe(true);
+      expect(result.message).toBe(providerAuthDeathMessage());
+    });
+  });
+
+  test("response text about authentication is not auth death", async () => {
+    const failed = resultEvent({
+      status: "ERROR",
+      error: "tool failed",
+      response: "authentication required to call the login API",
+    });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("exit");
+      expect(result.auth).toBeFalsy();
+      expect(result.message).toContain("agy exited with code 1");
+    });
+  });
 });
 
 describe("agy dispatch and chain", () => {
@@ -363,6 +397,30 @@ describe("agy dispatch and chain", () => {
       expect(result.status).toBe("ok");
       expect(await argLines(argsLog)).toHaveLength(1);
     });
+  });
+
+  test("reviewer auth miss hops to the next runner", async () => {
+    await withFakeBins(
+      {
+        agy: fakeBin("agy", `printf '%s\\n' '${INIT_EVENT}'\nprintf 'authentication required\\n' >&2\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, argsLog }) => {
+        const engine = withEngineChain(registeredEngine, { chain: [agy, claude] });
+        const result = await engine({
+          prompt: "p",
+          model: agy.model,
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "review", owner: "o", repo: "r" },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.runner).toEqual(runnerStamp(claude));
+        const lines = await argLines(argsLog);
+        expect(lines.map((line) => line.split(" ")[0])).toEqual(["agy", "claude"]);
+      }
+    );
   });
 
   test("auth miss hops to the next runner, and extras never --continue across runners", async () => {

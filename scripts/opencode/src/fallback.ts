@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
@@ -61,6 +61,18 @@ export function openCodeLogDirPath(workdir: string): string {
 
 export function agyConversationPath(workdir: string): string {
   return join(workdir, ".jumi-tmp", AGY_CONVERSATION_FILE);
+}
+
+async function pathIsFile(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export async function hasResumableSession(workdir: string): Promise<boolean> {
+  return (await pathIsFile(openCodeSessionDbPath(workdir))) || (await pathIsFile(agyConversationPath(workdir)));
 }
 
 export async function clearOpenCodeSession(workdir: string): Promise<void> {
