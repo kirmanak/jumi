@@ -268,12 +268,8 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     // Parent-held usage at child end, whatever the outcome (ok, non-zero,
-    // timeout, 143, cancel). Fail-open: no usage never fails the job.
-    try {
-      recordClaudeUsage(parser.usage());
-    } catch {
-      // Token metrics are best-effort.
-    }
+    // timeout, 143, cancel). Fail-open: no usage records nothing.
+    recordClaudeUsage(parser.usage());
     const stdoutResult = limitText(parser.text(), "claude output", opts.maxOutputBytes);
     const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
     const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);

@@ -8,9 +8,7 @@
  * that are not stream-json are kept as plain output text.
  */
 
-import { TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
-
-export type ClaudeTokenUsage = Map<string, Record<TokenType, number>>;
+import { type ModelTokenUsage, TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -26,7 +24,7 @@ function emptyTokens(): Record<TokenType, number> {
   return Object.fromEntries(TOKEN_TYPES.map((tokenType) => [tokenType, 0])) as Record<TokenType, number>;
 }
 
-function addTokens(usage: ClaudeTokenUsage, model: string, tokens: Record<TokenType, number>): void {
+function addTokens(usage: ModelTokenUsage, model: string, tokens: Record<TokenType, number>): void {
   const current = usage.get(model) ?? emptyTokens();
   for (const tokenType of TOKEN_TYPES) current[tokenType] += tokens[tokenType];
   usage.set(model, current);
@@ -36,9 +34,9 @@ function modelLabel(value: unknown, fallback = "unknown"): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
-export function parseClaudeModelUsage(modelUsage: unknown): ClaudeTokenUsage | undefined {
+export function parseClaudeModelUsage(modelUsage: unknown): ModelTokenUsage | undefined {
   if (!isObject(modelUsage)) return undefined;
-  const usage: ClaudeTokenUsage = new Map();
+  const usage: ModelTokenUsage = new Map();
   for (const [key, value] of Object.entries(modelUsage)) {
     if (!isObject(value)) continue;
     addTokens(usage, modelLabel(value.canonicalModel, modelLabel(key)), {
@@ -56,7 +54,7 @@ export class ClaudeStreamParser {
   private readonly decoder = new TextDecoder();
   private buffer = "";
   private readonly textParts: string[] = [];
-  private resultUsage: ClaudeTokenUsage | undefined;
+  private resultUsage: ModelTokenUsage | undefined;
   private readonly assistantUsage = new Map<string, { model: string; tokens: Record<TokenType, number> }>();
   private anonymousMessages = 0;
 
@@ -81,10 +79,10 @@ export class ClaudeStreamParser {
     return this.textParts.join("\n");
   }
 
-  usage(): ClaudeTokenUsage | undefined {
+  usage(): ModelTokenUsage | undefined {
     if (this.resultUsage) return this.resultUsage;
     if (this.assistantUsage.size === 0) return undefined;
-    const usage: ClaudeTokenUsage = new Map();
+    const usage: ModelTokenUsage = new Map();
     for (const { model, tokens } of this.assistantUsage.values()) addTokens(usage, model, tokens);
     return usage;
   }
@@ -92,10 +90,6 @@ export class ClaudeStreamParser {
   private parseLine(rawLine: string): void {
     const line = rawLine.replace(/\r$/, "");
     if (!line.trim()) return;
-    if (!line.trimStart().startsWith("{")) {
-      this.textParts.push(line);
-      return;
-    }
     let event: unknown;
     try {
       event = JSON.parse(line);
