@@ -29,6 +29,7 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
         html_url: "https://github.com/kirmanak/jumi/pull/3",
       }),
     closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
     updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),

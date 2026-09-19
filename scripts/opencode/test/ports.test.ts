@@ -73,6 +73,7 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
       });
     },
     closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
@@ -154,6 +155,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       listOpenPulls: async () => [],
       createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
       closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+      updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
       findStickyIssueComment: async () => undefined,
       createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
       updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
@@ -263,7 +265,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       expect(forge.pulls).toEqual([
         {
           title: "Fix the thing",
-          body: "Caches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_",
+          body: "<!-- jumi-pr-body:start -->\nCaches categories.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
           head: "jumi/issue-12-fix-the-thing",
           base: "main",
         },

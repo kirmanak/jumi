@@ -203,6 +203,7 @@ export interface Forge {
     pull: { title: string; body: string; head: string; base: string }
   ): Promise<Pull>;
   closePullRequest(owner: string, repo: string, index: number): Promise<Pull>;
+  updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull>;
   getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]>;
   listIssueComments(owner: string, repo: string, index: number): Promise<Comment[]>;
   findStickyIssueComment(
@@ -263,6 +264,7 @@ export type IssueApi = Tracker &
     | "listOpenPulls"
     | "createPullRequest"
     | "closePullRequest"
+    | "updatePullRequestBody"
     | "listPullReviewComments"
     | "listPullReviews"
     | "listCommitStatuses"

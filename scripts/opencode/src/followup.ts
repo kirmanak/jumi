@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   buildCiMarkdown,
@@ -41,7 +41,16 @@ import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import { buildTaskMarkdown, type ImplementOptions } from "./implement.ts";
+import {
+  buildPullRequestBody,
+  buildTaskMarkdown,
+  type ImplementOptions,
+  jumiPrBodyRegion,
+  PR_DESCRIPTION_FILE,
+  readPullRequestDescription,
+  replaceJumiPrBodyRegion,
+  seedPullRequestDescription,
+} from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { trustedWriteLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
@@ -979,6 +988,23 @@ export async function implementFollowUp(
     await persistCi();
   };
 
+  // After a pushed follow-up, rewrite only the jumi-owned region from JUMI_PR.md.
+  // Missing/empty artifact or an unfenced body leaves the posted body alone, and
+  // a forge failure here must not fail a good code fix.
+  const refreshPullRequestBody = async (description: string | null) => {
+    if (description == null || !description.replaceAll("\0", "").trim()) return;
+    try {
+      const live = await opts.api.getPR(owner, repo, pr.number);
+      const body = replaceJumiPrBodyRegion(live.body, buildPullRequestBody(issueNumber, description, runner));
+      if (body == null || body === live.body) return;
+      await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
+    } catch (err) {
+      log(
+        `PR body refresh failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  };
+
   let attemptedHeadSha = "";
   let attemptedBaseSha = "";
   let prefixMergeThrew = false;
@@ -1152,6 +1178,13 @@ export async function implementFollowUp(
       if (ci.failed.length) {
         await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
       }
+      // Let the child edit the description already posted; only a fenced body is jumi-owned.
+      const postedRegion = jumiPrBodyRegion(pr.body);
+      if (postedRegion != null) {
+        await writeFile(join(worktree, PR_DESCRIPTION_FILE), seedPullRequestDescription(postedRegion));
+      } else {
+        await rm(join(worktree, PR_DESCRIPTION_FILE), { recursive: true, force: true }).catch(() => undefined);
+      }
       // No follow-up runner has spawned yet; don't carry the resolver's stamp.
       runner = undefined;
       await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
@@ -1242,7 +1275,8 @@ export async function implementFollowUp(
       }
 
       throwIfAborted(opts.abortSignal);
-      await stripSentinels(worktree, ["JUMI_TASK.md", "JUMI_FEEDBACK.md", CI_LOG_FILE]);
+      const prFileContents = await readPullRequestDescription(worktree);
+      await stripSentinels(worktree, [PR_DESCRIPTION_FILE, "JUMI_TASK.md", "JUMI_FEEDBACK.md", CI_LOG_FILE]);
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
@@ -1266,6 +1300,8 @@ export async function implementFollowUp(
       }
       throwIfAborted(opts.abortSignal);
       await persistConflictAttempt(mergeResult);
+
+      await refreshPullRequestBody(prFileContents);
 
       const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
       await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);

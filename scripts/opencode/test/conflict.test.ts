@@ -58,6 +58,7 @@ function makeApi(
       return makePR({ number: 3, title: pull.title, body: pull.body });
     },
     closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, index, body) => {
       commentIndexes.push(index);
