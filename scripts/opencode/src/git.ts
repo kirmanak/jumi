@@ -64,7 +64,7 @@ export const REVIEW_OPENCODE_PERMISSION = JSON.stringify({ webfetch: REVIEW_WEBF
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
 Grep is ripgrep syntax, not JavaScript.
-Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_QUEUE.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, and JUMI_CI.md at the repository root.
+Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_QUEUE.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, JUMI_CI.md, and JUMI_PR.md at the repository root.
 Verify once at the end, not after every edit.`;
 
 const IMPLEMENT_FINISH = `Edit, write, commit, and push as needed. Incremental commits are fine.
