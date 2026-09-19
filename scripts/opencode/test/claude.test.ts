@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import {
   CLAUDE_ALLOWED_TOOLS,
+  CLAUDE_OUTPUT_FORMAT,
   CLAUDE_PERMISSION_MODE,
   CLAUDE_SETTING_SOURCES,
   claudeArgv,
@@ -14,6 +15,7 @@ import {
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
+import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -22,6 +24,7 @@ const originalXdg = process.env.XDG_CONFIG_HOME;
 
 afterEach(() => {
   resetControlMetricsForTests();
+  resetTokenMetricsForTests();
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
@@ -79,6 +82,9 @@ describe("claudeArgv", () => {
       CLAUDE_PERMISSION_MODE,
       "--allowedTools",
       CLAUDE_ALLOWED_TOOLS,
+      "--output-format",
+      CLAUDE_OUTPUT_FORMAT,
+      "--verbose",
       "--model",
       "opus",
       "--effort",
@@ -86,6 +92,7 @@ describe("claudeArgv", () => {
     ]);
     expect(args).not.toContain("--bare");
     expect(CLAUDE_SETTING_SOURCES).toBe("user");
+    expect(CLAUDE_OUTPUT_FORMAT).toBe("stream-json");
   });
 });
 
@@ -231,6 +238,116 @@ exit 1
         const text = renderRunMetrics();
         expect(text).toContain('jumi_opencode_exits_total{kind="review",class="incomplete"} 1');
         expect(text).not.toContain('kind="review",class="quota"} 1');
+      }
+    );
+  });
+});
+
+const RESULT_EVENT = JSON.stringify({
+  type: "result",
+  subtype: "success",
+  result: "review written",
+  usage: { input_tokens: 2, output_tokens: 5 },
+  modelUsage: {
+    "claude-sonnet-5": {
+      canonicalModel: "claude-sonnet-5",
+      inputTokens: 2,
+      outputTokens: 50,
+      cacheReadInputTokens: 300,
+      cacheCreationInputTokens: 40,
+      thinkingTokens: 7,
+    },
+    "claude-haiku-4-5-20251001": { inputTokens: 906, outputTokens: 12 },
+  },
+});
+
+function assistantEvent(id: string, model: string, input: number, output: number): string {
+  return JSON.stringify({
+    type: "assistant",
+    message: {
+      id,
+      model,
+      content: [{ type: "text", text: "working" }],
+      usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: 100 },
+    },
+  });
+}
+
+function tokenLine(model: string, tokenType: string, value: number): string {
+  return `ai_tokens_total{agent_instance="jumi",source="claude",profile="default",model="${model}",token_type="${tokenType}"} ${value}`;
+}
+
+describe("runClaude token usage", () => {
+  test("records every modelUsage model under source=claude and returns the result text", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"init","model":"claude-sonnet-5"}'
+printf '%s\n' '${assistantEvent("msg_1", "claude-sonnet-5", 1, 3)}'
+printf '%s\n' '${RESULT_EVENT}'
+`,
+      async (workdir) => {
+        const result = await runClaude({ prompt: "prompt", model: "sonnet", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toBe("review written");
+        const text = renderTokenMetrics();
+        expect(text).toContain(tokenLine("claude-sonnet-5", "input", 2));
+        expect(text).toContain(tokenLine("claude-sonnet-5", "output", 50));
+        expect(text).toContain(tokenLine("claude-sonnet-5", "cached_input", 300));
+        expect(text).toContain(tokenLine("claude-sonnet-5", "cache_write", 40));
+        expect(text).toContain(tokenLine("claude-sonnet-5", "reasoning", 7));
+        expect(text).toContain(tokenLine("claude-haiku-4-5-20251001", "input", 906));
+        expect(text).toContain(tokenLine("claude-haiku-4-5-20251001", "output", 12));
+        expect(text).toContain(
+          'ai_sessions{agent_instance="jumi",source="claude",profile="default",model="claude-sonnet-5"} 1'
+        );
+      }
+    );
+  });
+
+  test("records usage on non-zero exit", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\n' '${RESULT_EVENT}'
+exit 1
+`,
+      async (workdir) => {
+        const result = await runClaude({ prompt: "prompt", model: "sonnet", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(renderTokenMetrics()).toContain(tokenLine("claude-haiku-4-5-20251001", "input", 906));
+      }
+    );
+  });
+
+  test("falls back to deduplicated assistant usage when killed before result", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\n' '${assistantEvent("msg_1", "claude-opus-5", 10, 1)}'
+printf '%s\n' '${assistantEvent("msg_1", "claude-opus-5", 10, 4)}'
+printf '%s\n' '${assistantEvent("msg_2", "claude-opus-5", 5, 6)}'
+exec sleep 30
+`,
+      async (workdir) => {
+        const result = await runClaude({ prompt: "prompt", model: "opus", workdir, sanitizeEnv: true, timeoutMs: 500 });
+        expect(result.status).toBe("timeout");
+        const text = renderTokenMetrics();
+        expect(text).toContain(tokenLine("claude-opus-5", "input", 15));
+        expect(text).toContain(tokenLine("claude-opus-5", "output", 10));
+        expect(text).toContain(tokenLine("claude-opus-5", "cached_input", 200));
+      }
+    );
+  });
+
+  test("missing or unparseable usage is fail-open", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\n' '{"type":"result","result":"done","modelUsage":"nope"}'
+printf '%s\n' '{not json'
+`,
+      async (workdir) => {
+        const result = await runClaude({ prompt: "prompt", model: "opus", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toBe("done\n{not json");
+        expect(renderTokenMetrics()).not.toContain('source="claude"');
       }
     );
   });
