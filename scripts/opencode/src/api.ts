@@ -436,7 +436,11 @@ export class GiteaAPI {
     while (page <= 40) {
       const batch = await this.get<GiteaComment[]>(`${path}?limit=50&page=${page}`);
       for (const comment of batch) {
-        if (loginEquals(comment.user?.login, botUsername) && typeof comment.body === "string" && comment.body.includes(marker)) {
+        if (
+          loginEquals(comment.user?.login, botUsername) &&
+          typeof comment.body === "string" &&
+          comment.body.includes(marker)
+        ) {
           return { id: comment.id };
         }
       }
