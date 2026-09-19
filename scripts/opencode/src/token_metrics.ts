@@ -1,4 +1,4 @@
-/** Process-local OpenCode token counters for Prometheus /metrics. */
+/** Process-local OpenCode and Claude token counters for Prometheus /metrics. */
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -6,12 +6,15 @@ import { resetTraceExportForTests, traceExportErrors } from "./phoenix.ts";
 
 export const TOKEN_TYPES = ["input", "cached_input", "output", "cache_write", "reasoning"] as const;
 export type TokenType = (typeof TOKEN_TYPES)[number];
+/** Harness that produced the tokens; exported as the existing `source` label. */
+export type TokenSource = "opencode" | "claude";
+/** Per-model token totals for one harness run. */
+export type ModelTokenUsage = Map<string, Record<TokenType, number>>;
 
 type TokenKey = string;
 type SessionKey = string;
 
 const counters = new Map<TokenKey, number>();
-const gauges = new Map<TokenKey, number>();
 const sessions = new Map<SessionKey, number>();
 let lastSuccessSeconds = 0;
 let errors = 0;
@@ -52,8 +55,12 @@ export function normalizeOpenCodeModel(raw: string | null | undefined): string {
   return text;
 }
 
-function tokenKey(model: string, tokenType: TokenType): TokenKey {
-  return `${model}\0${tokenType}`;
+function tokenKey(source: TokenSource, model: string, tokenType: TokenType): TokenKey {
+  return `${source}\0${model}\0${tokenType}`;
+}
+
+function sessionKey(source: TokenSource, model: string): SessionKey {
+  return `${source}\0${model}`;
 }
 
 function add(map: Map<string, number>, key: string, value: number): void {
@@ -62,7 +69,6 @@ function add(map: Map<string, number>, key: string, value: number): void {
 
 export function resetTokenMetricsForTests(): void {
   counters.clear();
-  gauges.clear();
   sessions.clear();
   lastSuccessSeconds = 0;
   errors = 0;
@@ -104,12 +110,11 @@ export function recordOpenCodeDb(path: string): boolean {
       let tokensExist = false;
       for (const row of rows) {
         const model = normalizeOpenCodeModel(row.model);
-        add(sessions, model, Number(row.session_count) || 0);
+        add(sessions, sessionKey("opencode", model), Number(row.session_count) || 0);
         for (const tokenType of TOKEN_TYPES) {
           const value = Number(row[COLUMN_BY_TYPE[tokenType] as keyof typeof row]) || 0;
           if (value > 0) tokensExist = true;
-          add(counters, tokenKey(model, tokenType), value);
-          gauges.set(tokenKey(model, tokenType), counters.get(tokenKey(model, tokenType)) ?? 0);
+          add(counters, tokenKey("opencode", model, tokenType), value);
         }
       }
       lastSuccessSeconds = Math.floor(Date.now() / 1000);
@@ -123,10 +128,22 @@ export function recordOpenCodeDb(path: string): boolean {
   }
 }
 
-function seriesLabels(model: string, tokenType?: TokenType): string {
+/**
+ * Record one Claude child run's parent-held usage (from stream-json stdout).
+ * Fail-open: missing usage records nothing and never throws.
+ */
+export function recordClaudeUsage(usage: ModelTokenUsage | undefined): void {
+  if (!usage) return;
+  for (const [model, tokens] of usage) {
+    add(sessions, sessionKey("claude", model), 1);
+    for (const tokenType of TOKEN_TYPES) add(counters, tokenKey("claude", model, tokenType), tokens[tokenType]);
+  }
+}
+
+function seriesLabels(source: TokenSource, model: string, tokenType?: TokenType): string {
   const parts = [
     `agent_instance="${escapeLabel(agentInstance())}"`,
-    'source="opencode"',
+    `source="${source}"`,
     'profile="default"',
     `model="${escapeLabel(model)}"`,
   ];
@@ -155,21 +172,23 @@ export function renderTokenMetrics(): string {
 
   const tokenEntries = [...counters.entries()].sort(([a], [b]) => a.localeCompare(b));
   for (const [key, value] of tokenEntries) {
-    const [model, tokenType] = key.split("\0") as [string, TokenType];
-    lines.push(`ai_tokens_total{${seriesLabels(model, tokenType)}} ${value}`);
+    const [source, model, tokenType] = key.split("\0") as [TokenSource, string, TokenType];
+    lines.push(`ai_tokens_total{${seriesLabels(source, model, tokenType)}} ${value}`);
   }
 
   lines.push("# HELP ai_tokens Current in-process token totals (reset on process restart)");
   lines.push("# TYPE ai_tokens gauge");
-  for (const [key, value] of [...gauges.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    const [model, tokenType] = key.split("\0") as [string, TokenType];
-    lines.push(`ai_tokens{${seriesLabels(model, tokenType)}} ${value}`);
+  // Same in-process totals as ai_tokens_total, exported as a gauge.
+  for (const [key, value] of tokenEntries) {
+    const [source, model, tokenType] = key.split("\0") as [TokenSource, string, TokenType];
+    lines.push(`ai_tokens{${seriesLabels(source, model, tokenType)}} ${value}`);
   }
 
   lines.push("# HELP ai_sessions Sessions recorded by this process");
   lines.push("# TYPE ai_sessions counter");
-  for (const [model, value] of [...sessions.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    lines.push(`ai_sessions{${seriesLabels(model)}} ${value}`);
+  for (const [key, value] of [...sessions.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const [source, model] = key.split("\0") as [TokenSource, string];
+    lines.push(`ai_sessions{${seriesLabels(source, model)}} ${value}`);
   }
 
   return `${lines.join("\n")}\n`;
