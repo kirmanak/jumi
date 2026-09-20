@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { withModelHop } from "../src/fallback.ts";
+import { FORGE_OPENCODE_PERMISSION } from "../src/forge_webfetch.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   CONFLICT_PROMPT,
   FOLLOWUP_PROMPT,
   IMPLEMENT_PROMPT,
   IMPLEMENT_YIELD_PROMPT,
-  REVIEW_OPENCODE_PERMISSION,
   resolveOpenCodePrompt,
   runOpenCode,
 } from "../src/git.ts";
@@ -898,7 +898,7 @@ printf 'KIND_PERM=%s\n' "$OPENCODE_PERMISSION"
           trace: { kind: "review", owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`KIND_PERM=${REVIEW_OPENCODE_PERMISSION}`);
+        expect(result.stdout).toContain(`KIND_PERM=${FORGE_OPENCODE_PERMISSION}`);
       }
     );
     await withFakeOpenCode(
@@ -914,12 +914,12 @@ printf 'PATH_PERM=%s\n' "$OPENCODE_PERMISSION"
           configPath: "/app/.gitea/opencode-review.json",
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`PATH_PERM=${REVIEW_OPENCODE_PERMISSION}`);
+        expect(result.stdout).toContain(`PATH_PERM=${FORGE_OPENCODE_PERMISSION}`);
       }
     );
   });
 
-  test("does not overlay webfetch last-match on worker OpenCode", async () => {
+  test("overlays the same forge webfetch deny on worker OpenCode", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
 printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
@@ -935,10 +935,56 @@ printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
             trace: { kind, owner: "kirmanak", repo: "demo" },
           });
           expect(result.status).toBe("ok");
-          expect(result.stdout?.trim()).toBe("PERM=");
+          expect(result.stdout?.trim()).toBe(`PERM=${FORGE_OPENCODE_PERMISSION}`);
         }
       }
     );
+  });
+
+  test("denies the forge host even when the job env tries to loosen it", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          configPath: "/app/.gitea/opencode-implement.json",
+          trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+          extraEnv: { OPENCODE_PERMISSION: JSON.stringify({ webfetch: "allow" }) },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout?.trim()).toBe(`PERM=${FORGE_OPENCODE_PERMISSION}`);
+      }
+    );
+  });
+
+  test("keeps the forge webfetch deny when the parent env is inherited", async () => {
+    const previous = process.env.OPENCODE_PERMISSION;
+    process.env.OPENCODE_PERMISSION = JSON.stringify({ webfetch: "allow" });
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({
+            prompt: "prompt",
+            model: "model",
+            workdir,
+            trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+          });
+          expect(result.status).toBe("ok");
+          expect(result.stdout?.trim()).toBe(`PERM=${FORGE_OPENCODE_PERMISSION}`);
+        }
+      );
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_PERMISSION;
+      else process.env.OPENCODE_PERMISSION = previous;
+    }
   });
 
   test("reads OPENCODE_CONFIG from the environment when configPath is omitted", async () => {

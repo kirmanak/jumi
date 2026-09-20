@@ -14,6 +14,7 @@ import {
 } from "../src/claude.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { runRegisteredEngine } from "../src/engine_dispatch.ts";
+import { CLAUDE_DISALLOWED_TOOLS, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
@@ -82,6 +83,8 @@ describe("claudeArgv", () => {
       CLAUDE_PERMISSION_MODE,
       "--allowedTools",
       CLAUDE_ALLOWED_TOOLS,
+      "--disallowedTools",
+      CLAUDE_DISALLOWED_TOOLS,
       "--output-format",
       CLAUDE_OUTPUT_FORMAT,
       "--verbose",
@@ -93,6 +96,18 @@ describe("claudeArgv", () => {
     expect(args).not.toContain("--bare");
     expect(CLAUDE_SETTING_SOURCES).toBe("user");
     expect(CLAUDE_OUTPUT_FORMAT).toBe("stream-json");
+  });
+
+  test("denies WebFetch of the forge apex and its subdomains by host, not by prose", () => {
+    // Claude matches `domain:` against the hostname, and `*.host` does not
+    // cover the apex, so both rules are needed. Deny outranks --allowedTools,
+    // which keeps WebFetch available for public docs.
+    expect(CLAUDE_DISALLOWED_TOOLS.split(",")).toEqual([
+      `WebFetch(domain:${FORGE_DENY_DOMAIN})`,
+      `WebFetch(domain:*.${FORGE_DENY_DOMAIN})`,
+    ]);
+    expect(CLAUDE_ALLOWED_TOOLS.split(",")).toContain("WebFetch");
+    expect(claudeArgv({ model: "opus", workdir: "/work" })).toContain("--disallowedTools");
   });
 });
 
@@ -124,6 +139,7 @@ printf 'HOME=%s OAUTH=%s XDG_CONFIG=%s SECRET=%s ARGS=%s CWD=%s\\n' "$HOME" "$CL
         expect(result.stdout).toContain(`-p --setting-sources ${CLAUDE_SETTING_SOURCES}`);
         expect(result.stdout).toContain(`--permission-mode ${CLAUDE_PERMISSION_MODE}`);
         expect(result.stdout).toContain(`--allowedTools ${CLAUDE_ALLOWED_TOOLS}`);
+        expect(result.stdout).toContain(`--disallowedTools ${CLAUDE_DISALLOWED_TOOLS}`);
         expect(result.stdout).toContain("--model opus --effort high");
         expect(result.stdout).not.toContain("--bare");
         expect(result.stdout).toContain(`CWD=${workdir}`);

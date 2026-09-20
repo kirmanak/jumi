@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { FORGE_DENY_DOMAIN, FORGE_WEBFETCH_PERMISSION } from "../src/forge_webfetch.ts";
 import { IMPLEMENT_PROMPT } from "../src/implement.ts";
 
 interface OpenCodeImplementConfig {
@@ -49,6 +50,22 @@ describe("opencode implement config", () => {
     expect(config.permission.webfetch).toBe("allow");
     expect(config.permission.lsp).toBe("allow");
     expect(config.permission.question).toBe("deny");
+  });
+
+  test("denies webfetch of the forge host for the worker, not just the reviewer", () => {
+    // The JSON field stays scalar allow (OpenCode types webfetch as Action);
+    // the last-match object arrives via OPENCODE_PERMISSION on every spawn.
+    const rules = FORGE_WEBFETCH_PERMISSION;
+    expect(Object.keys(rules)).toEqual(["*", `*${FORGE_DENY_DOMAIN}*`, "*github.com/search*"]);
+
+    expect(bashPermission(rules, `https://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/issues/79`)).toBe("deny");
+    expect(bashPermission(rules, `https://gitea.${FORGE_DENY_DOMAIN}/api/v1/repos/personal/jumi/pulls`)).toBe("deny");
+    expect(bashPermission(rules, `http://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/actions`)).toBe("deny");
+    expect(bashPermission(rules, `https://${FORGE_DENY_DOMAIN}/swagger`)).toBe("deny");
+    expect(bashPermission(rules, "https://github.com/search?q=foo")).toBe("deny");
+
+    expect(bashPermission(rules, "https://docs.gitea.com/installation")).toBe("allow");
+    expect(bashPermission(rules, "https://bun.sh/docs/cli/test")).toBe("allow");
   });
 
   test("allows Read of baked review-skills after star deny (last-match)", () => {

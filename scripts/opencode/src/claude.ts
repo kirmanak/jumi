@@ -10,6 +10,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
+import { CLAUDE_DISALLOWED_TOOLS } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
@@ -175,6 +176,10 @@ export function claudeArgv(opts: EngineRunOptions): string[] {
     CLAUDE_PERMISSION_MODE,
     "--allowedTools",
     CLAUDE_ALLOWED_TOOLS,
+    // Deny beats every allow, so WebFetch stays on the allow-list for public
+    // docs while the forge host itself is refused by the binary.
+    "--disallowedTools",
+    CLAUDE_DISALLOWED_TOOLS,
     "--output-format",
     CLAUDE_OUTPUT_FORMAT,
     "--verbose",
