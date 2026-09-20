@@ -13,8 +13,8 @@ import {
   cancelIssueWork,
   INCOMPLETE_IMPLEMENT,
   implementIssue,
+  isValidatedSkipText,
   jumiPrBodyRegion,
-  parseSkipArtifact,
   replaceJumiPrBodyRegion,
   SKIP_FILE,
   seedPullRequestDescription,
@@ -97,17 +97,19 @@ async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
   }
 }
 
-describe("parseSkipArtifact", () => {
+describe("isValidatedSkipText", () => {
   test("missing, empty, and whitespace-only are not validated", () => {
-    expect(parseSkipArtifact(null)).toEqual({ status: "missing" });
-    expect(parseSkipArtifact(undefined)).toEqual({ status: "missing" });
-    expect(parseSkipArtifact("")).toEqual({ status: "invalid" });
-    expect(parseSkipArtifact("  \n")).toEqual({ status: "invalid" });
+    expect(isValidatedSkipText(null)).toBe(false);
+    expect(isValidatedSkipText(undefined)).toBe(false);
+    expect(isValidatedSkipText("")).toBe(false);
+    expect(isValidatedSkipText("  \n")).toBe(false);
+    expect(isValidatedSkipText("\0\0")).toBe(false);
   });
 
-  test("non-empty content is a validated skip and does not interpret prose", () => {
-    expect(parseSkipArtifact("already on main")).toEqual({ status: "ok", content: "already on main" });
-    expect(parseSkipArtifact("nothing to change\n")).toEqual({ status: "ok", content: "nothing to change" });
+  test("non-empty content is a validated skip and the prose is not interpreted", () => {
+    expect(isValidatedSkipText("already on main")).toBe(true);
+    expect(isValidatedSkipText("nothing to change\n")).toBe(true);
+    expect(isValidatedSkipText("unknown")).toBe(true);
   });
 });
 
@@ -1737,6 +1739,113 @@ describe("implementIssue", () => {
       expect(calls).toEqual([
         { model: "claude-opus-5", hopFromIncomplete: undefined },
         { model: "xai/grok-4.6", hopFromIncomplete: undefined },
+      ]);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("incomplete hop starts from the issue text the gate validated", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const calls: Array<{ model: string; continueSession?: boolean; hopFromIncomplete?: boolean; task: string }> = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          calls.push({
+            model: opts.model,
+            continueSession: opts.continueSession,
+            hopFromIncomplete: opts.hopFromIncomplete,
+            task: await readFile(join(workdir, "kirmanak/demo/12/JUMI_TASK.md"), "utf8"),
+          });
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      // Three spawns: the first run, one continue for the edit, and one hop. The
+      // edit is not handled twice, and the hop runner sees the edited task text.
+      expect(calls).toHaveLength(3);
+      expect(calls[0]).toMatchObject({ model: "claude-opus-5", continueSession: undefined });
+      expect(calls[0]?.task).toContain("Fix the thing");
+      expect(calls[1]).toMatchObject({ model: "claude-opus-5", continueSession: true });
+      expect(calls[1]?.task).toContain("Rewritten title");
+      expect(calls[2]).toMatchObject({ model: "xai/grok-4.6", hopFromIncomplete: true });
+      expect(calls[2]?.task).toContain("Rewritten title");
+      expect(calls[2]?.task).toContain("Do this instead.");
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("declined incomplete hop does not continue a session in a stripped worktree", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const calls: Array<{ model: string; continueSession?: boolean; hopFromIncomplete?: boolean }> = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          calls.push({
+            model: opts.model,
+            continueSession: opts.continueSession,
+            hopFromIncomplete: opts.hopFromIncomplete,
+          });
+          if (opts.model === "claude-opus-5") {
+            return { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true };
+          }
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      // The auth hop already spent the chain, so the incomplete round spawns
+      // nothing and must not re-gate: no fourth `--continue` without a session.
+      expect(calls).toEqual([
+        { model: "claude-opus-5", continueSession: undefined, hopFromIncomplete: undefined },
+        { model: "xai/grok-4.6", continueSession: false, hopFromIncomplete: undefined },
+        { model: "xai/grok-4.6", continueSession: true, hopFromIncomplete: undefined },
       ]);
       expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
     });

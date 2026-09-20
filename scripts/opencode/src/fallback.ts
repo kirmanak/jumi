@@ -201,7 +201,8 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         await beginHop(hop, opts, runners[index]!, next);
         index++;
       } else {
-        return { status: "ok" };
+        // Nothing ran: say so rather than look like a runner that produced nothing.
+        return { status: "ok", hopDeclined: true };
       }
     }
 

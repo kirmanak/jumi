@@ -63,28 +63,22 @@ export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
 export const SKIP_FILE = "JUMI_SKIP.md";
 export const INCOMPLETE_IMPLEMENT = "Incomplete implement: no skip artifact";
 
-export type SkipArtifactRead = { status: "ok"; content: string } | { status: "missing" } | { status: "invalid" };
-
-export function parseSkipArtifact(text: string | null | undefined): SkipArtifactRead {
-  if (text == null) return { status: "missing" };
-  const content = text.replaceAll("\0", "").trim();
-  if (!content) return { status: "invalid" };
-  return { status: "ok", content };
+/** The artifact only has to be non-empty; its prose is never read as proof of anything. */
+export function isValidatedSkipText(text: string | null | undefined): boolean {
+  if (text == null) return false;
+  return text.replaceAll("\0", "").trim().length > 0;
 }
 
-export async function readSkipArtifact(worktree: string): Promise<SkipArtifactRead> {
+/** True only for a non-empty regular file: missing, empty, directory, and symlink are incomplete. */
+export async function readValidatedSkip(worktree: string): Promise<boolean> {
   const path = join(worktree, SKIP_FILE);
   try {
     const info = await lstat(path);
-    if (!info.isFile()) return { status: "invalid" };
-    return parseSkipArtifact(await readFile(path, "utf8"));
+    if (!info.isFile()) return false;
+    return isValidatedSkipText(await readFile(path, "utf8"));
   } catch {
-    return { status: "missing" };
+    return false;
   }
-}
-
-function isValidatedSkip(read: SkipArtifactRead): boolean {
-  return read.status === "ok";
 }
 
 export type OpenCodeRunner = Engine;
@@ -340,8 +334,8 @@ export async function implementIssue(
       await loop.stampHeadSha(headSha);
 
       throwIfAborted(opts.abortSignal);
-      const writeTaskFiles = async () => {
-        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(opts.job));
+      const writeTaskFiles = async (job: IssueJob) => {
+        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(job));
         if (queue.length > 0) {
           await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
         } else {
@@ -349,7 +343,7 @@ export async function implementIssue(
         }
         await rm(join(worktree, BLOCKED_BY_FILE), { force: true }).catch(() => undefined);
       };
-      await writeTaskFiles();
+      await writeTaskFiles(opts.job);
       await upsertWorkerComment(
         opts.api,
         owner,
@@ -359,6 +353,8 @@ export async function implementIssue(
         "Jumi is implementing this issue."
       );
 
+      // Set when the chain refused an incomplete hop, so no child ran at all.
+      let hopDeclined = false;
       const runEngine = async (
         label: string,
         kind: "implement" | "follow-up" = "implement",
@@ -392,9 +388,16 @@ export async function implementIssue(
           onPid: loop.engineOnPid(opts.onPid),
         };
         runner = undefined;
+        hopDeclined = false;
         const result = await runEngineStamped(engine, runOpts, (r) => {
           runner = r;
         });
+        if (result.hopDeclined === true) {
+          // No spawn happened, so the stamp would name a runner that never ran.
+          runner = undefined;
+          hopDeclined = true;
+          return undefined;
+        }
         // Gate on the message: only the quota path returns engine `stuck`
         // today, but a future non-quota producer must not set the quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
@@ -477,10 +480,15 @@ export async function implementIssue(
         return skipBlocked(blockedOnComment([blocker], owner, repo));
       };
 
+      // The issue text the gate last validated. Every later round — a rejected-yield
+      // reset or the incomplete hop — starts from this, never from the pre-run job.
+      let liveJob = opts.job;
+      let snapshot = snapshotFromJob(opts.job);
+
       const resetAfterRejectedYield = async () => {
         await deletePushedIssueBranch();
         await addWorktreeFromDefault();
-        await writeTaskFiles();
+        await writeTaskFiles(liveJob);
       };
 
       const handleYield = async (rejectedOnce: boolean): Promise<ImplementResult | "continue" | "retry"> => {
@@ -496,7 +504,6 @@ export async function implementIssue(
 
       let incompleteHopped = false;
       let prFileContents: string | null = null;
-      let liveJob = opts.job;
       let porcelain = "";
       for (;;) {
         const quotaSkip = await runEngine(
@@ -508,6 +515,10 @@ export async function implementIssue(
           incompleteHopped ? { hopFromIncomplete: true } : undefined
         );
         if (quotaSkip) return quotaSkip;
+        // The chain had no runner left to hop to, so nothing ran this round: the
+        // sentinels are already stripped, so re-gating would only re-handle an
+        // issue edit and continue a session this worktree no longer has.
+        if (hopDeclined) return skipClaimedWork(loop, INCOMPLETE_IMPLEMENT);
 
         const firstYield = await handleYield(false);
         if (firstYield === "retry") {
@@ -534,7 +545,7 @@ export async function implementIssue(
             repo,
             issueNumber,
             botUsername: opts.botUsername,
-            snapshot: snapshotFromJob(opts.job),
+            snapshot,
             continueOpenCode: async (issue) => {
               await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
               const quotaContinued = await runEngine(
@@ -562,14 +573,15 @@ export async function implementIssue(
           return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
         }
         liveJob = jobWithIssue(opts.job, gate.issue);
+        snapshot = gate.snapshot;
 
         throwIfAborted(opts.abortSignal);
         prFileContents = await readPullRequestDescription(worktree);
-        const skipArtifact = await readSkipArtifact(worktree);
+        const validatedSkip = await readValidatedSkip(worktree);
         await stripSentinels(worktree, [PR_DESCRIPTION_FILE, SKIP_FILE, "JUMI_TASK.md", QUEUE_FILE, BLOCKED_BY_FILE]);
         porcelain = await worktreePorcelain(loop);
         if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
-          if (isValidatedSkip(skipArtifact)) {
+          if (validatedSkip) {
             await loop.stopHeartbeat();
             await diary("no changes");
             await loop.stampTerminalClaim(opts.api);
@@ -578,7 +590,7 @@ export async function implementIssue(
           }
           if (!incompleteHopped && canIncompleteHop(opts)) {
             incompleteHopped = true;
-            await writeTaskFiles();
+            await writeTaskFiles(liveJob);
             continue;
           }
           return skipClaimedWork(loop, INCOMPLETE_IMPLEMENT);

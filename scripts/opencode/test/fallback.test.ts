@@ -520,7 +520,7 @@ describe("withEngineChain", () => {
     const run = withEngineChain(engine, { chain: [spark] });
     await run({ model: spark.model, workdir: "/tmp" });
     const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
-    expect(hopped).toEqual({ status: "ok" });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
     expect(n).toBe(1);
   });
 
