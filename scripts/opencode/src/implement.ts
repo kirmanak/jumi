@@ -60,6 +60,32 @@ export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } 
 
 const PR_BODY_MAX_CHARS = 8000;
 export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
+export const SKIP_FILE = "JUMI_SKIP.md";
+export const INCOMPLETE_IMPLEMENT = "Incomplete implement: no skip artifact";
+
+export type SkipArtifactRead = { status: "ok"; content: string } | { status: "missing" } | { status: "invalid" };
+
+export function parseSkipArtifact(text: string | null | undefined): SkipArtifactRead {
+  if (text == null) return { status: "missing" };
+  const content = text.replaceAll("\0", "").trim();
+  if (!content) return { status: "invalid" };
+  return { status: "ok", content };
+}
+
+export async function readSkipArtifact(worktree: string): Promise<SkipArtifactRead> {
+  const path = join(worktree, SKIP_FILE);
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) return { status: "invalid" };
+    return parseSkipArtifact(await readFile(path, "utf8"));
+  } catch {
+    return { status: "missing" };
+  }
+}
+
+function isValidatedSkip(read: SkipArtifactRead): boolean {
+  return read.status === "ok";
+}
 
 export type OpenCodeRunner = Engine;
 
@@ -109,6 +135,11 @@ export interface ImplementOptions extends PickupPolicy {
   jobId?: string;
   skipLatches?: SkipLatchStore;
   previousError?: string | null;
+}
+
+function canIncompleteHop(opts: Pick<ImplementOptions, "chain" | "fallbackModel">): boolean {
+  if (opts.chain && opts.chain.length >= 2) return true;
+  return Boolean(opts.fallbackModel);
 }
 
 function logDefault(message: string) {
@@ -332,7 +363,7 @@ export async function implementIssue(
         label: string,
         kind: "implement" | "follow-up" = "implement",
         prompt?: string,
-        extra?: { continueSession?: boolean }
+        extra?: { continueSession?: boolean; hopFromIncomplete?: boolean }
       ): Promise<ImplementResult | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
@@ -355,6 +386,7 @@ export async function implementIssue(
           },
           ...(prompt != null ? { prompt } : {}),
           ...(extra?.continueSession ? { continueSession: true } : {}),
+          ...(extra?.hopFromIncomplete ? { hopFromIncomplete: true } : {}),
           logger: log,
           abortSignal: opts.abortSignal,
           onPid: loop.engineOnPid(opts.onPid),
@@ -462,77 +494,96 @@ export async function implementIssue(
         return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
       };
 
-      const quotaSkip = await runEngine(
-        `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
-        "implement",
-        queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : undefined
-      );
-      if (quotaSkip) return quotaSkip;
-
-      const firstYield = await handleYield(false);
-      if (firstYield === "retry") {
-        log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
-        await resetAfterRejectedYield();
-        const quotaRetry = await runEngine(
-          `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
+      let incompleteHopped = false;
+      let prFileContents: string | null = null;
+      let liveJob = opts.job;
+      let porcelain = "";
+      for (;;) {
+        const quotaSkip = await runEngine(
+          incompleteHopped
+            ? `Re-running OpenCode after incomplete implement for ${owner}/${repo}#${issueNumber}`
+            : `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
           "implement",
-          BLOCKED_BY_REJECTED_PROMPT
+          queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : undefined,
+          incompleteHopped ? { hopFromIncomplete: true } : undefined
         );
-        if (quotaRetry) return quotaRetry;
-        const secondYield = await handleYield(true);
-        if (secondYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
-        if (secondYield !== "continue") return secondYield;
-      } else if (firstYield !== "continue") {
-        return firstYield;
-      }
+        if (quotaSkip) return quotaSkip;
 
-      let gate: ShipGate;
-      try {
-        gate = await gateShipAfterOpenCode({
-          api: opts.api,
-          owner,
-          repo,
-          issueNumber,
-          botUsername: opts.botUsername,
-          snapshot: snapshotFromJob(opts.job),
-          continueOpenCode: async (issue) => {
-            await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
-            const quotaContinued = await runEngine(
-              `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
-              "follow-up",
-              undefined,
-              { continueSession: true }
-            );
-            if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
-          },
-        });
-      } catch (err) {
-        if (isQuotaError(err)) {
-          throwIfQuotaWait({
-            err,
-            model: opts.model,
-            fallbackModel: opts.fallbackModel,
-            previousError: opts.previousError,
-          });
-          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+        const firstYield = await handleYield(false);
+        if (firstYield === "retry") {
+          log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
+          await resetAfterRejectedYield();
+          const quotaRetry = await runEngine(
+            `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
+            "implement",
+            BLOCKED_BY_REJECTED_PROMPT
+          );
+          if (quotaRetry) return quotaRetry;
+          const secondYield = await handleYield(true);
+          if (secondYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
+          if (secondYield !== "continue") return secondYield;
+        } else if (firstYield !== "continue") {
+          return firstYield;
         }
-        throw err;
-      }
-      if (gate.action === "skip") {
-        return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
-      }
-      const liveJob = jobWithIssue(opts.job, gate.issue);
 
-      throwIfAborted(opts.abortSignal);
-      const prFileContents = await readPullRequestDescription(worktree);
-      await stripSentinels(worktree, [PR_DESCRIPTION_FILE, "JUMI_TASK.md", QUEUE_FILE, BLOCKED_BY_FILE]);
-      const porcelain = await worktreePorcelain(loop);
-      if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
-        await loop.stopHeartbeat();
-        await diary("no changes");
-        await loop.stampTerminalClaim(opts.api);
-        await loop.detachWorktree();
-        return { status: "no-changes" };
+        let gate: ShipGate;
+        try {
+          gate = await gateShipAfterOpenCode({
+            api: opts.api,
+            owner,
+            repo,
+            issueNumber,
+            botUsername: opts.botUsername,
+            snapshot: snapshotFromJob(opts.job),
+            continueOpenCode: async (issue) => {
+              await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
+              const quotaContinued = await runEngine(
+                `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
+                "follow-up",
+                undefined,
+                { continueSession: true }
+              );
+              if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
+            },
+          });
+        } catch (err) {
+          if (isQuotaError(err)) {
+            throwIfQuotaWait({
+              err,
+              model: opts.model,
+              fallbackModel: opts.fallbackModel,
+              previousError: opts.previousError,
+            });
+            return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+          }
+          throw err;
+        }
+        if (gate.action === "skip") {
+          return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
+        }
+        liveJob = jobWithIssue(opts.job, gate.issue);
+
+        throwIfAborted(opts.abortSignal);
+        prFileContents = await readPullRequestDescription(worktree);
+        const skipArtifact = await readSkipArtifact(worktree);
+        await stripSentinels(worktree, [PR_DESCRIPTION_FILE, SKIP_FILE, "JUMI_TASK.md", QUEUE_FILE, BLOCKED_BY_FILE]);
+        porcelain = await worktreePorcelain(loop);
+        if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
+          if (isValidatedSkip(skipArtifact)) {
+            await loop.stopHeartbeat();
+            await diary("no changes");
+            await loop.stampTerminalClaim(opts.api);
+            await loop.detachWorktree();
+            return { status: "no-changes" };
+          }
+          if (!incompleteHopped && canIncompleteHop(opts)) {
+            incompleteHopped = true;
+            await writeTaskFiles();
+            continue;
+          }
+          return skipClaimedWork(loop, INCOMPLETE_IMPLEMENT);
+        }
+        break;
       }
 
       if (branch === opts.job.defaultBranch) {

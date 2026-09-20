@@ -495,6 +495,52 @@ describe("withEngineChain", () => {
     expect(n).toBe(1);
   });
 
+  test("hopFromIncomplete advances once from scratch", async () => {
+    const calls: Array<{ model: string; continueSession?: boolean; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({ model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+      return ok(opts.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toMatchObject(ok(grok.model));
+    expect(calls).toEqual([
+      { model: spark.model, continueSession: undefined, hop: undefined },
+      { model: grok.model, continueSession: false, hop: true },
+    ]);
+  });
+
+  test("hopFromIncomplete with no next runner does not spawn", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toEqual({ status: "ok" });
+    expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete still hops on auth after the incomplete advance", async () => {
+    const models: string[] = [];
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === grok.model) {
+        return { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true };
+      }
+      return ok(opts.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok, claude] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toMatchObject(ok(claude.model));
+    expect(models).toEqual([spark.model, grok.model, claude.model]);
+  });
+
   test("infra does not hop", async () => {
     const infra = new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
     let n = 0;

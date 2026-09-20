@@ -33,6 +33,7 @@ export interface EngineRunOptions {
   prompt?: string;
   continueSession?: boolean;
   hop?: boolean;
+  hopFromIncomplete?: boolean;
   deferQuotaExit?: boolean;
 }
 

@@ -194,9 +194,19 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
 
   return async (opts: EngineRunOptions): Promise<EngineResult> => {
     const runners = runnersFor(opts);
-    const current = runners[index]!;
 
-    if (index > 0) {
+    if (opts.hopFromIncomplete === true && !opts.continueSession && !opts.abortSignal?.aborted) {
+      const next = runners[index + 1];
+      if (next && (await leaseAllowsHop(hop, opts.timeoutMs))) {
+        await beginHop(hop, opts, runners[index]!, next);
+        index++;
+      } else {
+        return { status: "ok" };
+      }
+    }
+
+    if (index > 0 && opts.hopFromIncomplete !== true) {
+      const current = runners[index]!;
       try {
         return stampRunner(await engine(engineOptsForRunner(opts, current)), current);
       } catch (err) {
