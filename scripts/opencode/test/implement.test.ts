@@ -1798,6 +1798,51 @@ describe("implementIssue", () => {
     });
   });
 
+  test("skip artifact written before a continue round does not validate no-changes", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          models.push(opts.model);
+          // Only the first child skips, against the pre-edit issue text.
+          if (models.length === 1) await writeFile(join(worktree, SKIP_FILE), "already done");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      // The stale artifact is dropped before the continue round, so the edited
+      // issue is incomplete and hops instead of being consumed by a skip.
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(models).toEqual(["claude-opus-5", "claude-opus-5", "xai/grok-4.6"]);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
   test("declined incomplete hop does not continue a session in a stripped worktree", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi({

@@ -131,11 +131,6 @@ export interface ImplementOptions extends PickupPolicy {
   previousError?: string | null;
 }
 
-function canIncompleteHop(opts: Pick<ImplementOptions, "chain" | "fallbackModel">): boolean {
-  if (opts.chain && opts.chain.length >= 2) return true;
-  return Boolean(opts.fallbackModel);
-}
-
 function logDefault(message: string) {
   console.log(`[implement] ${message}`);
 }
@@ -342,6 +337,9 @@ export async function implementIssue(
           await rm(join(worktree, QUEUE_FILE), { force: true }).catch(() => undefined);
         }
         await rm(join(worktree, BLOCKED_BY_FILE), { force: true }).catch(() => undefined);
+        // Every child-written sentinel is dropped before a re-spawn, so a skip
+        // artifact can only ever describe the round that just ran.
+        await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
       };
       await writeTaskFiles(opts.job);
       await upsertWorkerComment(
@@ -547,7 +545,7 @@ export async function implementIssue(
             botUsername: opts.botUsername,
             snapshot,
             continueOpenCode: async (issue) => {
-              await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(opts.job, issue)));
+              await writeTaskFiles(jobWithIssue(opts.job, issue));
               const quotaContinued = await runEngine(
                 `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
                 "follow-up",
@@ -588,7 +586,9 @@ export async function implementIssue(
             await loop.detachWorktree();
             return { status: "no-changes" };
           }
-          if (!incompleteHopped && canIncompleteHop(opts)) {
+          if (!incompleteHopped) {
+            // The chain owns whether a hop is possible; it answers `hopDeclined`
+            // at the top of the next round when there is no runner left.
             incompleteHopped = true;
             await writeTaskFiles(liveJob);
             continue;

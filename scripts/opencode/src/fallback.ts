@@ -179,7 +179,11 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
   // Without a chain the bare engine runs and stamps fall back to the spawn
   // options, which workers never type, so they read `opencode`. A Claude
   // primary must therefore arrive through `chain` (a 1-entry one is fine).
-  if (!hop.chain?.length && !hop.fallbackModel) return engine;
+  if (!hop.chain?.length && !hop.fallbackModel) {
+    // There is no next runner to hop to, so refuse rather than re-spawn the same one.
+    return async (opts: EngineRunOptions): Promise<EngineResult> =>
+      opts.hopFromIncomplete === true ? { status: "ok", hopDeclined: true } : engine(opts);
+  }
 
   let chain: NamedRunner[] | undefined;
   if (hop.chain && hop.chain.length >= 2) chain = hop.chain;

@@ -92,14 +92,13 @@ describe("shouldHopInsteadOfQuotaStuck", () => {
 });
 
 describe("withModelHop", () => {
-  test("unset fallback is identity: one primary call, no hop", async () => {
+  test("unset fallback passes through: one primary call, no hop", async () => {
     const models: string[] = [];
     const engine: Engine = async (opts) => {
       models.push(opts.model);
       return unavailable;
     };
     const wrapped = withModelHop(engine, {});
-    expect(wrapped).toBe(engine);
     const result = await wrapped({ model: "openai/gpt-5.5", workdir: "/tmp" });
     expect(result).toEqual(unavailable);
     expect(models).toEqual(["openai/gpt-5.5"]);
@@ -518,6 +517,19 @@ describe("withEngineChain", () => {
       return ok(spark.model);
     };
     const run = withEngineChain(engine, { chain: [spark] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
+    expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete with no chain at all does not re-run the same engine", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, {});
     await run({ model: spark.model, workdir: "/tmp" });
     const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
     expect(hopped).toEqual({ status: "ok", hopDeclined: true });
