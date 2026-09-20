@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Prove the reviewer webfetch permission map against the *installed OpenCode
+ * Prove the forge webfetch permission map against the *installed OpenCode
  * binary*, not a re-implementation of its wildcard matcher.
  *
  * A unit test that copies `Wildcard.match` grades itself: an OpenCode upgrade
@@ -19,7 +19,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION } from "./review_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeOpenCodePermission, forgeWebfetchPermission } from "./forge_webfetch.ts";
 
 /** Body served for every probe target; seeing it means webfetch actually ran. */
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
@@ -38,7 +38,7 @@ const RUN_TIMEOUT_MS = 60_000;
  * What a blocked call must echo back. OpenCode serializes the whole webfetch
  * ruleset into the tool result — filtered by permission type, not by the rule
  * that matched — so there is nothing per-row to assert on. Seeing every deny
- * pattern proves the reviewer's own map was the one in force, which is what
+ * pattern proves the production map was the one in force, which is what
  * separates a real deny from an unrelated failure (network error, bad tool
  * name) that also produces no HTTP hit. Which entry did the denying is
  * established by the URL table below, not by the echo.
@@ -46,7 +46,7 @@ const RUN_TIMEOUT_MS = 60_000;
  * Derived from the shipped map rather than OpenCode's English error text, so
  * an upgrade that rewords the message does not read as a dropped deny.
  */
-const DENY_PATTERNS = Object.entries(REVIEW_WEBFETCH_PERMISSION)
+const DENY_PATTERNS = Object.entries(forgeWebfetchPermission(FORGE_DENY_DOMAIN))
   .filter(([, action]) => action === "deny")
   .map(([pattern]) => pattern);
 
@@ -168,7 +168,7 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
         },
       },
       // webfetch stays scalar here on purpose: the map under test arrives via
-      // OPENCODE_PERMISSION, exactly like the reviewer sets it at run time.
+      // OPENCODE_PERMISSION, exactly like production sets it at run time.
       permission: { webfetch: "allow", edit: "deny", write: "deny", task: "deny", question: "deny" },
     }),
     "utf8"
@@ -188,7 +188,7 @@ async function runOpenCode(
     env: {
       ...process.env,
       OPENCODE_CONFIG: configPath,
-      OPENCODE_PERMISSION: REVIEW_OPENCODE_PERMISSION,
+      OPENCODE_PERMISSION: forgeOpenCodePermission(FORGE_DENY_DOMAIN),
       OPENCODE_DISABLE_PROJECT_CONFIG: "1",
       OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
     },
@@ -233,8 +233,8 @@ function judge(probe: ProbeCase, state: RunState): CaseResult {
     probe,
     ok,
     observed: ok
-      ? "denied, with the reviewer webfetch map in force"
-      : `not denied under the reviewer map (ruleset missing ${missing.join(", ") || "nothing"}): ${result.slice(0, 200)}`,
+      ? "denied, with the forge webfetch map in force"
+      : `not denied under the forge map (ruleset missing ${missing.join(", ") || "nothing"}): ${result.slice(0, 200)}`,
   };
 }
 
@@ -250,7 +250,7 @@ async function main(): Promise<number> {
     await Bun.$`git init -q`.cwd(workdir).quiet();
     const configPath = await writeProbeConfig(dir, origin);
 
-    console.log(`Permission map under test: ${JSON.stringify(REVIEW_WEBFETCH_PERMISSION)}`);
+    console.log(`Permission map under test: ${JSON.stringify(forgeWebfetchPermission(FORGE_DENY_DOMAIN))}`);
     for (const probe of probeCases(origin)) {
       state.url = probe.url;
       state.reached = false;
@@ -281,7 +281,7 @@ async function main(): Promise<number> {
     );
     return 1;
   }
-  console.log(`webfetch permission probe: ${results.length}/${results.length} cases match the reviewer permission map`);
+  console.log(`webfetch permission probe: ${results.length}/${results.length} cases match the forge permission map`);
   return 0;
 }
 

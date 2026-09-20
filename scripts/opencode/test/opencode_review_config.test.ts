@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION } from "../src/git.ts";
+import { FORGE_DENY_DOMAIN, forgeOpenCodePermission, forgeWebfetchPermission } from "../src/forge_webfetch.ts";
 
 interface OpenCodeReviewConfig {
   model?: unknown;
@@ -66,8 +66,8 @@ describe("opencode review config", () => {
   });
 
   test("denies webfetch to homelab Gitea and GitHub search after star allow (last-match)", () => {
-    const rules = REVIEW_WEBFETCH_PERMISSION;
-    expect(JSON.parse(REVIEW_OPENCODE_PERMISSION)).toEqual({ webfetch: rules });
+    const rules = forgeWebfetchPermission(FORGE_DENY_DOMAIN);
+    expect(JSON.parse(forgeOpenCodePermission(FORGE_DENY_DOMAIN))).toEqual({ webfetch: rules });
     expect(rules).toEqual({
       "*": "allow",
       "*kirmanak.stream*": "deny",
@@ -78,8 +78,9 @@ describe("opencode review config", () => {
 
   test("the binary probe drives the shipped map rather than a copy of it", () => {
     const probe = readFileSync(join(process.cwd(), "src/webfetch_probe.ts"), "utf8");
-    expect(probe).toContain('from "./review_webfetch.ts"');
-    expect(probe).toContain("REVIEW_OPENCODE_PERMISSION");
+    expect(probe).toContain('from "./forge_webfetch.ts"');
+    expect(probe).toContain("forgeOpenCodePermission(FORGE_DENY_DOMAIN)");
+    expect(probe).toContain("forgeWebfetchPermission(FORGE_DENY_DOMAIN)");
     // Deny of the forge host and allow of an unrelated host, both on the binary.
     expect(probe).toContain('expect: "allow"');
     expect(probe).toContain('expect: "deny"');
@@ -87,7 +88,6 @@ describe("opencode review config", () => {
     expect(probe).toContain("github.com/search");
     // The deny assertion reads the shipped map, so it cannot drift from it.
     expect(probe).toContain("DENY_PATTERNS");
-    expect(probe).toContain("REVIEW_WEBFETCH_PERMISSION");
   });
 
   test("allows Read of baked review-skills after star deny (last-match)", () => {

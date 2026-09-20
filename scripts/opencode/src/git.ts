@@ -21,6 +21,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
+import { forgeDenyHost, forgeOpenCodePermission } from "./forge_webfetch.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
 import {
@@ -30,7 +31,6 @@ import {
   QUOTA_POLL_INTERVAL_MS,
   type QuotaHit,
 } from "./quota.ts";
-import { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION } from "./review_webfetch.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -53,8 +53,6 @@ function stripAnsi(str: string): string {
 export interface OpenCodeRunOptions extends EngineRunOptions {
   configPath?: string;
 }
-
-export { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION };
 
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
@@ -130,14 +128,16 @@ function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined
   return opts.configPath ?? process.env.OPENCODE_CONFIG;
 }
 
-function overlayReviewWebfetch(
-  env: Record<string, string>,
-  opts: OpenCodeRunOptions,
-  configPath: string | undefined
-): void {
-  if (opts.trace?.kind === "review" || configPath?.endsWith("opencode-review.json")) {
-    env.OPENCODE_PERMISSION = REVIEW_OPENCODE_PERMISSION;
-  }
+/**
+ * Every OpenCode child gets the forge webfetch deny, worker runs included: the
+ * worker is the one holding a write-capable git token. The denied host is the
+ * one this spawn authenticates against (`GIT_AUTH_HOST` from `extraEnv`), so
+ * the GitHub factory denies `github.com` rather than the Gitea default. Set,
+ * never merged, so a loosened `OPENCODE_PERMISSION` in the parent env cannot
+ * reopen the host.
+ */
+function denyForgeWebfetch(env: Record<string, string>, opts: OpenCodeRunOptions): void {
+  env.OPENCODE_PERMISSION = forgeOpenCodePermission(forgeDenyHost(opts.extraEnv));
 }
 
 function openCodeXdgDataHome(tempRoot: string): string {
@@ -190,7 +190,7 @@ function buildEnv(
       XDG_DATA_HOME: xdgDataHome,
     } as Record<string, string>;
     if (configPath) env.OPENCODE_CONFIG = configPath;
-    overlayReviewWebfetch(env, opts, configPath);
+    denyForgeWebfetch(env, opts);
     return env;
   }
 
@@ -208,13 +208,14 @@ function buildEnv(
 
   if (process.env.OPENCODE_API_KEY) env.OPENCODE_API_KEY = process.env.OPENCODE_API_KEY;
   if (configPath) env.OPENCODE_CONFIG = configPath;
-  overlayReviewWebfetch(env, opts, configPath);
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
       if (key.startsWith("GITEA_") || key.startsWith("GITHUB_APP_") || key === "GITHUB_WEBHOOK_SECRET") continue;
       env[key] = value;
     }
   }
+  // After extraEnv: a job-supplied OPENCODE_PERMISSION must not win over the deny.
+  denyForgeWebfetch(env, opts);
   return env;
 }
 
