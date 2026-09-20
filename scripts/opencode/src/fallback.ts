@@ -179,7 +179,11 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
   // Without a chain the bare engine runs and stamps fall back to the spawn
   // options, which workers never type, so they read `opencode`. A Claude
   // primary must therefore arrive through `chain` (a 1-entry one is fine).
-  if (!hop.chain?.length && !hop.fallbackModel) return engine;
+  if (!hop.chain?.length && !hop.fallbackModel) {
+    // There is no next runner to hop to, so refuse rather than re-spawn the same one.
+    return async (opts: EngineRunOptions): Promise<EngineResult> =>
+      opts.hopFromIncomplete === true ? { status: "ok", hopDeclined: true } : engine(opts);
+  }
 
   let chain: NamedRunner[] | undefined;
   if (hop.chain && hop.chain.length >= 2) chain = hop.chain;
@@ -194,9 +198,22 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
 
   return async (opts: EngineRunOptions): Promise<EngineResult> => {
     const runners = runnersFor(opts);
-    const current = runners[index]!;
 
-    if (index > 0) {
+    if (opts.hopFromIncomplete === true) {
+      // The hop is always from scratch to the *next* runner, so anything that
+      // rules that out — a continued session, an abort, no next entry, no lease
+      // left — is a refusal. Never re-spawn the runner that just produced nothing.
+      const next = opts.continueSession || opts.abortSignal?.aborted ? undefined : runners[index + 1];
+      if (!next || !(await leaseAllowsHop(hop, opts.timeoutMs))) {
+        // Nothing ran: say so rather than look like a runner that produced nothing.
+        return { status: "ok", hopDeclined: true };
+      }
+      await beginHop(hop, opts, runners[index]!, next);
+      index++;
+    }
+
+    if (index > 0 && opts.hopFromIncomplete !== true) {
+      const current = runners[index]!;
       try {
         return stampRunner(await engine(engineOptsForRunner(opts, current)), current);
       } catch (err) {

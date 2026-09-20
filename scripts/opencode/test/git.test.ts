@@ -1085,6 +1085,11 @@ describe("worker prompts", () => {
     expect(CONFLICT_PROMPT).not.toContain("jumi-blocked-by");
   });
 
+  test("follow-up judges leftover simplifications and may no-op", () => {
+    expect(FOLLOWUP_PROMPT).toContain("Leftover simplifications");
+    expect(FOLLOWUP_PROMPT).toContain("A clean tree is a valid outcome");
+  });
+
   test("first-run may yield a queue id then stop", () => {
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_QUEUE.md");
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_BLOCKED.md");
@@ -1097,6 +1102,14 @@ describe("worker prompts", () => {
     expect(IMPLEMENT_YIELD_PROMPT).toContain("live image");
     expect(BLOCKED_BY_REJECTED_PROMPT.startsWith("blocked-by rejected, implement")).toBe(true);
     expect(IMPLEMENT_PROMPT).not.toContain("JUMI_BLOCKED.md");
+  });
+
+  test("first-run skip is JUMI_SKIP.md; follow-up and conflict must not skip", () => {
+    expect(IMPLEMENT_PROMPT).toContain("JUMI_SKIP.md");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_SKIP.md");
+    expect(BLOCKED_BY_REJECTED_PROMPT).toContain("JUMI_SKIP.md");
+    expect(FOLLOWUP_PROMPT).not.toContain("JUMI_SKIP.md");
+    expect(CONFLICT_PROMPT).not.toContain("JUMI_SKIP.md");
   });
 });
 

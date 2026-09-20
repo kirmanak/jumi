@@ -33,6 +33,7 @@ export interface EngineRunOptions {
   prompt?: string;
   continueSession?: boolean;
   hop?: boolean;
+  hopFromIncomplete?: boolean;
   deferQuotaExit?: boolean;
 }
 
@@ -52,6 +53,8 @@ export interface EngineResult {
   retryAfterMs?: number;
   /** The runner that actually produced this result (after any hop). */
   runner?: RunnerStamp;
+  /** Set when a `hopFromIncomplete` run was refused: no runner was spawned, so there is no result. */
+  hopDeclined?: boolean;
 }
 
 export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;

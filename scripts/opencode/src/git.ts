@@ -31,6 +31,7 @@ import {
   QUOTA_POLL_INTERVAL_MS,
   type QuotaHit,
 } from "./quota.ts";
+import { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION } from "./review_webfetch.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -54,6 +55,8 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
   configPath?: string;
 }
 
+export { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION };
+
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
 Grep is ripgrep syntax, not JavaScript.
@@ -62,6 +65,7 @@ Verify once at the end, not after every edit.`;
 
 const IMPLEMENT_FINISH = `Edit, write, commit, and push as needed. Incremental commits are fine.
 Do not force-push. Do not ask questions.
+If there is nothing to change, write JUMI_SKIP.md at the repository root with a short reason. Do not commit JUMI_SKIP.md.
 When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
 Then stop.`;
 
@@ -88,6 +92,7 @@ If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions l
 ${WORKER_SCOPE}
 Address the feedback in this repository on the current branch.
 Do not reopen product decisions already specified in JUMI_TASK.md.
+Leftover simplifications in the attached review are ideas to judge, not a backlog that must all land. A clean tree is a valid outcome. If a writer comment answers a question in that review, implement that answer.
 If JUMI_PR.md is present, it is the pull-request description already posted. Update it so it describes the branch tip after your changes: what changed, why, and what you ran to verify. Do not commit JUMI_PR.md.
 Do not force-push. Do not ask questions. Do not open a pull request.
 When the feedback is addressed, stop.`;

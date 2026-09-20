@@ -122,6 +122,7 @@ describe("implement prompt", () => {
     expect(IMPLEMENT_PROMPT).toContain("Do not ask questions");
     expect(IMPLEMENT_PROMPT).not.toContain("Do not run git");
     expect(IMPLEMENT_PROMPT).toContain("JUMI_PR.md");
+    expect(IMPLEMENT_PROMPT).toContain("JUMI_SKIP.md");
     expect(IMPLEMENT_PROMPT).toContain("Do not open the pull request");
     expect(IMPLEMENT_PROMPT).toContain("Stay in this clone");
     expect(IMPLEMENT_PROMPT).toContain("Do not webfetch this Gitea host");

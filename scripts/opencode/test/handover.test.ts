@@ -79,7 +79,7 @@ async function seedSucceededFollowUps(store: MemoryReviewJobStore, count: number
 }
 
 describe("shouldHandoverFollowUp", () => {
-  test("only current-head failure trailer on a published sticky", () => {
+  test("current-head failure or leftover-simplification trailer on a published sticky", () => {
     expect(
       shouldHandoverFollowUp({
         published: { status: "posted" },
@@ -95,7 +95,19 @@ describe("shouldHandoverFollowUp", () => {
     expect(
       shouldHandoverFollowUp({
         published: { status: "posted" },
+        markdown: "drop the helper\n<!-- jumi-check: success; 2 suggestions -->",
+      })
+    ).toBe(true);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "posted" },
         markdown: "ok\n<!-- jumi-check: success -->",
+      })
+    ).toBe(false);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "posted" },
+        markdown: "❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
       })
     ).toBe(false);
     expect(
@@ -433,6 +445,29 @@ describe("enqueueFollowUpFromReview", () => {
     expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "queued")).toHaveLength(0);
     expect(api.comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${TOO_MANY_FOLLOWUP_ROUNDS}`]);
     expect(logs).toEqual(["persist-insert skipped: round cap"]);
+  });
+
+  test("success trailer with leftover simplifications enqueues follow-up", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = makeApi();
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "drop the helper\n<!-- jumi-check: success; 2 suggestions -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    const follow = store.rows.find((row) => row.kind === "follow-up");
+    expect(follow?.state).toBe("queued");
+    expect(follow?.payload?.trigger).toEqual({ event: "review-suggestions", sender: "jumi" });
+    expect(api.comments).toEqual([]);
+    expect(logs.some((line) => line.includes("persist-insert skipped"))).toBe(false);
   });
 
   test("success trailer neither enqueues nor posts stuck", async () => {
