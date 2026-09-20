@@ -21,7 +21,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { FORGE_OPENCODE_PERMISSION } from "./forge_webfetch.ts";
+import { forgeDenyHost, forgeOpenCodePermission } from "./forge_webfetch.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
 import {
@@ -128,11 +128,14 @@ function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined
 
 /**
  * Every OpenCode child gets the forge webfetch deny, worker runs included: the
- * worker is the one holding a write-capable git token. Set, never merged, so a
- * loosened `OPENCODE_PERMISSION` in the parent env cannot reopen the host.
+ * worker is the one holding a write-capable git token. The denied host is the
+ * one this spawn authenticates against (`GIT_AUTH_HOST` from `extraEnv`), so
+ * the GitHub factory denies `github.com` rather than the Gitea default. Set,
+ * never merged, so a loosened `OPENCODE_PERMISSION` in the parent env cannot
+ * reopen the host.
  */
-function denyForgeWebfetch(env: Record<string, string>): void {
-  env.OPENCODE_PERMISSION = FORGE_OPENCODE_PERMISSION;
+function denyForgeWebfetch(env: Record<string, string>, opts: OpenCodeRunOptions): void {
+  env.OPENCODE_PERMISSION = forgeOpenCodePermission(forgeDenyHost(opts.extraEnv));
 }
 
 function openCodeXdgDataHome(tempRoot: string): string {
@@ -185,7 +188,7 @@ function buildEnv(
       XDG_DATA_HOME: xdgDataHome,
     } as Record<string, string>;
     if (configPath) env.OPENCODE_CONFIG = configPath;
-    denyForgeWebfetch(env);
+    denyForgeWebfetch(env, opts);
     return env;
   }
 
@@ -210,7 +213,7 @@ function buildEnv(
     }
   }
   // After extraEnv: a job-supplied OPENCODE_PERMISSION must not win over the deny.
-  denyForgeWebfetch(env);
+  denyForgeWebfetch(env, opts);
   return env;
 }
 

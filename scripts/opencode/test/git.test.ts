@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { withModelHop } from "../src/fallback.ts";
-import { FORGE_OPENCODE_PERMISSION } from "../src/forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeOpenCodePermission } from "../src/forge_webfetch.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   CONFLICT_PROMPT,
@@ -898,7 +898,7 @@ printf 'KIND_PERM=%s\n' "$OPENCODE_PERMISSION"
           trace: { kind: "review", owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`KIND_PERM=${FORGE_OPENCODE_PERMISSION}`);
+        expect(result.stdout).toContain(`KIND_PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
       }
     );
     await withFakeOpenCode(
@@ -914,7 +914,7 @@ printf 'PATH_PERM=%s\n' "$OPENCODE_PERMISSION"
           configPath: "/app/.gitea/opencode-review.json",
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`PATH_PERM=${FORGE_OPENCODE_PERMISSION}`);
+        expect(result.stdout).toContain(`PATH_PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
       }
     );
   });
@@ -935,7 +935,7 @@ printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
             trace: { kind, owner: "kirmanak", repo: "demo" },
           });
           expect(result.status).toBe("ok");
-          expect(result.stdout?.trim()).toBe(`PERM=${FORGE_OPENCODE_PERMISSION}`);
+          expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
         }
       }
     );
@@ -957,7 +957,31 @@ printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
           extraEnv: { OPENCODE_PERMISSION: JSON.stringify({ webfetch: "allow" }) },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout?.trim()).toBe(`PERM=${FORGE_OPENCODE_PERMISSION}`);
+        expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
+      }
+    );
+  });
+
+  test("denies the forge host this spawn authenticates against, not a baked one", async () => {
+    // GitHub factory: gitEnv hands the child GIT_AUTH_HOST=github.com with a
+    // write-capable token, so the deny must follow that host.
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          configPath: "/app/.gitea/opencode-implement.json",
+          trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+          extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission("github.com")}`);
+        expect(result.stdout).toContain("*github.com*");
       }
     );
   });
@@ -978,7 +1002,7 @@ printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
             trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
           });
           expect(result.status).toBe("ok");
-          expect(result.stdout?.trim()).toBe(`PERM=${FORGE_OPENCODE_PERMISSION}`);
+          expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
         }
       );
     } finally {

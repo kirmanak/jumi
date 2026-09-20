@@ -10,7 +10,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { CLAUDE_DISALLOWED_TOOLS } from "./forge_webfetch.ts";
+import { claudeDisallowedTools, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
@@ -177,9 +177,11 @@ export function claudeArgv(opts: EngineRunOptions): string[] {
     "--allowedTools",
     CLAUDE_ALLOWED_TOOLS,
     // Deny beats every allow, so WebFetch stays on the allow-list for public
-    // docs while the forge host itself is refused by the binary.
+    // docs while the forge host itself is refused by the binary. The host is
+    // this spawn's own `GIT_AUTH_HOST`, so a GitHub-factory child denies
+    // github.com rather than only the Gitea default.
     "--disallowedTools",
-    CLAUDE_DISALLOWED_TOOLS,
+    claudeDisallowedTools(forgeDenyHost(opts.extraEnv)),
     "--output-format",
     CLAUDE_OUTPUT_FORMAT,
     "--verbose",

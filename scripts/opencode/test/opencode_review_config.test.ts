@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FORGE_OPENCODE_PERMISSION, FORGE_WEBFETCH_PERMISSION } from "../src/forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeOpenCodePermission, forgeWebfetchPermission } from "../src/forge_webfetch.ts";
 
 interface OpenCodeReviewConfig {
   model?: unknown;
@@ -78,8 +78,8 @@ describe("opencode review config", () => {
   });
 
   test("denies webfetch to homelab Gitea and GitHub search after star allow (last-match)", () => {
-    const rules = FORGE_WEBFETCH_PERMISSION;
-    expect(JSON.parse(FORGE_OPENCODE_PERMISSION)).toEqual({ webfetch: rules });
+    const rules = forgeWebfetchPermission(FORGE_DENY_DOMAIN);
+    expect(JSON.parse(forgeOpenCodePermission(FORGE_DENY_DOMAIN))).toEqual({ webfetch: rules });
     expect(rules).toEqual({
       "*": "allow",
       "*kirmanak.stream*": "deny",

@@ -14,7 +14,7 @@ import {
 } from "../src/claude.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { runRegisteredEngine } from "../src/engine_dispatch.ts";
-import { CLAUDE_DISALLOWED_TOOLS, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
+import { claudeDisallowedTools, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
@@ -84,7 +84,7 @@ describe("claudeArgv", () => {
       "--allowedTools",
       CLAUDE_ALLOWED_TOOLS,
       "--disallowedTools",
-      CLAUDE_DISALLOWED_TOOLS,
+      claudeDisallowedTools(FORGE_DENY_DOMAIN),
       "--output-format",
       CLAUDE_OUTPUT_FORMAT,
       "--verbose",
@@ -102,12 +102,29 @@ describe("claudeArgv", () => {
     // Claude matches `domain:` against the hostname, and `*.host` does not
     // cover the apex, so both rules are needed. Deny outranks --allowedTools,
     // which keeps WebFetch available for public docs.
-    expect(CLAUDE_DISALLOWED_TOOLS.split(",")).toEqual([
+    expect(claudeDisallowedTools(FORGE_DENY_DOMAIN).split(",")).toEqual([
       `WebFetch(domain:${FORGE_DENY_DOMAIN})`,
       `WebFetch(domain:*.${FORGE_DENY_DOMAIN})`,
     ]);
     expect(CLAUDE_ALLOWED_TOOLS.split(",")).toContain("WebFetch");
     expect(claudeArgv({ model: "opus", workdir: "/work" })).toContain("--disallowedTools");
+  });
+
+  test("denies the forge host this spawn authenticates against", () => {
+    // GIT_AUTH_HOST comes from the configured forge, so a GitHub-factory child
+    // denies github.com/api.github.com instead of only the Gitea default.
+    const args = claudeArgv({
+      model: "opus",
+      workdir: "/work",
+      extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
+    });
+    expect(args[args.indexOf("--disallowedTools") + 1]).toBe(
+      "WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
+    );
+
+    // No GIT_AUTH_HOST (reviewer, env-less spawns): the default still applies.
+    const fallback = claudeArgv({ model: "opus", workdir: "/work" });
+    expect(fallback[fallback.indexOf("--disallowedTools") + 1]).toBe(claudeDisallowedTools(FORGE_DENY_DOMAIN));
   });
 });
 
@@ -139,7 +156,7 @@ printf 'HOME=%s OAUTH=%s XDG_CONFIG=%s SECRET=%s ARGS=%s CWD=%s\\n' "$HOME" "$CL
         expect(result.stdout).toContain(`-p --setting-sources ${CLAUDE_SETTING_SOURCES}`);
         expect(result.stdout).toContain(`--permission-mode ${CLAUDE_PERMISSION_MODE}`);
         expect(result.stdout).toContain(`--allowedTools ${CLAUDE_ALLOWED_TOOLS}`);
-        expect(result.stdout).toContain(`--disallowedTools ${CLAUDE_DISALLOWED_TOOLS}`);
+        expect(result.stdout).toContain(`--disallowedTools ${claudeDisallowedTools(FORGE_DENY_DOMAIN)}`);
         expect(result.stdout).toContain("--model opus --effort high");
         expect(result.stdout).not.toContain("--bare");
         expect(result.stdout).toContain(`CWD=${workdir}`);

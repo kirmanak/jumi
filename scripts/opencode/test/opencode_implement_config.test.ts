@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FORGE_DENY_DOMAIN, FORGE_WEBFETCH_PERMISSION } from "../src/forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeDenyHost, forgeWebfetchPermission } from "../src/forge_webfetch.ts";
 import { IMPLEMENT_PROMPT } from "../src/implement.ts";
 
 interface OpenCodeImplementConfig {
@@ -55,7 +55,7 @@ describe("opencode implement config", () => {
   test("denies webfetch of the forge host for the worker, not just the reviewer", () => {
     // The JSON field stays scalar allow (OpenCode types webfetch as Action);
     // the last-match object arrives via OPENCODE_PERMISSION on every spawn.
-    const rules = FORGE_WEBFETCH_PERMISSION;
+    const rules = forgeWebfetchPermission(FORGE_DENY_DOMAIN);
     expect(Object.keys(rules)).toEqual(["*", `*${FORGE_DENY_DOMAIN}*`, "*github.com/search*"]);
 
     expect(bashPermission(rules, `https://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/issues/79`)).toBe("deny");
@@ -66,6 +66,26 @@ describe("opencode implement config", () => {
 
     expect(bashPermission(rules, "https://docs.gitea.com/installation")).toBe("allow");
     expect(bashPermission(rules, "https://bun.sh/docs/cli/test")).toBe("allow");
+  });
+
+  test("denies the configured forge host, not a compile-time one", () => {
+    // The GitHub factory hands the child GIT_AUTH_HOST=github.com plus a
+    // write-capable token, so the deny follows the spawn, not the default.
+    expect(forgeDenyHost({ GIT_AUTH_HOST: "github.com" })).toBe("github.com");
+    expect(forgeDenyHost({ GIT_AUTH_HOST: "gitea.example.com:3000" })).toBe("gitea.example.com");
+    expect(forgeDenyHost({})).toBe(FORGE_DENY_DOMAIN);
+    expect(forgeDenyHost(undefined)).toBe(FORGE_DENY_DOMAIN);
+
+    const rules = forgeWebfetchPermission(forgeDenyHost({ GIT_AUTH_HOST: "github.com" }));
+    expect(bashPermission(rules, "https://github.com/kirmanak/jumi/issues/79")).toBe("deny");
+    expect(bashPermission(rules, "https://github.com/kirmanak/jumi/pulls")).toBe("deny");
+    expect(bashPermission(rules, "https://github.com/kirmanak/jumi/actions")).toBe("deny");
+    expect(bashPermission(rules, "https://api.github.com/repos/kirmanak/jumi/pulls/111")).toBe("deny");
+    expect(bashPermission(rules, "https://bun.sh/docs/cli/test")).toBe("allow");
+
+    // A ported forge URL is still covered once the port is dropped.
+    const ported = forgeWebfetchPermission(forgeDenyHost({ GIT_AUTH_HOST: "gitea.example.com:3000" }));
+    expect(bashPermission(ported, "https://gitea.example.com:3000/personal/jumi/issues/1")).toBe("deny");
   });
 
   test("allows Read of baked review-skills after star deny (last-match)", () => {
