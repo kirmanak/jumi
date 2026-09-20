@@ -206,7 +206,7 @@ Required repository variables:
 |------|-------------|
 | `CONTAINER_REGISTRY_USER` | Only needed for manual `bash .gitea/scripts/build-*.sh` pushes |
 
-Pull requests run the same lint/typecheck/test gate and build the image without publishing it.
+Pull requests run the same lint/typecheck/test gate, run the queue/lease suite against a Postgres service container, and build the image without publishing it.
 
 ## Review diagnostics
 
@@ -280,6 +280,17 @@ cd scripts/opencode
 bun install --frozen-lockfile
 bun run ci
 ```
+
+`bun run ci` needs no database: `test/review_jobs_pg.test.ts` skips itself unless `JUMI_TEST_DATABASE_URL` is set. That suite runs the real `PgReviewJobStore` — worker leases racing on one issue, reclaim at the attempt cap, in-flight enqueue dedupe, and migrate-then-migrate-again — against a real server, because those invariants are partial unique indexes and `FOR UPDATE SKIP LOCKED`, not TypeScript. CI runs it in the `postgres-queue` job; to run it locally:
+
+```bash
+docker run --rm -d --name jumi-queue-pg -p 5432:5432 \
+  -e POSTGRES_USER=jumi -e POSTGRES_PASSWORD=jumi -e POSTGRES_DB=jumi_queue_test \
+  postgres:18-alpine
+JUMI_TEST_DATABASE_URL=postgres://jumi:jumi@127.0.0.1:5432/jumi_queue_test bun run test:pg
+```
+
+The suite owns its schema: it drops and re-migrates `review_jobs` / `issue_skip_latches`, so point it at a throwaway database, never a live ledger.
 
 Run the service locally:
 
