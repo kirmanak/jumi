@@ -33,7 +33,7 @@ interface OpenCodeReviewConfig {
 
 // No local matcher lives here on purpose. Whether a pattern actually denies a
 // URL is proved against the installed OpenCode binary by
-// `src/webfetch_probe.ts`, which the image verification path runs; a copy of
+// `src/webfetch_probe.ts`, which every image verification path runs; a copy of
 // OpenCode's wildcard matcher would only grade itself. These tests assert the
 // shape and last-match ordering of the maps we ship.
 
@@ -123,14 +123,21 @@ describe("reviewer image permissions", () => {
     expect(readFileSync(giteaSkillPath, "utf8")).toContain("name: gitea-pull-review");
   });
 
-  test("runs the webfetch permission probe on the binary in both image verification paths", () => {
+  test("runs the webfetch permission probe on the binary in every image verification path", () => {
     // The probe is the only thing standing between an OpenCode upgrade and a
-    // silently dropped forge-host deny, so neither verification path may lose it.
-    const buildahScript = readFileSync(join(repoRoot, ".gitea/scripts/build-reviewer-image.sh"), "utf8");
-    const workflow = readFileSync(join(repoRoot, ".github/workflows/jumi-reviewer-image.yml"), "utf8");
+    // silently dropped forge-host deny, so no verification path may lose it.
+    // `opencode-checks.yml` matters most: it is the one that runs on
+    // pull_request, so it is what gates an OPENCODE_VERSION bump before the
+    // image is published.
+    const paths = [
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/opencode-checks.yml",
+    ];
     expect(existsSync(join(repoRoot, "scripts/opencode/src/webfetch_probe.ts"))).toBe(true);
-    expect(buildahScript).toContain("bun src/webfetch_probe.ts");
-    expect(workflow).toContain("bun src/webfetch_probe.ts");
+    for (const path of paths) {
+      expect(readFileSync(join(repoRoot, path), "utf8")).toContain("bun src/webfetch_probe.ts");
+    }
     // src/ is what carries the probe (and the map it imports) into the image.
     expect(dockerfile).toContain("COPY scripts/opencode/src ./src");
   });

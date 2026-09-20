@@ -25,8 +25,14 @@ import { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION } from "./review
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
 const PROVIDER_ID = "jumi-webfetch-probe";
 const MODEL_ID = "probe-model";
-/** Cap a single `opencode run`; the provider is local, so this is a hang guard. */
-const RUN_TIMEOUT_MS = 120_000;
+/**
+ * Cap a single `opencode run`. The provider is loopback, so a healthy run is
+ * seconds; this is only a hang guard. Kept low enough that the whole table
+ * (`probeCases().length * RUN_TIMEOUT_MS`) stays well under the `timeout 600`
+ * the image verification steps wrap the probe in — otherwise a partial hang
+ * would be killed from outside as exit 124 with no per-row report.
+ */
+const RUN_TIMEOUT_MS = 60_000;
 
 type Expectation = "allow" | "deny";
 
@@ -36,9 +42,11 @@ interface ProbeCase {
   readonly url: string;
   readonly expect: Expectation;
   /**
-   * Deny rows name the map entry that must do the denying. The probe asserts
-   * OpenCode echoed this pattern back, so a row cannot pass by matching some
-   * other deny that happens to be in the map.
+   * Deny rows name the map entry they exist for. OpenCode echoes the whole
+   * webfetch ruleset into the tool result, not just the rule that matched, so
+   * asserting on this proves "OpenCode blocked the call while holding *our*
+   * map" — it does not prove *which* entry matched. That per-row attribution
+   * comes from the URL table itself.
    */
   readonly pattern?: string;
 }
@@ -164,7 +172,10 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
   return path;
 }
 
-async function runOpenCode(workdir: string, configPath: string): Promise<{ code: number; output: string }> {
+async function runOpenCode(
+  workdir: string,
+  configPath: string
+): Promise<{ code: number; output: string; timedOut: boolean }> {
   const proc = Bun.spawn(["opencode", "run", "--model", `${PROVIDER_ID}/${MODEL_ID}`, "fetch the url"], {
     cwd: workdir,
     stdin: "ignore",
@@ -178,10 +189,14 @@ async function runOpenCode(workdir: string, configPath: string): Promise<{ code:
       OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
     },
   });
-  const timer = setTimeout(() => proc.kill(), RUN_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill();
+  }, RUN_TIMEOUT_MS);
   try {
     const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    return { code: await proc.exited, output: `${stdout}${stderr}` };
+    return { code: await proc.exited, output: `${stdout}${stderr}`, timedOut };
   } finally {
     clearTimeout(timer);
   }
@@ -205,14 +220,18 @@ function judge(probe: ProbeCase, state: RunState): CaseResult {
   if (state.reached) {
     return { probe, ok: false, observed: "DENIED URL WAS FETCHED: the probe target received a request" };
   }
-  // OpenCode reports a blocked call by echoing the rules it matched. Requiring
-  // the specific pattern keeps a row from passing on an unrelated failure
-  // (network error, bad tool name) that also produces no HTTP hit.
+  // OpenCode reports a blocked call by echoing the webfetch ruleset it was
+  // holding. Requiring the pattern separates "OpenCode denied this, with our
+  // map loaded" from an unrelated failure (network error, bad tool name) that
+  // also produces no HTTP hit. It does not attribute the deny to that entry —
+  // see `ProbeCase.pattern`.
   const ok = probe.pattern != null && result.includes(probe.pattern) && !result.includes(FETCH_MARKER);
   return {
     probe,
     ok,
-    observed: ok ? `denied by ${probe.pattern}` : `no deny for ${probe.pattern}: ${result.slice(0, 200)}`,
+    observed: ok
+      ? `denied, map carrying ${probe.pattern} was in force`
+      : `no deny with ${probe.pattern} in the ruleset: ${result.slice(0, 200)}`,
   };
 }
 
@@ -233,7 +252,11 @@ async function main(): Promise<number> {
       state.url = probe.url;
       state.reached = false;
       state.toolResult = undefined;
-      const { code, output } = await runOpenCode(workdir, configPath);
+      const { code, output, timedOut } = await runOpenCode(workdir, configPath);
+      if (timedOut) {
+        results.push({ probe, ok: false, observed: `opencode run hung, killed after ${RUN_TIMEOUT_MS}ms` });
+        continue;
+      }
       if (state.toolResult == null && code !== 0) {
         results.push({ probe, ok: false, observed: `opencode run exited ${code}: ${output.slice(-400)}` });
         continue;

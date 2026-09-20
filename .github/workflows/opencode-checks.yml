@@ -81,6 +81,17 @@ jobs:
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-reviewer:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
 
+      - name: Verify reviewer webfetch denies against the opencode binary
+        # This is the path that gates a pull request, so it is the one that
+        # catches an OPENCODE_VERSION bump whose matcher drops the forge-host
+        # deny — before the image is built for publication, not after.
+        # The outer cap sits above the probe's own per-run budget so a hang
+        # still reports a row-level FAIL rather than being killed from outside.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/webfetch_probe.ts'
+
   worker-image-build:
     runs-on: ubuntu-latest
     needs: checks
