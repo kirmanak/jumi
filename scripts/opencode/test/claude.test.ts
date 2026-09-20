@@ -122,6 +122,17 @@ describe("claudeArgv", () => {
       "WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
     );
 
+    // Claude matches `domain:` against hostname with no port, so a rule that
+    // kept `:3000` would never fire. Dropping the port is load-bearing here.
+    const ported = claudeArgv({
+      model: "opus",
+      workdir: "/work",
+      extraEnv: { GIT_AUTH_HOST: "gitea.example.com:3000" },
+    });
+    expect(ported[ported.indexOf("--disallowedTools") + 1]).toBe(
+      "WebFetch(domain:gitea.example.com),WebFetch(domain:*.gitea.example.com)"
+    );
+
     // No GIT_AUTH_HOST (reviewer, env-less spawns): the default still applies.
     const fallback = claudeArgv({ model: "opus", workdir: "/work" });
     expect(fallback[fallback.indexOf("--disallowedTools") + 1]).toBe(claudeDisallowedTools(FORGE_DENY_DOMAIN));
