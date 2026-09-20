@@ -161,9 +161,12 @@ describePg("PgReviewJobStore against real postgres", () => {
 
     await holderUpdated;
     const blocked = store.lease("worker-b", 60_000, new Date(), WORKER_JOB_KINDS);
-    await waitForBlockedReviewJobsLock();
-    commit();
-    await holder;
+    try {
+      await waitForBlockedReviewJobsLock();
+    } finally {
+      commit();
+      await holder;
+    }
 
     // Not an error: 23505 here means "someone else got the issue", and the retry finds the
     // now-visible lease. A lease() that rethrew would read as a dead queue to the worker.
