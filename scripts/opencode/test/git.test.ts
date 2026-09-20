@@ -1015,6 +1015,11 @@ describe("worker prompts", () => {
     expect(CONFLICT_PROMPT).not.toContain("jumi-blocked-by");
   });
 
+  test("follow-up judges leftover simplifications and may no-op", () => {
+    expect(FOLLOWUP_PROMPT).toContain("Leftover simplifications");
+    expect(FOLLOWUP_PROMPT).toContain("A clean tree is a valid outcome");
+  });
+
   test("first-run may yield a queue id then stop", () => {
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_QUEUE.md");
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_BLOCKED.md");

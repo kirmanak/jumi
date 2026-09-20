@@ -169,9 +169,10 @@ ${REVIEW_RUBRIC}
 
 JUMI_REVIEW.md is markdown findings, then exactly one HTML comment as the last non-empty line:
 \`<!-- jumi-check: success -->\` or \`<!-- jumi-check: failure -->\`
-Optional short reason: \`<!-- jumi-check: failure; 1 blocking, 1 risk -->\`
+Optional short reason: \`<!-- jumi-check: failure; 1 blocking, 1 risk -->\` or \`<!-- jumi-check: success; 2 suggestions -->\`
 Use failure if you reported any 🔴 bug or 🟡 risk, or if you could not finish the review.
 Use success if there are no 🔴/🟡 findings. ❓ questions are allowed with success. 💡 suggestions do not fail the trailer.
+If you reported any 💡 suggestions, put the count in the success trailer (\`N suggestion\` / \`N suggestions\`). Do not put questions in that count.
 The check comment must be the last non-empty line, not quoted inside prose. The service uses it as the commit status.`;
 }
 

@@ -42,6 +42,13 @@ export function parseCheckLine(line: string): { state: "success" | "failure"; re
   };
 }
 
+export function trailerSuggestionCount(reason: string): number {
+  const match = /\b(\d+)\s+suggestions?\b/i.exec(reason);
+  if (!match) return 0;
+  const n = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
 function stripCheckComments(text: string): string {
   return text
     .replace(/<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*[^>]*?)?\s*-->/gi, "")

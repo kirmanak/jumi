@@ -21,7 +21,6 @@ import {
   FOLLOWUP_TIMEOUT_MS,
   type FollowUpItems,
   implementFollowUp,
-  isPointerStubBody,
   needsFollowUp,
   parsePrHeadChangedReason,
   pickLatestJumiFinding,
@@ -2321,6 +2320,124 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("leftover simplifications wake follow-up without a writer comment", async () => {
+    await withDirs(async (home, workdir) => {
+      const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const sticky = makeComment({
+        id: 38022,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          `Reviewed commit: \`${sha}\``,
+          "",
+          "💡 simpler: drop the helper.",
+          "<!-- jumi-check: success; 1 suggestion -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+      });
+      const pr = jumiPr();
+      pr.head.sha = sha;
+      const api = makeApi({
+        listOpenPulls: async () => [pr],
+        listIssueComments: async () => [sticky],
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({
+          headSha: sha,
+          trigger: { event: "review-suggestions", sender: "jumi" },
+        }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return sha;
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).toContain("## Last review");
+          expect(feedback).toContain("drop the helper");
+          expect(feedback).toContain("Event: review-suggestions");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("no-changes");
+      expect(openCode).toBe(1);
+    });
+  });
+
+  test("writer comment injects the current-head success review", async () => {
+    await withDirs(async (home, workdir) => {
+      const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const sticky = makeComment({
+        id: 38022,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          `Reviewed commit: \`${sha}\``,
+          "",
+          "❓ q: is the timeout intentional?",
+          "<!-- jumi-check: success -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+      });
+      const pr = jumiPr();
+      pr.head.sha = sha;
+      const api = makeApi({
+        listOpenPulls: async () => [pr],
+        listIssueComments: async () => [
+          sticky,
+          makeComment({ id: 88, body: "let's do that", user: makeUser({ login: "alice" }) }),
+        ],
+      });
+      let openCode = 0;
+      await implementFollowUp({
+        api,
+        job: followUpJob({
+          headSha: sha,
+          trigger: { event: "issue_comment", commentId: 88, sender: "alice" },
+        }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return sha;
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).toContain("## Last review");
+          expect(feedback).toContain("is the timeout intentional");
+          expect(feedback).toContain("let's do that");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(openCode).toBe(1);
+    });
+  });
+
   test("address-the-earlier-review stub injects the last jumi review", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi({
@@ -2368,7 +2485,7 @@ describe("implementFollowUp", () => {
     });
   });
 
-  test("address-the-earlier-review stub without findings or CI skips OpenCode", async () => {
+  test("writer phrase without findings still runs OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       let openCode = 0;
       const result = await implementFollowUp({
@@ -2391,17 +2508,23 @@ describe("implementFollowUp", () => {
         home,
         workdir,
         heartbeatIntervalMs: 0,
-        gitRunner: async () => {
-          throw new Error("git should not run");
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
         },
         openCodeRunner: async () => {
           openCode++;
+          const feedback = await readFile(join(workdir, "kirmanak/demo/12/JUMI_FEEDBACK.md"), "utf8");
+          expect(feedback).toContain("Address the earlier review");
           return { status: "ok" };
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({ status: "skipped", reason: "no unhandled feedback" });
-      expect(openCode).toBe(0);
+      expect(result.status).toBe("no-changes");
+      expect(openCode).toBe(1);
     });
   });
 
@@ -2733,17 +2856,6 @@ describe("buildFeedbackMarkdown", () => {
     expect(inlineAt).toBeGreaterThan(currentAt);
     expect(earlierAt).toBeGreaterThan(inlineAt);
     expect(result.markdown).toContain("### Earlier review 1");
-  });
-});
-
-describe("isPointerStubBody", () => {
-  test("treats empty and address-earlier one-liners as stubs", () => {
-    expect(isPointerStubBody("")).toBe(true);
-    expect(isPointerStubBody("   ")).toBe(true);
-    expect(isPointerStubBody("Address the earlier review")).toBe(true);
-    expect(isPointerStubBody("please address the earlier review.")).toBe(true);
-    expect(isPointerStubBody("please fix the tests")).toBe(false);
-    expect(isPointerStubBody("please fix the tests from the earlier review")).toBe(false);
   });
 });
 
@@ -3191,7 +3303,7 @@ describe("collectFollowUpItems", () => {
     expect(byTrigger.comments.map((comment) => comment.id)).toEqual([38022]);
   });
 
-  test("excludes jumi review sticky with success trailer", async () => {
+  test("excludes questions-only success sticky from findings but keeps it for the brief", async () => {
     const api = makeApi({
       listIssueComments: async () => [
         makeComment({
@@ -3203,9 +3315,10 @@ describe("collectFollowUpItems", () => {
     });
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
     expect(items.comments).toEqual([]);
+    expect(items.jumiStickies.map((comment) => comment.id)).toEqual([38022]);
   });
 
-  test("excludes jumi review sticky with success trailer and reason suffix", async () => {
+  test("excludes success sticky without a suggestion count from findings", async () => {
     const api = makeApi({
       listIssueComments: async () => [
         makeComment({
@@ -3217,6 +3330,35 @@ describe("collectFollowUpItems", () => {
     });
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
     expect(items.comments).toEqual([]);
+    expect(items.jumiStickies.map((comment) => comment.id)).toEqual([38022]);
+  });
+
+  test("keeps current-head success sticky with leftover simplifications and needsFollowUp", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ trailer: "<!-- jumi-check: success; 2 suggestions -->" }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
+    expect(items.comments.map((comment) => comment.id)).toEqual([38022]);
+    expect(items.jumiStickies.map((comment) => comment.id)).toEqual([38022]);
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
   });
 
   test("excludes jumi-worker sticky", async () => {
@@ -3395,8 +3537,33 @@ describe("collectFollowUpItems", () => {
       ],
     });
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA);
-    expect(items.jumiReviews).toEqual([]);
+    expect(items.jumiReviews.map((review) => review.id)).toEqual([2]);
     expect(items.jumiFindingReviews).toEqual([]);
+  });
+
+  test("needsFollowUp is false for questions-only success", async () => {
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: reviewSticky({ trailer: "<!-- jumi-check: success -->" }),
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(false);
+    });
   });
 
   test("needsFollowUp is false when the same jumi pull review id and SHA are already handled", async () => {

@@ -68,6 +68,7 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("LSP is also allowed");
     expect(prompt).toContain("<!-- jumi-check: success -->");
     expect(prompt).toContain("<!-- jumi-check: failure -->");
+    expect(prompt).toContain("<!-- jumi-check: success; 2 suggestions -->");
     expect(prompt).toContain("You are Jumi's reviewer");
     expect(prompt).toContain("this git forge");
     expect(prompt).toContain("the commit status");

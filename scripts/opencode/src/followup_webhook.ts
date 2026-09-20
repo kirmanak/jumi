@@ -293,6 +293,8 @@ export function shouldEnqueuePullRejectedFollowUp(
   if (loginInList(payload.sender?.login, policy.followupIgnoreLogins)) {
     return { type: "skip", reason: "sender ignored" };
   }
+  const reviewBody = payload.review?.content ?? payload.review?.body ?? "";
+  if (!reviewBody.trim()) return { type: "skip", reason: "empty comment body" };
 
   const pr = payload.pull_request;
   const issueNumber = followUpIssueNumber(pr, closingIssue, policy.botUsername, policy);
