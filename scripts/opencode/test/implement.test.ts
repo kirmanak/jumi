@@ -5,15 +5,18 @@ import { join } from "node:path";
 import { claimFilePath, readClaim, stuckStatePath } from "../src/claim.ts";
 import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
+import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import {
   buildPullRequestBody,
   cancelIssueWork,
+  INCOMPLETE_IMPLEMENT,
   implementIssue,
+  isValidatedSkipText,
   jumiPrBodyRegion,
   replaceJumiPrBodyRegion,
+  SKIP_FILE,
   seedPullRequestDescription,
   wrapJumiPrBody,
 } from "../src/implement.ts";
@@ -93,6 +96,22 @@ async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
     await rm(workdir, { recursive: true, force: true });
   }
 }
+
+describe("isValidatedSkipText", () => {
+  test("missing, empty, and whitespace-only are not validated", () => {
+    expect(isValidatedSkipText(null)).toBe(false);
+    expect(isValidatedSkipText(undefined)).toBe(false);
+    expect(isValidatedSkipText("")).toBe(false);
+    expect(isValidatedSkipText("  \n")).toBe(false);
+    expect(isValidatedSkipText("\0\0")).toBe(false);
+  });
+
+  test("non-empty content is a validated skip and the prose is not interpreted", () => {
+    expect(isValidatedSkipText("already on main")).toBe(true);
+    expect(isValidatedSkipText("nothing to change\n")).toBe(true);
+    expect(isValidatedSkipText("unknown")).toBe(true);
+  });
+});
 
 describe("buildPullRequestBody", () => {
   test("falls back for null, empty, and whitespace-only contents", () => {
@@ -869,7 +888,7 @@ describe("implementIssue", () => {
     });
   });
 
-  test("comments no changes and does not open a PR when the tree is clean", async () => {
+  test("comments no changes and does not open a PR when the tree is clean with a skip artifact", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
       const gitCalls: string[][] = [];
@@ -898,6 +917,7 @@ describe("implementIssue", () => {
           const task = await readFile(join(workdir, "kirmanak/demo/12/JUMI_TASK.md"), "utf8");
           expect(task).toContain("Fix the thing");
           expect(task).toContain("Please implement this.");
+          await writeFile(join(workdir, "kirmanak/demo/12", SKIP_FILE), "already done");
           return { status: "ok" };
         },
         logger: () => undefined,
@@ -1073,6 +1093,7 @@ describe("implementIssue", () => {
         openCodeRunner: async () => {
           await mkdir(join(worktree, ".jumi-tmp"), { recursive: true });
           await writeFile(join(worktree, ".jumi-tmp", "opencode-session.db"), "db");
+          await writeFile(join(worktree, SKIP_FILE), "already done");
           return { status: "ok" };
         },
         logger: () => undefined,
@@ -1104,6 +1125,7 @@ describe("implementIssue", () => {
         heartbeatIntervalMs: 20,
         gitRunner,
         openCodeRunner: async () => {
+          await writeFile(join(workdir, "kirmanak/demo/12", SKIP_FILE), "already done");
           await new Promise((resolve) => setTimeout(resolve, 45));
           return { status: "ok" };
         },
@@ -1146,7 +1168,10 @@ describe("implementIssue", () => {
         workdir,
         heartbeatIntervalMs: 0,
         gitRunner,
-        openCodeRunner: async () => ({ status: "ok" }),
+        openCodeRunner: async () => {
+          await writeFile(join(workdir, "kirmanak/demo/12", SKIP_FILE), "already done");
+          return { status: "ok" };
+        },
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "no-changes" });
@@ -1407,8 +1432,516 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({ status: "no-changes" });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
       expect(api.pulls).toHaveLength(0);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("clean tree without a skip artifact is incomplete and does not stamp no-changes", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({
+          status: "ok",
+          stdout: "root idle; terminating background tasks",
+        }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(api.pulls).toHaveLength(0);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(INCOMPLETE_IMPLEMENT);
+      expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
+    });
+  });
+
+  test("empty skip file is incomplete", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await writeFile(join(worktree, SKIP_FILE), "  \n");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("skip symlink is incomplete and is not followed", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await writeFile(join(worktree, "secret.md"), "already done");
+          await symlink(join(worktree, "secret.md"), join(worktree, SKIP_FILE));
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("skip directory is incomplete", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await mkdir(join(worktree, SKIP_FILE), { recursive: true });
+          await writeFile(join(worktree, SKIP_FILE, "nested.md"), "already done");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("incomplete hops once from scratch to the next named runner", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const calls: Array<{ model: string; continueSession?: boolean; hop?: boolean; hopFromIncomplete?: boolean }> = [];
+      let runs = 0;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return runs >= 2 ? " M src/demo.ts" : "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          runs++;
+          calls.push({
+            model: opts.model,
+            continueSession: opts.continueSession,
+            hop: opts.hop,
+            hopFromIncomplete: opts.hopFromIncomplete,
+          });
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      expect(calls).toEqual([
+        { model: "claude-opus-5", continueSession: undefined, hop: undefined, hopFromIncomplete: undefined },
+        { model: "xai/grok-4.6", continueSession: false, hop: true, hopFromIncomplete: true },
+      ]);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("incomplete hop still empty does not stamp terminal no-changes", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          models.push(opts.model);
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(models).toEqual(["claude-opus-5", "xai/grok-4.6"]);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(INCOMPLETE_IMPLEMENT);
+      expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
+    });
+  });
+
+  test("validated skip does not hop", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          models.push(opts.model);
+          await writeFile(join(worktree, SKIP_FILE), "already done");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(models).toEqual(["claude-opus-5"]);
+      expect(api.comments.at(-1)).toContain("no changes");
+    });
+  });
+
+  test("auth hop then incomplete does not hop again or stamp no-changes", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const calls: Array<{ model: string; hopFromIncomplete?: boolean }> = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          calls.push({ model: opts.model, hopFromIncomplete: opts.hopFromIncomplete });
+          if (opts.model === "claude-opus-5") {
+            return { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true };
+          }
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(calls).toEqual([
+        { model: "claude-opus-5", hopFromIncomplete: undefined },
+        { model: "xai/grok-4.6", hopFromIncomplete: undefined },
+      ]);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("incomplete hop starts from the issue text the gate validated", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const calls: Array<{
+        model: string;
+        continueSession?: boolean;
+        hopFromIncomplete?: boolean;
+        task: string;
+        prompt?: string;
+      }> = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          calls.push({
+            model: opts.model,
+            continueSession: opts.continueSession,
+            hopFromIncomplete: opts.hopFromIncomplete,
+            task: await readFile(join(workdir, "kirmanak/demo/12/JUMI_TASK.md"), "utf8"),
+            prompt: opts.prompt,
+          });
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      // Three spawns: the first run, one continue for the edit, and one hop. The
+      // edit is not handled twice, and the hop runner sees the edited task text.
+      expect(calls).toHaveLength(3);
+      expect(calls[0]).toMatchObject({ model: "claude-opus-5", continueSession: undefined });
+      expect(calls[0]?.task).toContain("Fix the thing");
+      expect(calls[1]).toMatchObject({
+        model: "claude-opus-5",
+        continueSession: true,
+        prompt: IMPLEMENT_PROMPT,
+      });
+      expect(calls[1]?.task).toContain("Rewritten title");
+      expect(calls[2]).toMatchObject({ model: "xai/grok-4.6", hopFromIncomplete: true });
+      expect(calls[2]?.task).toContain("Rewritten title");
+      expect(calls[2]?.task).toContain("Do this instead.");
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("skip artifact written before a continue round does not validate no-changes", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          models.push(opts.model);
+          // Only the first child skips, against the pre-edit issue text.
+          if (models.length === 1) await writeFile(join(worktree, SKIP_FILE), "already done");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      // The stale artifact is dropped before the continue round, so the edited
+      // issue is incomplete and hops instead of being consumed by a skip.
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(models).toEqual(["claude-opus-5", "claude-opus-5", "xai/grok-4.6"]);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("declined incomplete hop does not continue a session in a stripped worktree", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const calls: Array<{ model: string; continueSession?: boolean; hopFromIncomplete?: boolean }> = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          calls.push({
+            model: opts.model,
+            continueSession: opts.continueSession,
+            hopFromIncomplete: opts.hopFromIncomplete,
+          });
+          if (opts.model === "claude-opus-5") {
+            return { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true };
+          }
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      // The auth hop already spent the chain, so the incomplete round spawns
+      // nothing and must not re-gate: no fourth `--continue` without a session.
+      expect(calls).toEqual([
+        { model: "claude-opus-5", continueSession: undefined, hopFromIncomplete: undefined },
+        { model: "xai/grok-4.6", continueSession: false, hopFromIncomplete: undefined },
+        { model: "xai/grok-4.6", continueSession: true, hopFromIncomplete: undefined },
+      ]);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(INCOMPLETE_IMPLEMENT);
+    });
+  });
+
+  test("continue round after an issue edit can validate skip for the rewritten text", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          if (opts.continueSession) await writeFile(join(worktree, SKIP_FILE), "rewritten issue needs nothing");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(api.comments.at(-1)).toContain("no changes");
     });
   });
 
@@ -1614,10 +2147,11 @@ describe("implementIssue", () => {
     });
   });
 
-  test("continue OpenCode uses a no-push follow-up prompt instead of implement", async () => {
+  test("continue OpenCode after an issue edit traces follow-up but carries the implement skip prompt", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
       const kinds: string[] = [];
+      const prompts: Array<string | undefined> = [];
       const api = makeApi({
         getIssue: async () => {
           gets++;
@@ -1644,7 +2178,7 @@ describe("implementIssue", () => {
         gitRunner,
         openCodeRunner: async (opts) => {
           kinds.push(opts.trace?.kind ?? "");
-          expect("prompt" in opts).toBe(false);
+          prompts.push(opts.prompt);
           expect(opts.continueSession).toBe(kinds.length === 2 ? true : undefined);
           return { status: "ok" };
         },
@@ -1652,6 +2186,8 @@ describe("implementIssue", () => {
       });
       expect(result.status).toBe("pr");
       expect(kinds).toEqual(["implement", "follow-up"]);
+      expect(prompts[0]).toBeUndefined();
+      expect(prompts[1]).toBe(IMPLEMENT_PROMPT);
     });
   });
 

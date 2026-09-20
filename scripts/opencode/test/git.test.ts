@@ -1028,6 +1028,14 @@ describe("worker prompts", () => {
     expect(BLOCKED_BY_REJECTED_PROMPT.startsWith("blocked-by rejected, implement")).toBe(true);
     expect(IMPLEMENT_PROMPT).not.toContain("JUMI_BLOCKED.md");
   });
+
+  test("first-run skip is JUMI_SKIP.md; follow-up and conflict must not skip", () => {
+    expect(IMPLEMENT_PROMPT).toContain("JUMI_SKIP.md");
+    expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_SKIP.md");
+    expect(BLOCKED_BY_REJECTED_PROMPT).toContain("JUMI_SKIP.md");
+    expect(FOLLOWUP_PROMPT).not.toContain("JUMI_SKIP.md");
+    expect(CONFLICT_PROMPT).not.toContain("JUMI_SKIP.md");
+  });
 });
 
 describe("resolveOpenCodePrompt", () => {

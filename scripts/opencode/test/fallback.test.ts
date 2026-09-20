@@ -92,14 +92,13 @@ describe("shouldHopInsteadOfQuotaStuck", () => {
 });
 
 describe("withModelHop", () => {
-  test("unset fallback is identity: one primary call, no hop", async () => {
+  test("unset fallback passes through: one primary call, no hop", async () => {
     const models: string[] = [];
     const engine: Engine = async (opts) => {
       models.push(opts.model);
       return unavailable;
     };
     const wrapped = withModelHop(engine, {});
-    expect(wrapped).toBe(engine);
     const result = await wrapped({ model: "openai/gpt-5.5", workdir: "/tmp" });
     expect(result).toEqual(unavailable);
     expect(models).toEqual(["openai/gpt-5.5"]);
@@ -493,6 +492,103 @@ describe("withEngineChain", () => {
     });
     expect(result).toMatchObject(unavailable);
     expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete advances once from scratch", async () => {
+    const calls: Array<{ model: string; continueSession?: boolean; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({ model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+      return ok(opts.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toMatchObject(ok(grok.model));
+    expect(calls).toEqual([
+      { model: spark.model, continueSession: undefined, hop: undefined },
+      { model: grok.model, continueSession: false, hop: true },
+    ]);
+  });
+
+  test("hopFromIncomplete with no next runner does not spawn", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
+    expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete with no chain at all does not re-run the same engine", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, {});
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
+    expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete with continueSession declines instead of re-spawning", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({
+      model: spark.model,
+      workdir: "/tmp",
+      hopFromIncomplete: true,
+      continueSession: true,
+    });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
+    expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete when aborted declines instead of re-spawning", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const abort = new AbortController();
+    abort.abort();
+    const hopped = await run({
+      model: spark.model,
+      workdir: "/tmp",
+      hopFromIncomplete: true,
+      abortSignal: abort.signal,
+    });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
+    expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete still hops on auth after the incomplete advance", async () => {
+    const models: string[] = [];
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === grok.model) {
+        return { status: "exit", exitCode: 1, message: "host: provider auth death", auth: true };
+      }
+      return ok(opts.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok, claude] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({ model: spark.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(hopped).toMatchObject(ok(claude.model));
+    expect(models).toEqual([spark.model, grok.model, claude.model]);
   });
 
   test("infra does not hop", async () => {

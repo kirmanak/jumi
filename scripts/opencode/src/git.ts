@@ -69,6 +69,7 @@ Verify once at the end, not after every edit.`;
 
 const IMPLEMENT_FINISH = `Edit, write, commit, and push as needed. Incremental commits are fine.
 Do not force-push. Do not ask questions.
+If there is nothing to change, write JUMI_SKIP.md at the repository root with a short reason. Do not commit JUMI_SKIP.md.
 When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
 Then stop.`;
 
