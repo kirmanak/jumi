@@ -34,7 +34,7 @@ import {
 import { type Engine, type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import type { FollowUpResult } from "./followup.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
+import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
@@ -463,6 +463,10 @@ export async function implementIssue(
         return skipClaimedWork(loop, reason);
       };
 
+      // Leaves the issue retryable: a diary so the last visible state is not the
+      // in-progress sticky, and no `stampTerminalClaim`, which #114 forbids here.
+      const skipIncomplete = () => skipBlocked(INCOMPLETE_IMPLEMENT);
+
       const applyValidYield = async (blocker: { owner: string; repo: string; number: number }) => {
         try {
           await opts.api.createIssueDependency(owner, repo, issueNumber, {
@@ -516,7 +520,7 @@ export async function implementIssue(
         // The chain had no runner left to hop to, so nothing ran this round: the
         // sentinels are already stripped, so re-gating would only re-handle an
         // issue edit and continue a session this worktree no longer has.
-        if (hopDeclined) return skipClaimedWork(loop, INCOMPLETE_IMPLEMENT);
+        if (hopDeclined) return skipIncomplete();
 
         const firstYield = await handleYield(false);
         if (firstYield === "retry") {
@@ -549,7 +553,7 @@ export async function implementIssue(
               const quotaContinued = await runEngine(
                 `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
                 "follow-up",
-                undefined,
+                queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT,
                 { continueSession: true }
               );
               if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
@@ -593,7 +597,7 @@ export async function implementIssue(
             await writeTaskFiles(liveJob);
             continue;
           }
-          return skipClaimedWork(loop, INCOMPLETE_IMPLEMENT);
+          return skipIncomplete();
         }
         break;
       }

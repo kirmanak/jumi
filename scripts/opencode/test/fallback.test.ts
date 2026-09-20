@@ -536,6 +536,44 @@ describe("withEngineChain", () => {
     expect(n).toBe(1);
   });
 
+  test("hopFromIncomplete with continueSession declines instead of re-spawning", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const hopped = await run({
+      model: spark.model,
+      workdir: "/tmp",
+      hopFromIncomplete: true,
+      continueSession: true,
+    });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
+    expect(n).toBe(1);
+  });
+
+  test("hopFromIncomplete when aborted declines instead of re-spawning", async () => {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return ok(spark.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    const abort = new AbortController();
+    abort.abort();
+    const hopped = await run({
+      model: spark.model,
+      workdir: "/tmp",
+      hopFromIncomplete: true,
+      abortSignal: abort.signal,
+    });
+    expect(hopped).toEqual({ status: "ok", hopDeclined: true });
+    expect(n).toBe(1);
+  });
+
   test("hopFromIncomplete still hops on auth after the incomplete advance", async () => {
     const models: string[] = [];
     const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };

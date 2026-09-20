@@ -199,15 +199,17 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
   return async (opts: EngineRunOptions): Promise<EngineResult> => {
     const runners = runnersFor(opts);
 
-    if (opts.hopFromIncomplete === true && !opts.continueSession && !opts.abortSignal?.aborted) {
-      const next = runners[index + 1];
-      if (next && (await leaseAllowsHop(hop, opts.timeoutMs))) {
-        await beginHop(hop, opts, runners[index]!, next);
-        index++;
-      } else {
+    if (opts.hopFromIncomplete === true) {
+      // The hop is always from scratch to the *next* runner, so anything that
+      // rules that out — a continued session, an abort, no next entry, no lease
+      // left — is a refusal. Never re-spawn the runner that just produced nothing.
+      const next = opts.continueSession || opts.abortSignal?.aborted ? undefined : runners[index + 1];
+      if (!next || !(await leaseAllowsHop(hop, opts.timeoutMs))) {
         // Nothing ran: say so rather than look like a runner that produced nothing.
         return { status: "ok", hopDeclined: true };
       }
+      await beginHop(hop, opts, runners[index]!, next);
+      index++;
     }
 
     if (index > 0 && opts.hopFromIncomplete !== true) {

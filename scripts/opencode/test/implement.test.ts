@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { claimFilePath, readClaim, stuckStatePath } from "../src/claim.ts";
 import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
+import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import {
@@ -1468,6 +1468,7 @@ describe("implementIssue", () => {
       expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
       expect(api.pulls).toHaveLength(0);
       expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(INCOMPLETE_IMPLEMENT);
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
     });
   });
@@ -1656,6 +1657,7 @@ describe("implementIssue", () => {
       expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
       expect(models).toEqual(["claude-opus-5", "xai/grok-4.6"]);
       expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(INCOMPLETE_IMPLEMENT);
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
     });
   });
@@ -1749,7 +1751,13 @@ describe("implementIssue", () => {
       const api = makeApi({
         getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
       });
-      const calls: Array<{ model: string; continueSession?: boolean; hopFromIncomplete?: boolean; task: string }> = [];
+      const calls: Array<{
+        model: string;
+        continueSession?: boolean;
+        hopFromIncomplete?: boolean;
+        task: string;
+        prompt?: string;
+      }> = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1778,6 +1786,7 @@ describe("implementIssue", () => {
             continueSession: opts.continueSession,
             hopFromIncomplete: opts.hopFromIncomplete,
             task: await readFile(join(workdir, "kirmanak/demo/12/JUMI_TASK.md"), "utf8"),
+            prompt: opts.prompt,
           });
           return { status: "ok" };
         },
@@ -1789,7 +1798,11 @@ describe("implementIssue", () => {
       expect(calls).toHaveLength(3);
       expect(calls[0]).toMatchObject({ model: "claude-opus-5", continueSession: undefined });
       expect(calls[0]?.task).toContain("Fix the thing");
-      expect(calls[1]).toMatchObject({ model: "claude-opus-5", continueSession: true });
+      expect(calls[1]).toMatchObject({
+        model: "claude-opus-5",
+        continueSession: true,
+        prompt: IMPLEMENT_PROMPT,
+      });
       expect(calls[1]?.task).toContain("Rewritten title");
       expect(calls[2]).toMatchObject({ model: "xai/grok-4.6", hopFromIncomplete: true });
       expect(calls[2]?.task).toContain("Rewritten title");
@@ -1893,6 +1906,42 @@ describe("implementIssue", () => {
         { model: "xai/grok-4.6", continueSession: true, hopFromIncomplete: undefined },
       ]);
       expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(INCOMPLETE_IMPLEMENT);
+    });
+  });
+
+  test("continue round after an issue edit can validate skip for the rewritten text", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          if (opts.continueSession) await writeFile(join(worktree, SKIP_FILE), "rewritten issue needs nothing");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(api.comments.at(-1)).toContain("no changes");
     });
   });
 
@@ -2098,10 +2147,11 @@ describe("implementIssue", () => {
     });
   });
 
-  test("continue OpenCode uses a no-push follow-up prompt instead of implement", async () => {
+  test("continue OpenCode after an issue edit traces follow-up but carries the implement skip prompt", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
       const kinds: string[] = [];
+      const prompts: Array<string | undefined> = [];
       const api = makeApi({
         getIssue: async () => {
           gets++;
@@ -2128,7 +2178,7 @@ describe("implementIssue", () => {
         gitRunner,
         openCodeRunner: async (opts) => {
           kinds.push(opts.trace?.kind ?? "");
-          expect("prompt" in opts).toBe(false);
+          prompts.push(opts.prompt);
           expect(opts.continueSession).toBe(kinds.length === 2 ? true : undefined);
           return { status: "ok" };
         },
@@ -2136,6 +2186,8 @@ describe("implementIssue", () => {
       });
       expect(result.status).toBe("pr");
       expect(kinds).toEqual(["implement", "follow-up"]);
+      expect(prompts[0]).toBeUndefined();
+      expect(prompts[1]).toBe(IMPLEMENT_PROMPT);
     });
   });
 
