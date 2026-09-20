@@ -31,23 +31,11 @@ interface OpenCodeReviewConfig {
   };
 }
 
-function bashPermission(rules: Record<string, "allow" | "ask" | "deny">, command: string): "allow" | "ask" | "deny" {
-  // Mirror OpenCode's Wildcard.match semantics (packages/*/util/wildcard.ts):
-  // normalize backslashes, convert globs, treat trailing " .*" as optional args,
-  // and use the dotAll flag so "." matches newlines.
-  const normalized = command.replaceAll("\\", "/");
-  let decision: "allow" | "ask" | "deny" = "ask";
-  for (const [pattern, action] of Object.entries(rules)) {
-    let escaped = pattern
-      .replaceAll("\\", "/")
-      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*/g, ".*")
-      .replace(/\?/g, ".");
-    if (escaped.endsWith(" .*")) escaped = `${escaped.slice(0, -3)}( .*)?`;
-    if (new RegExp(`^${escaped}$`, "s").test(normalized)) decision = action;
-  }
-  return decision;
-}
+// No local matcher lives here on purpose. Whether a pattern actually denies a
+// URL is proved against the installed OpenCode binary by
+// `src/webfetch_probe.ts`, which every image verification path runs; a copy of
+// OpenCode's wildcard matcher would only grade itself. These tests assert the
+// shape and last-match ordering of the maps we ship.
 
 describe("opencode review config", () => {
   const config = JSON.parse(
@@ -86,19 +74,20 @@ describe("opencode review config", () => {
       "*github.com/search*": "deny",
     });
     expect(Object.keys(rules)).toEqual(["*", "*kirmanak.stream*", "*github.com/search*"]);
+  });
 
-    expect(bashPermission(rules, "https://gitea.kirmanak.stream/personal/jumi/releases")).toBe("deny");
-    expect(bashPermission(rules, "http://gitea.kirmanak.stream/personal/jumi")).toBe("deny");
-    expect(bashPermission(rules, "https://gitea.kirmanak.stream/api/v1/repos/personal/jumi")).toBe("deny");
-    expect(bashPermission(rules, "https://api.github.com/search/code?q=repo:foo")).toBe("deny");
-    expect(bashPermission(rules, "https://github.com/search?q=foo")).toBe("deny");
-
-    expect(bashPermission(rules, "https://docs.gitea.com/installation")).toBe("allow");
-    expect(bashPermission(rules, "https://raw.githubusercontent.com/owner/repo/main/README.md")).toBe("allow");
-    expect(bashPermission(rules, "https://github.com/owner/repo/releases/tag/v1.0.0")).toBe("allow");
-    expect(bashPermission(rules, "https://github.com/owner/repo/commit/abc123")).toBe("allow");
-    expect(bashPermission(rules, "https://github.com/owner/repo/raw/main/file.ts")).toBe("allow");
-    expect(bashPermission(rules, "https://cdn.jsdelivr.net/npm/package/file.js")).toBe("allow");
+  test("the binary probe drives the shipped map rather than a copy of it", () => {
+    const probe = readFileSync(join(process.cwd(), "src/webfetch_probe.ts"), "utf8");
+    expect(probe).toContain('from "./review_webfetch.ts"');
+    expect(probe).toContain("REVIEW_OPENCODE_PERMISSION");
+    // Deny of the forge host and allow of an unrelated host, both on the binary.
+    expect(probe).toContain('expect: "allow"');
+    expect(probe).toContain('expect: "deny"');
+    expect(probe).toContain("https://gitea.kirmanak.stream/");
+    expect(probe).toContain("github.com/search");
+    // The deny assertion reads the shipped map, so it cannot drift from it.
+    expect(probe).toContain("DENY_PATTERNS");
+    expect(probe).toContain("REVIEW_WEBFETCH_PERMISSION");
   });
 
   test("allows Read of baked review-skills after star deny (last-match)", () => {
@@ -106,34 +95,13 @@ describe("opencode review config", () => {
     expect(rules).toEqual({ "*": "deny", "/app/review-skills/**": "allow" });
     if (typeof rules === "string") throw new Error("expected last-match object, not scalar deny");
     expect(Object.keys(rules)).toEqual(["*", "/app/review-skills/**"]);
-
-    expect(bashPermission(rules, "/app/review-skills/gitops-apply-review/*")).toBe("allow");
-    expect(bashPermission(rules, "/app/review-skills/gitops-apply-review/references/*")).toBe("allow");
-    expect(bashPermission(rules, "/app/review-skills/gitea-pull-review/*")).toBe("allow");
-    expect(bashPermission(rules, "/app/review-skills/*")).toBe("allow");
-    expect(bashPermission(rules, "/app/*")).toBe("deny");
-    expect(bashPermission(rules, "/app/.gitea/*")).toBe("deny");
-    expect(bashPermission(rules, "/app/scripts/*")).toBe("deny");
-    expect(bashPermission(rules, "/etc/*")).toBe("deny");
-    expect(bashPermission(rules, "/data/*")).toBe("deny");
   });
 
-  test("defaults bash to allow, including pipes, quotes, and previously sealed searches", () => {
+  test("defaults bash to allow with no commit/push carve-outs", () => {
     const bash = config.permission.bash;
     expect(bash["*"]).toBe("allow");
     expect(Object.keys(bash)).toEqual(["*"]);
-    expect(bashPermission(bash, "git grep -n foo|bar path")).toBe("allow");
-    expect(bashPermission(bash, `git grep -n "RefuseManualStart\\|pve-guests" jumi/target -- "*.yml"`)).toBe("allow");
-    expect(bashPermission(bash, "git grep -n 'TODO' -- path")).toBe("allow");
-    expect(bashPermission(bash, "git log --patch jumi/target..HEAD")).toBe("allow");
-    expect(bashPermission(bash, "git diff --unified=80 jumi/target...HEAD -- path/to/file")).toBe("allow");
-    expect(bashPermission(bash, "rg -n checksum values.yaml | head")).toBe("allow");
-    expect(bashPermission(bash, "cat src/data/config.json")).toBe("allow");
-    expect(bashPermission(bash, "git status --short && git diff --stat jumi/target...HEAD")).toBe("allow");
-    expect(bashPermission(bash, "git commit -m wip")).toBe("allow");
-    expect(bashPermission(bash, "git push -u origin HEAD")).toBe("allow");
     expect(Object.keys(bash).some((pattern) => /git commit|git push/i.test(pattern))).toBe(false);
-    expect(Object.keys(bash).some((pattern) => pattern.includes("git commit"))).toBe(false);
   });
 });
 
@@ -157,6 +125,25 @@ describe("reviewer image permissions", () => {
     const giteaSkillPath = join(repoRoot, "review-skills/gitea-pull-review/SKILL.md");
     expect(existsSync(giteaSkillPath)).toBe(true);
     expect(readFileSync(giteaSkillPath, "utf8")).toContain("name: gitea-pull-review");
+  });
+
+  test("runs the webfetch permission probe on the binary in every image verification path", () => {
+    // The probe is the only thing standing between an OpenCode upgrade and a
+    // silently dropped forge-host deny, so no verification path may lose it.
+    // `opencode-checks.yml` matters most: it is the one that runs on
+    // pull_request, so it is what gates an OPENCODE_VERSION bump before the
+    // image is published.
+    const paths = [
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/opencode-checks.yml",
+    ];
+    expect(existsSync(join(repoRoot, "scripts/opencode/src/webfetch_probe.ts"))).toBe(true);
+    for (const path of paths) {
+      expect(readFileSync(join(repoRoot, path), "utf8")).toContain("bun src/webfetch_probe.ts");
+    }
+    // src/ is what carries the probe (and the map it imports) into the image.
+    expect(dockerfile).toContain("COPY scripts/opencode/src ./src");
   });
 
   test("installs python3 and helm in the runtime image", () => {

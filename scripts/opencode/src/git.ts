@@ -30,6 +30,7 @@ import {
   QUOTA_POLL_INTERVAL_MS,
   type QuotaHit,
 } from "./quota.ts";
+import { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION } from "./review_webfetch.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
@@ -53,13 +54,7 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
   configPath?: string;
 }
 
-export const REVIEW_WEBFETCH_PERMISSION: Record<string, "allow" | "ask" | "deny"> = {
-  "*": "allow",
-  "*kirmanak.stream*": "deny",
-  "*github.com/search*": "deny",
-};
-
-export const REVIEW_OPENCODE_PERMISSION = JSON.stringify({ webfetch: REVIEW_WEBFETCH_PERMISSION });
+export { REVIEW_OPENCODE_PERMISSION, REVIEW_WEBFETCH_PERMISSION };
 
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
