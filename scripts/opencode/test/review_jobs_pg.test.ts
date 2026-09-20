@@ -49,6 +49,26 @@ describePg("PgReviewJobStore against real postgres", () => {
     return Number(rows[0]?.n ?? 0) > 0;
   }
 
+  async function waitForBlockedReviewJobsLock(timeoutMs = 5_000): Promise<void> {
+    const probe = createBunSqlClient(databaseUrl);
+    const deadline = Date.now() + timeoutMs;
+    try {
+      while (Date.now() < deadline) {
+        const rows = asRows<{ n: unknown }>(
+          await probe.unsafe(
+            `SELECT COUNT(*)::int AS n FROM pg_stat_activity
+             WHERE wait_event_type = 'Lock' AND query LIKE '%review_jobs%' AND pid <> pg_backend_pid()`
+          )
+        );
+        if (Number(rows[0]?.n ?? 0) >= 1) return;
+        await Bun.sleep(10);
+      }
+      throw new Error("timed out waiting for lease() to block on review_jobs_leased_worker_issue");
+    } finally {
+      await probe.close?.();
+    }
+  }
+
   beforeAll(async () => {
     if (!databaseUrl) return;
     sql = createBunSqlClient(databaseUrl);
@@ -121,8 +141,12 @@ describePg("PgReviewJobStore against real postgres", () => {
     // Hold an uncommitted lease on the first row. The second lease cannot see it yet, so it
     // runs the whole NOT EXISTS / SKIP LOCKED path and only collides at the unique index.
     let commit!: () => void;
+    let holderReady!: () => void;
     const gate = new Promise<void>((resolve) => {
       commit = resolve;
+    });
+    const holderUpdated = new Promise<void>((resolve) => {
+      holderReady = resolve;
     });
     const holder = sql.begin(async (tx) => {
       await tx.unsafe(
@@ -131,12 +155,13 @@ describePg("PgReviewJobStore against real postgres", () => {
          WHERE id = $1`,
         [Number(ids[0]?.id)]
       );
+      holderReady();
       await gate;
     });
 
-    await Bun.sleep(100);
+    await holderUpdated;
     const blocked = store.lease("worker-b", 60_000, new Date(), WORKER_JOB_KINDS);
-    await Bun.sleep(100);
+    await waitForBlockedReviewJobsLock();
     commit();
     await holder;
 
