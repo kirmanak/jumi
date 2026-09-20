@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { claudeArgv } from "../src/claude.ts";
 import {
+  CLAUDE_EFFORT_LEVELS,
   CLAUDE_REJECTABLE_FLAGS,
   droppedFlagWarning,
   flagObjection,
+  judgeEffortLevel,
+  judgeNegativeRun,
   nonsenseValue,
   pinnedFlagValues,
   withFlagValue,
@@ -99,5 +104,106 @@ describe("flagObjection", () => {
     // nonsense value would also shrug at a typo in the production constant,
     // which would make the positive case prove nothing.
     expect(flagObjection("--permission-mode", "bad", { code: 0, stderr: "" })).toBeUndefined();
+  });
+});
+
+describe("judgeNegativeRun", () => {
+  const bad = nonsenseValue("--effort");
+  const effort = { flag: "--effort", value: "high" };
+  const swapped = withFlagValue(argv, "--effort", bad);
+
+  test("accepts commander's exit for a flag the binary can refuse", () => {
+    const mode = { flag: "--permission-mode", value: "dontAsk" };
+    const badMode = nonsenseValue("--permission-mode");
+    const stderr = `error: option '--permission-mode <mode>' argument '${badMode}' is invalid.`;
+    const result = judgeNegativeRun(withFlagValue(argv, "--permission-mode", badMode), mode, badMode, {
+      code: 1,
+      stdout: "",
+      stderr,
+      timedOut: false,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  test("accepts the --effort warning when the positive run's own detector also sees it", () => {
+    const stderr = `Warning: Unknown --effort value '${bad}' — ignoring it and using the default effort.`;
+    const result = judgeNegativeRun(swapped, effort, bad, { code: 0, stdout: "", stderr, timedOut: false });
+    expect(result.ok).toBe(true);
+    expect(result.observed).toBe(stderr);
+  });
+
+  test("fails when the --effort warning is invisible to droppedFlagWarning", () => {
+    // `flagObjection` only needs the flag and the value somewhere on the line,
+    // but the positive run's "no production flag was warned about and dropped"
+    // row uses the anchored `droppedFlagWarning`. A release that prefixes the
+    // line would disarm that row while this control stayed green, so the
+    // control has to exercise the anchored matcher too.
+    const stderr = `⚠ Warning: Unknown --effort value '${bad}' — ignoring it and using the default effort.`;
+    const result = judgeNegativeRun(swapped, effort, bad, { code: 0, stdout: "", stderr, timedOut: false });
+    expect(result.ok).toBe(false);
+    expect(result.observed).toContain("droppedFlagWarning");
+  });
+
+  test("fails when the binary took the nonsense value without a word", () => {
+    const result = judgeNegativeRun(swapped, effort, bad, {
+      code: 0,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+    });
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("judgeEffortLevel", () => {
+  test("covers every level the binary documents, not just the one Jumi's runners use", () => {
+    // `effort` is free-form operator config (`JUMI_RUNNERS_FILE`), so a runner
+    // on `xhigh` or `max` gets no protection from probing `high` alone — and a
+    // level the binary forgot downgrades the run silently instead of failing.
+    expect(CLAUDE_EFFORT_LEVELS).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  test("passes a clean run", () => {
+    const levelArgv = withFlagValue(argv, "--effort", "max");
+    expect(judgeEffortLevel("max", levelArgv, { code: 0, stdout: "", stderr: "", timedOut: false }).ok).toBe(true);
+  });
+
+  test("fails a level the binary warned about and dropped", () => {
+    const levelArgv = withFlagValue(argv, "--effort", "xhigh");
+    const stderr = "Warning: Unknown --effort value 'xhigh' — ignoring it and using the default effort.";
+    const result = judgeEffortLevel("xhigh", levelArgv, { code: 0, stdout: "", stderr, timedOut: false });
+    expect(result.ok).toBe(false);
+    expect(result.observed).toBe(stderr);
+  });
+
+  test("fails a level the binary exited on", () => {
+    const levelArgv = withFlagValue(argv, "--effort", "low");
+    expect(judgeEffortLevel("low", levelArgv, { code: 1, stdout: "", stderr: "boom", timedOut: false }).ok).toBe(false);
+  });
+});
+
+describe("image verification paths", () => {
+  const repoRoot = join(process.cwd(), "../..");
+
+  test("runs the claude flag probe in every image verification path", () => {
+    // The probe is the only thing standing between a CLAUDE_VERSION bump and a
+    // production flag the binary no longer accepts, so no verification path may
+    // lose it. `opencode-checks.yml` matters most: it is the one that runs on
+    // pull_request, so it is what gates the bump before the image is published.
+    const paths = [
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".gitea/scripts/build-worker-image.sh",
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/jumi-worker-image.yml",
+      ".github/workflows/opencode-checks.yml",
+    ];
+    expect(existsSync(join(repoRoot, "scripts/opencode/src/claude_flag_probe.ts"))).toBe(true);
+    for (const path of paths) {
+      expect(readFileSync(join(repoRoot, path), "utf8")).toContain("bun src/claude_flag_probe.ts");
+    }
+    // Both pull_request image builds in that one file — reviewer and worker —
+    // ship `claude`, so both have to prove the flags, not just the first.
+    const checks = readFileSync(join(repoRoot, ".github/workflows/opencode-checks.yml"), "utf8");
+    expect(checks.split("bun src/claude_flag_probe.ts").length - 1).toBe(2);
   });
 });

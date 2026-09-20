@@ -21,7 +21,9 @@
  *     a value that parses but is ignored still fails here;
  *   - `--output-format stream-json --verbose` still yields the event stream
  *     `ClaudeStreamParser` reads text and token usage from;
- *   - every name in `--allowedTools` is a tool this binary actually has.
+ *   - every name in `--allowedTools` is a tool this binary actually has;
+ *   - every `--effort` level an operator may configure is still known, since a
+ *     level this release dropped only warns and runs at the default.
  *
  * Then each flag value the binary is able to reject is re-run with a nonsense
  * value and must draw an objection. That is what keeps the positive case
@@ -45,11 +47,18 @@ const PROBE_MARKER = "JUMI-CLAUDE-FLAG-PROBE-OK";
  */
 const PROBE_MODEL = "jumi-claude-flag-probe-model";
 /**
- * `--effort` is operator config (`JUMI_RUNNERS_FILE`), not a constant, so the
- * probe pins the level Jumi's own runners use. It is the one production flag
- * the binary answers with a warning instead of an exit, so a level this binary
- * no longer knows would otherwise downgrade the run in silence.
+ * `--effort` is operator config (`JUMI_RUNNERS_FILE`), not a constant:
+ * `runners.ts` accepts any string and `deploy/contract.md` documents it as
+ * optional free-form, so the level a deployed runner uses is not knowable from
+ * this repo. It is also the one production flag the binary answers with a
+ * warning instead of an exit, so a level it no longer knows downgrades the run
+ * in silence. Probing a single level would therefore only cover the runners
+ * that happen to pick that level; the probe runs the whole set the binary
+ * advertises (`claude --help`) instead, so a dropped or renamed level fails
+ * here whatever the operator configured.
  */
+export const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+/** The level the full production judgment and the negative control run at. */
 const PROBE_EFFORT = "high";
 /**
  * Cap a single `claude` run. The endpoint is loopback, so a healthy run is
@@ -193,7 +202,7 @@ function startStubAnthropic(state: StubState) {
   });
 }
 
-interface RunResult {
+export interface RunResult {
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
@@ -252,7 +261,7 @@ function jsonLines(stdout: string): Record<string, unknown>[] {
   return events;
 }
 
-interface CaseResult {
+export interface CaseResult {
   readonly name: string;
   readonly ok: boolean;
   readonly observed: string;
@@ -315,7 +324,12 @@ function judgeProductionRun(argv: readonly string[], run: RunResult): CaseResult
   ];
 }
 
-function judgeNegativeRun(pinned: PinnedFlagValue, bad: string, run: RunResult): CaseResult {
+export function judgeNegativeRun(
+  swapped: readonly string[],
+  pinned: PinnedFlagValue,
+  bad: string,
+  run: RunResult
+): CaseResult {
   const name = `${pinned.flag} ${bad} is refused (so pinning ${pinned.value} means something)`;
   if (run.timedOut) return { name, ok: false, observed: `claude hung, killed after ${RUN_TIMEOUT_MS}ms` };
   const objection = flagObjection(pinned.flag, bad, run);
@@ -325,7 +339,41 @@ function judgeNegativeRun(pinned: PinnedFlagValue, bad: string, run: RunResult):
   if (run.stdout.includes(PROBE_MARKER) && run.code === 0 && pinned.flag !== "--effort") {
     return { name, ok: false, observed: `complained but still ran the turn: ${objection}` };
   }
+  if (pinned.flag === "--effort") {
+    // `--effort` is the only flag whose rejection is a *warning*, so the
+    // positive run's sole defence against a silent downgrade is
+    // `droppedFlagWarning` — and its matcher is anchored (`/^(warning|error)\b/i`)
+    // while `flagObjection` is not. Demand the anchored matcher here too, or a
+    // release that prefixes the line (`⚠ Warning: …`, colorized stderr) would
+    // keep this control green while "no production flag was warned about and
+    // dropped" quietly stopped detecting anything.
+    const anchored = droppedFlagWarning(swapped, run.stderr);
+    if (anchored === undefined) {
+      return {
+        name,
+        ok: false,
+        observed: `objected (${objection}) but droppedFlagWarning missed the line — the positive run's dropped-flag detector is blind`,
+      };
+    }
+    return { name, ok: true, observed: anchored };
+  }
   return { name, ok: true, observed: objection };
+}
+
+/**
+ * One positive run per `--effort` level the binary advertises. A level it no
+ * longer knows is a warning plus a default-effort run, not an exit, so this is
+ * the only thing standing between an operator's `xhigh`/`max` runner and a
+ * silently downgraded job after a Claude upgrade.
+ */
+export function judgeEffortLevel(level: string, argv: readonly string[], run: RunResult): CaseResult {
+  const name = `--effort ${level} is accepted, not warned about and dropped`;
+  if (run.timedOut) return { name, ok: false, observed: `claude hung, killed after ${RUN_TIMEOUT_MS}ms` };
+  if (run.code !== 0) {
+    return { name, ok: false, observed: `claude exited ${run.code}: ${run.stderr.trim().slice(-300)}` };
+  }
+  const warning = droppedFlagWarning(argv, run.stderr);
+  return { name, ok: warning === undefined, observed: warning ?? "exit 0, clean stderr" };
 }
 
 async function main(): Promise<number> {
@@ -351,10 +399,17 @@ async function main(): Promise<number> {
 
     results.push(...judgeProductionRun(argv, await runClaudeArgv(argv, origin, home, workdir)));
 
+    // Every other level an operator may have put in `JUMI_RUNNERS_FILE`.
+    for (const level of CLAUDE_EFFORT_LEVELS.filter((candidate) => candidate !== PROBE_EFFORT)) {
+      const levelArgv = withFlagValue(argv, "--effort", level);
+      results.push(judgeEffortLevel(level, levelArgv, await runClaudeArgv(levelArgv, origin, home, workdir)));
+    }
+
     for (const entry of pinned) {
       const bad = nonsenseValue(entry.flag);
-      const run = await runClaudeArgv(withFlagValue(argv, entry.flag, bad), origin, home, workdir);
-      results.push(judgeNegativeRun(entry, bad, run));
+      const swapped = withFlagValue(argv, entry.flag, bad);
+      const run = await runClaudeArgv(swapped, origin, home, workdir);
+      results.push(judgeNegativeRun(swapped, entry, bad, run));
     }
   } finally {
     server.stop(true);
