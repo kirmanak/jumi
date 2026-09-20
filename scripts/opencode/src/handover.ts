@@ -7,7 +7,7 @@ import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { upsertStuckText } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { parseReviewOutput } from "./verdict.ts";
+import { parseReviewOutput, trailerSuggestionCount } from "./verdict.ts";
 
 export const TOO_MANY_FOLLOWUP_ROUNDS = "stuck: too many follow-up rounds";
 
@@ -17,18 +17,31 @@ export function isCurrentHeadFailureTrailer(markdown: string | null | undefined)
   return !parsed.verdict.incomplete && parsed.verdict.state === "failure";
 }
 
+export function isLeftoverSimplificationTrailer(markdown: string | null | undefined): boolean {
+  if (!markdown) return false;
+  const parsed = parseReviewOutput(markdown);
+  return (
+    !parsed.verdict.incomplete &&
+    parsed.verdict.state === "success" &&
+    trailerSuggestionCount(parsed.verdict.description) > 0
+  );
+}
+
 export function shouldHandoverFollowUp(opts: { published: ReviewResult; markdown?: string | null }): boolean {
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return false;
-  return isCurrentHeadFailureTrailer(opts.markdown);
+  return isCurrentHeadFailureTrailer(opts.markdown) || isLeftoverSimplificationTrailer(opts.markdown);
 }
 
 function persistInsertSkipReason(markdown: string | null | undefined): string | undefined {
   if (!markdown) return "incomplete";
   const parsed = parseReviewOutput(markdown);
   if (parsed.verdict.incomplete) return "incomplete";
-  if (parsed.verdict.state === "success") return "success trailer";
-  if (parsed.verdict.state !== "failure") return "incomplete";
-  return undefined;
+  if (parsed.verdict.state === "failure") return undefined;
+  if (parsed.verdict.state === "success") {
+    if (trailerSuggestionCount(parsed.verdict.description) > 0) return undefined;
+    return "success trailer";
+  }
+  return "incomplete";
 }
 
 function followUpJobFrom(
@@ -37,14 +50,15 @@ function followUpJobFrom(
   issue: Pick<Task, "number" | "title" | "body" | "html_url" | "updated_at">,
   pr: Pull,
   repository: Pick<Repo, "default_branch" | "clone_url">,
-  delivery: string
+  delivery: string,
+  triggerEvent: "review-failure" | "review-suggestions"
 ): IssueJob {
   return {
     delivery,
     owner,
     repo,
     issueNumber: issue.number,
-    action: "review-failure",
+    action: triggerEvent,
     title: issue.title,
     body: issue.body ?? "",
     htmlUrl: issue.html_url,
@@ -55,7 +69,7 @@ function followUpJobFrom(
     mode: "follow-up",
     prNumber: pr.number,
     headSha: pr.head.sha,
-    trigger: { event: "review-failure", sender: "jumi" },
+    trigger: { event: triggerEvent, sender: "jumi" },
   };
 }
 
@@ -114,7 +128,8 @@ export async function enqueueFollowUpFromReview(
     return logSkip("round cap");
   }
 
+  const triggerEvent = isLeftoverSimplificationTrailer(opts.markdown) ? "review-suggestions" : "review-failure";
   return opts.store.enqueueIssue(
-    followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `review-failure-${opts.row.id}`)
+    followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `${triggerEvent}-${opts.row.id}`, triggerEvent)
   );
 }

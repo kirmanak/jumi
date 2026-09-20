@@ -507,6 +507,29 @@ describe("shouldEnqueuePullRejectedFollowUp", () => {
     }
   });
 
+  test("skips empty review bodies", () => {
+    const decision = shouldEnqueuePullRejectedFollowUp(
+      makePayload({
+        action: "reviewed",
+        pull_request: makePR({
+          user: makeUser({ login: "jumi" }),
+          body: "Fixes #12",
+          head: {
+            label: "kirmanak:jumi/issue-12-fix-the-thing",
+            ref: "jumi/issue-12-fix-the-thing",
+            sha: "headsha",
+            repo: makePayload().repository,
+            repo_id: 10,
+          },
+        }),
+        review: { id: 9, body: "  " },
+      }),
+      policy,
+      "pull_request_rejected"
+    );
+    expect(decision).toEqual({ type: "skip", reason: "empty comment body" });
+  });
+
   test("enqueues a comment review webhook with content and no id", () => {
     const decision = shouldEnqueuePullRejectedFollowUp(
       makePayload({
@@ -982,6 +1005,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
               repo_id: 10,
             },
           }),
+          review: { id: 9, body: "please change this" },
         }),
         { event: "pull_request_rejected" }
       )

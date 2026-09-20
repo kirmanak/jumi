@@ -70,7 +70,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { parseCheckLine } from "./verdict.ts";
+import { parseCheckLine, trailerSuggestionCount } from "./verdict.ts";
 import { redactGitSecrets, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { FOLLOWUP_PROMPT } from "./git.ts";
@@ -213,16 +213,21 @@ export function isInScopeHumanComment(
 
 const REVIEW_MARKER = "<!-- jumi-review:";
 const REVIEWED_COMMIT_RE = /^Reviewed commit:\s*`([0-9a-fA-F]+)`\s*$/i;
-const POINTER_STUB_RE = /^(please\s+)?address(\s+the)?\s+(earlier|previous|last)\s+review\.?$/i;
 
-function hasFailureCheckTrailer(body: string): boolean {
+function lastCheckTrailer(body: string): { state: "success" | "failure"; reason: string } | undefined {
   const lines = body.split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
     if (!line) continue;
-    return parseCheckLine(line)?.state === "failure";
+    return parseCheckLine(line);
   }
-  return false;
+  return undefined;
+}
+
+function isFindingCheck(check: { state: "success" | "failure"; reason: string } | undefined): boolean {
+  if (!check) return false;
+  if (check.state === "failure") return true;
+  return trailerSuggestionCount(check.reason) > 0;
 }
 
 export function parseReviewedCommitSha(body: string): string | undefined {
@@ -241,12 +246,6 @@ function commitMatchesHead(stickySha: string, headSha: string): boolean {
   return sticky.length < head.length && head.startsWith(sticky);
 }
 
-export function isPointerStubBody(body: string | null | undefined): boolean {
-  const text = (body ?? "").trim();
-  if (!text) return true;
-  return POINTER_STUB_RE.test(text);
-}
-
 export function isJumiReviewSticky(
   comment: { body?: string | null; user?: { login?: string } },
   botUsername?: string
@@ -254,7 +253,7 @@ export function isJumiReviewSticky(
   const body = comment.body ?? "";
   if (!body.trim()) return false;
   if (!body.includes(REVIEW_MARKER)) return false;
-  if (!hasFailureCheckTrailer(body)) return false;
+  if (!lastCheckTrailer(body)) return false;
   if (isJumiWorkerBody(body)) return false;
   if (typeof botUsername === "string" && botUsername) {
     if (!loginEquals(comment.user?.login, botUsername)) return false;
@@ -278,11 +277,16 @@ function pullReviewFindingSha(review: PullReview): string | undefined {
   return parseReviewedCommitSha(pullReviewBody(review)) ?? (review.commit_id || undefined);
 }
 
-export function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
+export function isJumiPullReviewWriteup(review: PullReview, botUsername: string): boolean {
   if (!loginEquals(review.user?.login, botUsername)) return false;
   const body = pullReviewBody(review);
   if (!body.trim() || isJumiWorkerBody(body) || isEmptySuccessReview(body)) return false;
-  return hasFailureCheckTrailer(body);
+  return lastCheckTrailer(body) !== undefined;
+}
+
+export function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
+  if (!isJumiPullReviewWriteup(review, botUsername)) return false;
+  return lastCheckTrailer(pullReviewBody(review))?.state === "failure";
 }
 
 export function isJumiPullReviewFinding(
@@ -291,7 +295,8 @@ export function isJumiPullReviewFinding(
   headSha: string,
   opts: ReviewFindingMatchOpts = {}
 ): boolean {
-  if (!isJumiFailurePullReview(review, botUsername)) return false;
+  if (!isJumiPullReviewWriteup(review, botUsername)) return false;
+  if (!isFindingCheck(lastCheckTrailer(pullReviewBody(review)))) return false;
   const sha = pullReviewFindingSha(review);
   if (!sha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -327,6 +332,7 @@ export function isJumiReviewFinding(
   botUsername?: string
 ): boolean {
   if (!isJumiReviewSticky(comment, botUsername)) return false;
+  if (!isFindingCheck(lastCheckTrailer(comment.body ?? ""))) return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -366,14 +372,6 @@ export function pickLatestJumiPullReview(reviews: readonly PullReview[], headSha
   });
   const pool = currentHead.length ? currentHead : reviews;
   return [...pool].sort(byDate).at(-1);
-}
-
-function isPointerStubWake(trigger: IssueJob["trigger"] | undefined, triggerBody: string): boolean {
-  const event = trigger?.event ?? "";
-  const commentEvent =
-    event === "issue_comment" || event === "pull_request_comment" || trigger?.commentId !== undefined;
-  if (!commentEvent) return false;
-  return isPointerStubBody(triggerBody);
 }
 
 export function isInScopeFollowUpComment(
@@ -487,7 +485,7 @@ export async function collectFollowUpItems(
     reviews: candidateReviews.filter((review) => isTrusted(review.user?.login)),
     jumiStickies: rawComments.filter((comment) => isJumiReviewSticky(comment, botUsername)),
     jumiInlines: rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername)),
-    jumiReviews: rawReviews.filter((review) => isJumiFailurePullReview(review, botUsername)),
+    jumiReviews: rawReviews.filter((review) => isJumiPullReviewWriteup(review, botUsername)),
     jumiFindingReviews: rawReviews.filter((review) =>
       isJumiPullReviewFinding(review, botUsername, headSha, findingOpts)
     ),
@@ -506,13 +504,6 @@ function reviewFindingFromReview(review: PullReview): HandledReviewFinding | und
   const sha = pullReviewFindingSha(review);
   if (!sha) return undefined;
   return { id: review.id, sha };
-}
-
-function withoutPointerStubs(items: FollowUpItems): FollowUpItems {
-  return {
-    ...items,
-    comments: items.comments.filter((comment) => !isPointerStubBody(comment.body)),
-  };
 }
 
 function briefInlines(items: FollowUpItems): InlineComment[] {
@@ -837,11 +828,7 @@ export async function implementFollowUp(
   );
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
-  const hasInjectedReview = Boolean(pendingLastReview) || unresolvedJumiInlines(pendingItems).length > 0;
-  let hasFeedback = hasUnhandledFollowUpItems(withoutPointerStubs(pendingItems), state);
-  if (!hasFeedback && isPointerStubWake(opts.job.trigger, pendingTriggerBody) && hasInjectedReview) {
-    hasFeedback = true;
-  }
+  let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
   const inspectOpts = {
     api: opts.api,
     owner,

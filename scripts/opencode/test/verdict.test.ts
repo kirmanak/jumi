@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { findingFingerprint, parseReviewFindings, parseReviewOutput, stripFindingLines } from "../src/verdict.ts";
+import {
+  findingFingerprint,
+  parseReviewFindings,
+  parseReviewOutput,
+  stripFindingLines,
+  trailerSuggestionCount,
+} from "../src/verdict.ts";
 
 describe("parseReviewOutput", () => {
   test("reads an explicit success check and strips it from the comment", () => {
@@ -70,6 +76,24 @@ describe("parseReviewOutput", () => {
       description: "Incomplete review: no check verdict",
       incomplete: true,
     });
+  });
+
+  test("reads a success trailer with a suggestion count", () => {
+    expect(parseReviewOutput("drop the helper\n<!-- jumi-check: success; 2 suggestions -->")).toEqual({
+      comment: "drop the helper",
+      checkLine: "<!-- jumi-check: success; 2 suggestions -->",
+      verdict: { state: "success", description: "2 suggestions", incomplete: false },
+    });
+  });
+});
+
+describe("trailerSuggestionCount", () => {
+  test("reads a positive count and ignores questions-only reasons", () => {
+    expect(trailerSuggestionCount("2 suggestions")).toBe(2);
+    expect(trailerSuggestionCount("1 suggestion")).toBe(1);
+    expect(trailerSuggestionCount("no blocking issues")).toBe(0);
+    expect(trailerSuggestionCount("0 suggestions")).toBe(0);
+    expect(trailerSuggestionCount("")).toBe(0);
   });
 });
 

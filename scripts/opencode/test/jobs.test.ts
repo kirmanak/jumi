@@ -319,6 +319,36 @@ describe("review failure handover to worker lease", () => {
     }
   });
 
+  test("success trailer with leftover simplifications inserts follow-up", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-jobs-suggest-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), makeReviewApi(), "engine-1", {
+        gitRunner: async (args) => {
+          if (args[0] === "rev-parse") return "headsha";
+          if (args[0] === "status") return "?? JUMI_REVIEW.md";
+          if (args[0] === "ls-files") return "";
+          if (args[0] === "checkout") return "";
+          throw new Error(`unexpected git ${args.join(" ")}`);
+        },
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (opts) => {
+          await writeFile(
+            join(opts.workdir, "JUMI_REVIEW.md"),
+            "drop the helper\n<!-- jumi-check: success; 1 suggestion -->"
+          );
+          return { status: "ok" };
+        },
+      });
+      const follow = store.rows.find((row) => row.kind === "follow-up");
+      expect(follow?.state).toBe("queued");
+      expect(follow?.payload?.trigger?.event).toBe("review-suggestions");
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   test("success trailer does not insert follow-up", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "jumi-jobs-ok-"));
     try {
