@@ -58,26 +58,37 @@ import { type GitAuthResolver, type GitRunner, redactGitSecrets, workerOpenCodeC
 export { HEARTBEAT_INTERVAL_MS } from "./claimed_worktree.ts";
 export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 
-const PR_BODY_MAX_CHARS = 8000;
+const PARENT_PROSE_MAX_CHARS = 8000;
 export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
 export const SKIP_FILE = "JUMI_SKIP.md";
 export const INCOMPLETE_IMPLEMENT = "Incomplete implement: no skip artifact";
 
+function parentOwnedProse(text: string): string {
+  let out = text.replaceAll("\0", "").trim();
+  if (out.length > PARENT_PROSE_MAX_CHARS) out = out.slice(0, PARENT_PROSE_MAX_CHARS);
+  return out;
+}
+
 /** The artifact only has to be non-empty; its prose is never read as proof of anything. */
 export function isValidatedSkipText(text: string | null | undefined): boolean {
   if (text == null) return false;
-  return text.replaceAll("\0", "").trim().length > 0;
+  return parentOwnedProse(text).length > 0;
 }
 
-/** True only for a non-empty regular file: missing, empty, directory, and symlink are incomplete. */
-export async function readValidatedSkip(worktree: string): Promise<boolean> {
+export function skipDiaryText(text: string): string {
+  return parentOwnedProse(text);
+}
+
+/** Non-empty regular file text, else null: missing, empty, directory, and symlink are incomplete. */
+export async function readValidatedSkip(worktree: string): Promise<string | null> {
   const path = join(worktree, SKIP_FILE);
   try {
     const info = await lstat(path);
-    if (!info.isFile()) return false;
-    return isValidatedSkipText(await readFile(path, "utf8"));
+    if (!info.isFile()) return null;
+    const text = await readFile(path, "utf8");
+    return isValidatedSkipText(text) ? text : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -164,9 +175,8 @@ export function buildPullRequestBody(
 function pullRequestText(issueNumber: number, fileContents: string | null | undefined): string {
   const fallback = `Fixes #${issueNumber}`;
   if (fileContents == null) return fallback;
-  let text = fileContents.replaceAll("\0", "").trim();
+  const text = parentOwnedProse(fileContents);
   if (!text) return fallback;
-  if (text.length > PR_BODY_MAX_CHARS) text = text.slice(0, PR_BODY_MAX_CHARS);
   if (closesIssuePattern(issueNumber).test(text)) return text;
   return `${text}\n\n${fallback}`;
 }
@@ -585,7 +595,7 @@ export async function implementIssue(
         if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
           if (validatedSkip) {
             await loop.stopHeartbeat();
-            await diary("no changes");
+            await diary(skipDiaryText(validatedSkip));
             await loop.stampTerminalClaim(opts.api);
             await loop.detachWorktree();
             return { status: "no-changes" };
