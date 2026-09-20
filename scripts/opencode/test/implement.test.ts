@@ -18,6 +18,7 @@ import {
   replaceJumiPrBodyRegion,
   SKIP_FILE,
   seedPullRequestDescription,
+  skipDiaryText,
   wrapJumiPrBody,
 } from "../src/implement.ts";
 import { isQuotaWaitError, QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
@@ -110,6 +111,14 @@ describe("isValidatedSkipText", () => {
     expect(isValidatedSkipText("already on main")).toBe(true);
     expect(isValidatedSkipText("nothing to change\n")).toBe(true);
     expect(isValidatedSkipText("unknown")).toBe(true);
+  });
+});
+
+describe("skipDiaryText", () => {
+  test("strips NULs, trims, and caps like other parent-owned prose", () => {
+    expect(skipDiaryText(" already done \n")).toBe("already done");
+    expect(skipDiaryText("already\0 done")).toBe("already done");
+    expect(skipDiaryText("x".repeat(9000))).toBe("x".repeat(8000));
   });
 });
 
@@ -888,7 +897,7 @@ describe("implementIssue", () => {
     });
   });
 
-  test("comments no changes and does not open a PR when the tree is clean with a skip artifact", async () => {
+  test("comments the skip artifact and does not open a PR when the tree is clean with a skip artifact", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
       const gitCalls: string[][] = [];
@@ -925,7 +934,10 @@ describe("implementIssue", () => {
 
       expect(result).toEqual({ status: "no-changes" });
       expect(api.pulls).toHaveLength(0);
-      expect(api.comments.at(-1)).toContain("no changes");
+      expect(api.comments.at(-1)).toContain("already done");
+      expect(api.comments.at(-1)).not.toContain("no changes");
+      expect(api.comments.at(-1)).not.toContain("Please implement this.");
+      expect(api.comments.at(-1)).toContain("_Jumi · opencode · openai/gpt-5.5_");
       expect(api.comments.at(-1)).toContain(workerMarker("kirmanak", "demo", 12));
       expect(openCodeOpts?.sanitizeEnv).toBe(true);
       expect(openCodeOpts?.extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
@@ -941,6 +953,42 @@ describe("implementIssue", () => {
       expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "rev-list" && args.includes("origin/main..HEAD"))).toBe(true);
+    });
+  });
+
+  test("caps the skip diary like other parent-owned prose", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          await writeFile(join(workdir, "kirmanak/demo/12", SKIP_FILE), `  already\0 done\n${"x".repeat(9000)}`);
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      const diary = api.comments.at(-1) ?? "";
+      expect(diary).toContain(`already done\n${"x".repeat(8000 - "already done\n".length)}`);
+      expect(diary).not.toContain("x".repeat(8001));
+      expect(diary).toContain("_Jumi · opencode · openai/gpt-5.5_");
+      expect(diary).not.toContain("no changes");
     });
   });
 
@@ -1698,7 +1746,9 @@ describe("implementIssue", () => {
       });
       expect(result).toEqual({ status: "no-changes" });
       expect(models).toEqual(["claude-opus-5"]);
-      expect(api.comments.at(-1)).toContain("no changes");
+      expect(api.comments.at(-1)).toContain("already done");
+      expect(api.comments.at(-1)).not.toContain("no changes");
+      expect(api.comments.at(-1)).toContain("_Jumi · claude · claude-opus-5 (high)_");
     });
   });
 
@@ -1941,7 +1991,8 @@ describe("implementIssue", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "no-changes" });
-      expect(api.comments.at(-1)).toContain("no changes");
+      expect(api.comments.at(-1)).toContain("rewritten issue needs nothing");
+      expect(api.comments.at(-1)).not.toContain("no changes");
     });
   });
 
