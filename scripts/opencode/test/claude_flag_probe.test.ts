@@ -3,7 +3,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeArgv } from "../src/claude.ts";
 import {
-  CLAUDE_EFFORT_LEVELS,
   CLAUDE_REJECTABLE_FLAGS,
   droppedFlagWarning,
   flagObjection,
@@ -13,6 +12,7 @@ import {
   pinnedFlagValues,
   withFlagValue,
 } from "../src/claude_flag_probe.ts";
+import { CLAUDE_EFFORT_LEVELS } from "../src/runners.ts";
 
 const argv = claudeArgv({ model: "probe-model", effort: "high", workdir: "/work" });
 
@@ -79,6 +79,15 @@ describe("droppedFlagWarning", () => {
     expect(droppedFlagWarning(argv, "Warning: running as root in a container")).toBeUndefined();
     expect(droppedFlagWarning(argv, "")).toBeUndefined();
   });
+
+  test("still anchors when the binary colorized the line", () => {
+    // `runClaude` strips ANSI before reading claude's stderr because this
+    // binary colorizes; the probe has to judge the same text, or a colorized
+    // warning would slip past the anchor as a false green.
+    const esc = String.fromCharCode(27);
+    const stderr = `${esc}[33mWarning:${esc}[0m Unknown --effort value 'high' — ignoring it.`;
+    expect(droppedFlagWarning(argv, stderr)).toBe("Warning: Unknown --effort value 'high' — ignoring it.");
+  });
 });
 
 describe("flagObjection", () => {
@@ -99,6 +108,14 @@ describe("flagObjection", () => {
     expect(flagObjection("--output-format", "bad", { code: 1, stderr: "" })).toBe("exit 1");
   });
 
+  test("reads through the colors the binary writes", () => {
+    const esc = String.fromCharCode(27);
+    const stderr = `${esc}[31merror:${esc}[0m option '--output-format <format>' argument 'bad' is invalid.`;
+    expect(flagObjection("--output-format", "bad", { code: 1, stderr })).toBe(
+      "error: option '--output-format <format>' argument 'bad' is invalid."
+    );
+  });
+
   test("reports no objection when the binary took the nonsense value", () => {
     // This is the case that fails the image probe: a binary that shrugs at a
     // nonsense value would also shrug at a typo in the production constant,
@@ -110,24 +127,18 @@ describe("flagObjection", () => {
 describe("judgeNegativeRun", () => {
   const bad = nonsenseValue("--effort");
   const effort = { flag: "--effort", value: "high" };
-  const swapped = withFlagValue(argv, "--effort", bad);
 
   test("accepts commander's exit for a flag the binary can refuse", () => {
     const mode = { flag: "--permission-mode", value: "dontAsk" };
     const badMode = nonsenseValue("--permission-mode");
     const stderr = `error: option '--permission-mode <mode>' argument '${badMode}' is invalid.`;
-    const result = judgeNegativeRun(withFlagValue(argv, "--permission-mode", badMode), mode, badMode, {
-      code: 1,
-      stdout: "",
-      stderr,
-      timedOut: false,
-    });
+    const result = judgeNegativeRun(mode, badMode, { code: 1, stdout: "", stderr, timedOut: false });
     expect(result.ok).toBe(true);
   });
 
   test("accepts the --effort warning when the positive run's own detector also sees it", () => {
     const stderr = `Warning: Unknown --effort value '${bad}' — ignoring it and using the default effort.`;
-    const result = judgeNegativeRun(swapped, effort, bad, { code: 0, stdout: "", stderr, timedOut: false });
+    const result = judgeNegativeRun(effort, bad, { code: 0, stdout: "", stderr, timedOut: false });
     expect(result.ok).toBe(true);
     expect(result.observed).toBe(stderr);
   });
@@ -139,18 +150,24 @@ describe("judgeNegativeRun", () => {
     // line would disarm that row while this control stayed green, so the
     // control has to exercise the anchored matcher too.
     const stderr = `⚠ Warning: Unknown --effort value '${bad}' — ignoring it and using the default effort.`;
-    const result = judgeNegativeRun(swapped, effort, bad, { code: 0, stdout: "", stderr, timedOut: false });
+    const result = judgeNegativeRun(effort, bad, { code: 0, stdout: "", stderr, timedOut: false });
+    expect(result.ok).toBe(false);
+    expect(result.observed).toContain("droppedFlagWarning");
+  });
+
+  test("is not satisfied by an anchored line about some other flag we pass", () => {
+    // The whole point of this control is to prove the anchored matcher saw the
+    // `--effort` line. An unrelated failure that exits non-zero (which
+    // `flagObjection` accepts as `exit 1`) while printing an anchored line
+    // naming `--model` must not stand in for it.
+    const stderr = "error: could not resolve --model for this account";
+    const result = judgeNegativeRun(effort, bad, { code: 1, stdout: "", stderr, timedOut: false });
     expect(result.ok).toBe(false);
     expect(result.observed).toContain("droppedFlagWarning");
   });
 
   test("fails when the binary took the nonsense value without a word", () => {
-    const result = judgeNegativeRun(swapped, effort, bad, {
-      code: 0,
-      stdout: "",
-      stderr: "",
-      timedOut: false,
-    });
+    const result = judgeNegativeRun(effort, bad, { code: 0, stdout: "", stderr: "", timedOut: false });
     expect(result.ok).toBe(false);
   });
 });

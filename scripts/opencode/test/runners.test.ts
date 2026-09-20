@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendRunnerStamp,
+  CLAUDE_EFFORT_LEVELS,
   formatRunnerStamp,
   parseRunnersCatalog,
   parseRunnersFile,
@@ -38,6 +39,31 @@ describe("parseRunnersCatalog", () => {
       },
       chain: ["spark", "grok"],
     });
+  });
+
+  test("rejects a claude effort the binary does not know", () => {
+    // An unknown `--effort` does not fail the spawn — claude warns and runs at
+    // the default — so a typo here would silently downgrade every run of that
+    // runner, and the image probe only sees this repo's argv, never the
+    // operator's file. `CLAUDE_EFFORT_LEVELS` is the set `claude_flag_probe.ts`
+    // proves against the installed binary.
+    expect(() =>
+      parseRunnersCatalog({ runners: { spark: { type: "claude", model: "opus", effort: "hihg" } }, chain: ["spark"] })
+    ).toThrow("effort hihg is not one of low, medium, high, xhigh, max");
+    for (const effort of CLAUDE_EFFORT_LEVELS) {
+      expect(
+        parseRunnersCatalog({ runners: { spark: { type: "claude", model: "opus", effort } }, chain: ["spark"] }).runners
+          .spark
+      ).toEqual({ type: "claude", model: "opus", effort });
+    }
+  });
+
+  test("leaves agy effort alone, whose levels are its own", () => {
+    // `usesEffort` covers both, but the sets differ, so the claude check must
+    // not reach agy runners.
+    expect(
+      parseRunnersCatalog({ runners: { a: { type: "agy", model: "m", effort: "unbounded" } }, chain: ["a"] }).runners.a
+    ).toEqual({ type: "agy", model: "m", effort: "unbounded" });
   });
 
   test("registers type agy with model and optional effort", () => {

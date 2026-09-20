@@ -35,8 +35,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv } from "./claude.ts";
+import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } from "./claude.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
+import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
 
 /** Text the stub answers with; seeing it means the session really completed. */
 const PROBE_MARKER = "JUMI-CLAUDE-FLAG-PROBE-OK";
@@ -47,18 +48,12 @@ const PROBE_MARKER = "JUMI-CLAUDE-FLAG-PROBE-OK";
  */
 const PROBE_MODEL = "jumi-claude-flag-probe-model";
 /**
- * `--effort` is operator config (`JUMI_RUNNERS_FILE`), not a constant:
- * `runners.ts` accepts any string and `deploy/contract.md` documents it as
- * optional free-form, so the level a deployed runner uses is not knowable from
- * this repo. It is also the one production flag the binary answers with a
- * warning instead of an exit, so a level it no longer knows downgrades the run
- * in silence. Probing a single level would therefore only cover the runners
- * that happen to pick that level; the probe runs the whole set the binary
- * advertises (`claude --help`) instead, so a dropped or renamed level fails
- * here whatever the operator configured.
+ * The level the full production judgment and the negative control run at. Every
+ * other level in `CLAUDE_EFFORT_LEVELS` gets its own positive run below: that
+ * set is what `parseRunnersCatalog` lets an operator configure, and `--effort`
+ * is the one production flag the binary answers with a warning instead of an
+ * exit, so a level it no longer knows downgrades the run in silence.
  */
-export const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-/** The level the full production judgment and the negative control run at. */
 const PROBE_EFFORT = "high";
 /**
  * Cap a single `claude` run. The endpoint is loopback, so a healthy run is
@@ -113,10 +108,14 @@ export function nonsenseValue(flag: string): string {
  * A complaint about a flag Jumi actually passed. Scoped to lines that name one
  * of our own flags so an unrelated runtime warning (container, locale, root)
  * does not read as a rejected production flag.
+ *
+ * `stripAnsi` first, for the same reason `runClaude` pipes claude's stderr
+ * through it (`claude.ts`): this binary colorizes, and the anchor below would
+ * miss a `\x1b[33mWarning:\x1b[0m …` line the parent reads as a warning.
  */
 export function droppedFlagWarning(argv: readonly string[], stderr: string): string | undefined {
   const flags = argv.filter((arg) => arg.startsWith("--"));
-  return stderr
+  return stripAnsi(stderr)
     .split("\n")
     .map((line) => line.trim())
     .find((line) => /^(warning|error)\b/i.test(line) && flags.some((flag) => line.includes(flag)));
@@ -126,14 +125,15 @@ export function droppedFlagWarning(argv: readonly string[], stderr: string): str
  * What an objection looks like. A rejected flag exits non-zero with commander's
  * `error:` line; `--effort` instead warns and falls back to the default, which
  * is just as much a broken production flag, so both count — as long as the
- * complaint names the flag and the value it refused.
+ * complaint names the flag and the value it refused. Judged on stripped stderr,
+ * the same text the parent reads.
  */
 export function flagObjection(
   flag: string,
   value: string,
   run: { readonly code: number; readonly stderr: string }
 ): string | undefined {
-  const complaint = run.stderr
+  const complaint = stripAnsi(run.stderr)
     .split("\n")
     .map((line) => line.trim())
     .find((line) => line.includes(flag) && line.includes(value));
@@ -324,12 +324,7 @@ function judgeProductionRun(argv: readonly string[], run: RunResult): CaseResult
   ];
 }
 
-export function judgeNegativeRun(
-  swapped: readonly string[],
-  pinned: PinnedFlagValue,
-  bad: string,
-  run: RunResult
-): CaseResult {
+export function judgeNegativeRun(pinned: PinnedFlagValue, bad: string, run: RunResult): CaseResult {
   const name = `${pinned.flag} ${bad} is refused (so pinning ${pinned.value} means something)`;
   if (run.timedOut) return { name, ok: false, observed: `claude hung, killed after ${RUN_TIMEOUT_MS}ms` };
   const objection = flagObjection(pinned.flag, bad, run);
@@ -344,15 +339,21 @@ export function judgeNegativeRun(
     // positive run's sole defence against a silent downgrade is
     // `droppedFlagWarning` — and its matcher is anchored (`/^(warning|error)\b/i`)
     // while `flagObjection` is not. Demand the anchored matcher here too, or a
-    // release that prefixes the line (`⚠ Warning: …`, colorized stderr) would
-    // keep this control green while "no production flag was warned about and
-    // dropped" quietly stopped detecting anything.
-    const anchored = droppedFlagWarning(swapped, run.stderr);
-    if (anchored === undefined) {
+    // release that prefixes the line (`⚠ Warning: …`) would keep this control
+    // green while "no production flag was warned about and dropped" quietly
+    // stopped detecting anything.
+    //
+    // Only `--effort` is passed as the argv, and the line must name `bad`:
+    // otherwise any anchored line mentioning some *other* flag we pass
+    // (`--model`, `--verbose`, …) would satisfy this while the `--effort`
+    // warning itself went unseen, which is the vacuity this control exists to
+    // rule out.
+    const anchored = droppedFlagWarning([pinned.flag], run.stderr);
+    if (anchored === undefined || !anchored.includes(bad)) {
       return {
         name,
         ok: false,
-        observed: `objected (${objection}) but droppedFlagWarning missed the line — the positive run's dropped-flag detector is blind`,
+        observed: `objected (${objection}) but droppedFlagWarning saw no anchored line naming ${pinned.flag} ${bad} (${anchored ?? "no match"}) — the positive run's dropped-flag detector is blind`,
       };
     }
     return { name, ok: true, observed: anchored };
@@ -409,7 +410,7 @@ async function main(): Promise<number> {
       const bad = nonsenseValue(entry.flag);
       const swapped = withFlagValue(argv, entry.flag, bad);
       const run = await runClaudeArgv(swapped, origin, home, workdir);
-      results.push(judgeNegativeRun(swapped, entry, bad, run));
+      results.push(judgeNegativeRun(entry, bad, run));
     }
   } finally {
     server.stop(true);
