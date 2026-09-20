@@ -82,8 +82,12 @@ describe("opencode review config", () => {
     expect(probe).toContain("REVIEW_OPENCODE_PERMISSION");
     // Deny of the forge host and allow of an unrelated host, both on the binary.
     expect(probe).toContain('expect: "allow"');
-    expect(probe).toContain('pattern: "*kirmanak.stream*"');
-    expect(probe).toContain('pattern: "*github.com/search*"');
+    expect(probe).toContain('expect: "deny"');
+    expect(probe).toContain("https://gitea.kirmanak.stream/");
+    expect(probe).toContain("github.com/search");
+    // The deny assertion reads the shipped map, so it cannot drift from it.
+    expect(probe).toContain("DENY_PATTERNS");
+    expect(probe).toContain("REVIEW_WEBFETCH_PERMISSION");
   });
 
   test("allows Read of baked review-skills after star deny (last-match)", () => {

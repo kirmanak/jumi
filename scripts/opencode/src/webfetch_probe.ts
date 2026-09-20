@@ -34,6 +34,22 @@ const MODEL_ID = "probe-model";
  */
 const RUN_TIMEOUT_MS = 60_000;
 
+/**
+ * What a blocked call must echo back. OpenCode serializes the whole webfetch
+ * ruleset into the tool result — filtered by permission type, not by the rule
+ * that matched — so there is nothing per-row to assert on. Seeing every deny
+ * pattern proves the reviewer's own map was the one in force, which is what
+ * separates a real deny from an unrelated failure (network error, bad tool
+ * name) that also produces no HTTP hit. Which entry did the denying is
+ * established by the URL table below, not by the echo.
+ *
+ * Derived from the shipped map rather than OpenCode's English error text, so
+ * an upgrade that rewords the message does not read as a dropped deny.
+ */
+const DENY_PATTERNS = Object.entries(REVIEW_WEBFETCH_PERMISSION)
+  .filter(([, action]) => action === "deny")
+  .map(([pattern]) => pattern);
+
 type Expectation = "allow" | "deny";
 
 interface ProbeCase {
@@ -41,14 +57,6 @@ interface ProbeCase {
   readonly name: string;
   readonly url: string;
   readonly expect: Expectation;
-  /**
-   * Deny rows name the map entry they exist for. OpenCode echoes the whole
-   * webfetch ruleset into the tool result, not just the rule that matched, so
-   * asserting on this proves "OpenCode blocked the call while holding *our*
-   * map" — it does not prove *which* entry matched. That per-row attribution
-   * comes from the URL table itself.
-   */
-  readonly pattern?: string;
 }
 
 /**
@@ -66,25 +74,21 @@ function probeCases(origin: string): readonly ProbeCase[] {
       name: "forge host (real reviewer URL)",
       url: "https://gitea.kirmanak.stream/personal/jumi/pulls/1",
       expect: "deny",
-      pattern: "*kirmanak.stream*",
     },
     {
       name: "forge API (real reviewer URL)",
       url: "https://gitea.kirmanak.stream/api/v1/repos/personal/jumi/issues",
       expect: "deny",
-      pattern: "*kirmanak.stream*",
     },
     {
       name: "forge host, reachable target",
       url: `${origin}/gitea.kirmanak.stream/personal/jumi`,
       expect: "deny",
-      pattern: "*kirmanak.stream*",
     },
     {
       name: "code search, reachable target",
       url: `${origin}/github.com/search?q=jumi`,
       expect: "deny",
-      pattern: "*github.com/search*",
     },
   ];
 }
@@ -221,17 +225,16 @@ function judge(probe: ProbeCase, state: RunState): CaseResult {
     return { probe, ok: false, observed: "DENIED URL WAS FETCHED: the probe target received a request" };
   }
   // OpenCode reports a blocked call by echoing the webfetch ruleset it was
-  // holding. Requiring the pattern separates "OpenCode denied this, with our
-  // map loaded" from an unrelated failure (network error, bad tool name) that
-  // also produces no HTTP hit. It does not attribute the deny to that entry —
-  // see `ProbeCase.pattern`.
-  const ok = probe.pattern != null && result.includes(probe.pattern) && !result.includes(FETCH_MARKER);
+  // holding — see DENY_PATTERNS for why that is asserted whole rather than
+  // per row.
+  const missing = DENY_PATTERNS.filter((pattern) => !result.includes(pattern));
+  const ok = missing.length === 0 && !result.includes(FETCH_MARKER);
   return {
     probe,
     ok,
     observed: ok
-      ? `denied, map carrying ${probe.pattern} was in force`
-      : `no deny with ${probe.pattern} in the ruleset: ${result.slice(0, 200)}`,
+      ? "denied, with the reviewer webfetch map in force"
+      : `not denied under the reviewer map (ruleset missing ${missing.join(", ") || "nothing"}): ${result.slice(0, 200)}`,
   };
 }
 
