@@ -57,10 +57,6 @@ export function forgeOpenCodePermission(host: string): string {
  * A deny at any level beats every allow, including `--allowedTools` and the
  * `user` settings source. Wildcards need Claude Code >= 2.1.172 (image: 2.1.274).
  */
-export function claudeForgeWebfetchDeny(host: string): string[] {
-  return [`WebFetch(domain:${host})`, `WebFetch(domain:*.${host})`];
-}
-
 export function claudeDisallowedTools(host: string): string {
-  return claudeForgeWebfetchDeny(host).join(",");
+  return [`WebFetch(domain:${host})`, `WebFetch(domain:*.${host})`].join(",");
 }
