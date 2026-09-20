@@ -78,8 +78,9 @@ describe("opencode review config", () => {
 
   test("the binary probe drives the shipped map rather than a copy of it", () => {
     const probe = readFileSync(join(process.cwd(), "src/webfetch_probe.ts"), "utf8");
-    expect(probe).toContain('from "./review_webfetch.ts"');
-    expect(probe).toContain("REVIEW_OPENCODE_PERMISSION");
+    expect(probe).toContain('from "./forge_webfetch.ts"');
+    expect(probe).toContain("forgeOpenCodePermission(FORGE_DENY_DOMAIN)");
+    expect(probe).toContain("forgeWebfetchPermission(FORGE_DENY_DOMAIN)");
     // Deny of the forge host and allow of an unrelated host, both on the binary.
     expect(probe).toContain('expect: "allow"');
     expect(probe).toContain('expect: "deny"');
@@ -87,7 +88,6 @@ describe("opencode review config", () => {
     expect(probe).toContain("github.com/search");
     // The deny assertion reads the shipped map, so it cannot drift from it.
     expect(probe).toContain("DENY_PATTERNS");
-    expect(probe).toContain("REVIEW_WEBFETCH_PERMISSION");
   });
 
   test("allows Read of baked review-skills after star deny (last-match)", () => {
