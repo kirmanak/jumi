@@ -78,6 +78,17 @@ jobs:
           docker run --rm jumi-reviewer:ci claude --version
           docker run --rm jumi-reviewer:ci agy --version
           docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
+          # Claude tracing is vendored, never installed at run time, and its
+          # hooks are pure shell over jq + python3 — both must be in the image.
+          docker run --rm jumi-reviewer:ci test -f /app/claude-plugins/claude-code-tracing/hooks/common.sh
+          docker run --rm jumi-reviewer:ci sh -c 'command -v jq >/dev/null && command -v python3 >/dev/null && command -v bash >/dev/null'
+          # The parent passes the plugin with --plugin-dir. A CLAUDE_VERSION bump
+          # that drops the flag must fail here, not silently stop tracing.
+          docker run --rm jumi-reviewer:ci claude --help | grep -F -- '--plugin-dir' >/dev/null
+          if docker run --rm jumi-reviewer:ci sh -c 'ls /app/claude-plugins/claude-code-tracing/skills >/dev/null 2>&1'; then
+            echo "tracing plugin must ship no skills: they load into every child's context" >&2
+            exit 1
+          fi
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-reviewer:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
 
@@ -132,5 +143,6 @@ jobs:
           docker run --rm jumi-worker:ci claude --version
           docker run --rm jumi-worker:ci agy --version
           docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md
+          docker run --rm jumi-worker:ci test -f /app/claude-plugins/claude-code-tracing/hooks/common.sh
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-worker:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
