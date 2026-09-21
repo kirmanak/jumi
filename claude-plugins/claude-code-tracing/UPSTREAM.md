@@ -23,9 +23,24 @@ Keep this list current when re-syncing with upstream.
   owns the configuration.
 - **POST through `python3`, not `curl`.** The runtime image deliberately ships
   no `curl`: the child holds a write-capable git token, and a ready-made HTTP
-  client is the thing `src/forge_webfetch.ts` exists to deny. `python3` is
-  already a hard dependency of the plugin (`get_timestamp_ms`). `curl` is still
+  client is the thing `src/forge_webfetch.ts` exists to deny. `curl` is still
   used when it is present and `python3` is not.
+- **`get_timestamp_ms` uses bash 5 `EPOCHREALTIME`.** Upstream shells out to
+  `python3` on every call (`pre_tool_use`, `post_tool_use` twice, `Stop`, …).
+  The python3/`date` chain is kept as the fallback on older bash.
+- **One `jq` pass over the Stop transcript.** Upstream's `while read` loop
+  starts ~7 `jq` processes per assistant line of the whole turn. Under
+  `claude -p` that is the entire run; at a few hundred lines it ate seconds
+  of the job timeout, and at a few thousand it hit Claude Code's 600s Stop-hook
+  cap so the Turn span (the only `LLM` span: model + tokens) was discarded.
+  `stop.sh` now slurps the tailed lines once and `@sh`-assigns output, model
+  and token sums.
+- **`post_tool_use.sh` reads state and stdin once.** Upstream calls `get_state`
+  per key and `jq` once per payload field (~25 jq spawns and 2 python3 spawns
+  per tool call before any HTTP). One `jq` emits the payload fields, one `jq`
+  emits `session_id` / `current_trace_id` / `current_trace_span_id` / `user_id`
+  / `tool_*_start`. A missing `current_trace_id` exits 0 like the sibling
+  hooks, instead of POSTing `"traceId":""` for Phoenix to 4xx.
 - **Real span kinds.** Upstream hardcodes `span_kind: "CHAIN"` on the Phoenix
   REST payload, so LLM and TOOL spans arrived as chains. The kind now comes from
   the `openinference.span.kind` attribute the hooks already set.

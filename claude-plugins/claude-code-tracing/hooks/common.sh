@@ -47,6 +47,13 @@ generate_uuid() {
 }
 
 get_timestamp_ms() {
+  # Jumi: bash 5 has EPOCHREALTIME; skip a python3 process per call. python3/date
+  # stay as the fallback on older bash.
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    local t=${EPOCHREALTIME/./}
+    echo $(( ${t:0:16} / 1000 ))
+    return
+  fi
   python3 -c "import time; print(int(time.time() * 1000))" 2>/dev/null || \
     date +%s%3N 2>/dev/null || date +%s000
 }
@@ -118,8 +125,7 @@ get_target() {
 }
 
 # --- HTTP ---
-# Jumi: post through python3, which the plugin already requires for
-# `get_timestamp_ms`. The runtime image deliberately ships no curl: the child
+# Jumi: post through python3. The runtime image deliberately ships no curl: the child
 # holds a write-capable git token, and a ready-made HTTP client is exactly what
 # `src/forge_webfetch.ts` exists to keep away from it. curl is still used when
 # it is the only one present.

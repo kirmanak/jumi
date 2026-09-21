@@ -8,17 +8,25 @@ input=$(cat 2>/dev/null || echo '{}')
 
 resolve_session "$input"
 
-session_id=$(get_state "session_id")
-[[ -z "$session_id" ]] && exit 0
+tool_name="unknown"
+tool_id=""
+tool_input_raw="{}"
+raw_response=""
+eval "$(echo "$input" | jq -r '
+  @sh "tool_name=\(.tool_name // "unknown") tool_id=\(.tool_use_id // "") tool_input_raw=\((.tool_input // {}) | tojson) raw_response=\((.tool_response // "") | if type=="string" then . else tojson end)"
+' 2>/dev/null || true)"
 
-trace_id=$(get_state "current_trace_id")
-parent_span_id=$(get_state "current_trace_span_id")
+session_id=""
+trace_id=""
+parent_span_id=""
+user_id=""
+start_time=""
+eval "$(jq -r --arg k "tool_${tool_id}_start" '
+  @sh "session_id=\(.session_id // "") trace_id=\(.current_trace_id // "") parent_span_id=\(.current_trace_span_id // "") user_id=\(.user_id // "") start_time=\(.[$k] // "")"
+' "$STATE_FILE" 2>/dev/null || true)"
+
+[[ -z "$session_id" || -z "$trace_id" ]] && exit 0
 inc_state "tool_count"
-
-tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
-tool_id=$(echo "$input" | jq -r '.tool_use_id // empty' 2>/dev/null || echo "")
-tool_input_raw=$(echo "$input" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
-raw_response=$(echo "$input" | jq -r '.tool_response // empty' 2>/dev/null || echo "")
 
 # Jumi: slice, never `head -c`. Under `set -o pipefail` head exits at its byte
 # limit and SIGPIPEs the writer, so the assignment reports 141 and `set -e`
@@ -79,15 +87,11 @@ tool_file_path="${tool_file_path:0:5000}"
 tool_url="${tool_url:0:5000}"
 tool_query="${tool_query:0:5000}"
 
-start_time=$(get_state "tool_${tool_id}_start")
 [[ -z "$start_time" ]] && start_time=$(get_timestamp_ms)
 end_time=$(get_timestamp_ms)
 del_state "tool_${tool_id}_start"
 
 span_id=$(generate_uuid | tr -d '-' | cut -c1-16)
-
-# Build base attributes
-user_id=$(get_state "user_id")
 
 attrs=$(jq -n \
   --arg sid "$session_id" --arg tool "$tool_name" \

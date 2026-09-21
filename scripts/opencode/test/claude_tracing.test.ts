@@ -130,6 +130,11 @@ describe("plugin manifest", () => {
     // And nothing ships as a hook without being wired to an event.
     const onDisk = (await readdir(hooks)).filter((f) => f.endsWith(".sh") && f !== "common.sh");
     expect(new Set(onDisk)).toEqual(wired);
+
+    // bin/, agents/, skills/, .mcp.json, monitors/, settings.json would all
+    // reach the untrusted-checkout child. A re-sync that adds any of those
+    // must fail here instead of shipping.
+    expect(new Set(await readdir(pluginDir))).toEqual(new Set([".claude-plugin", "hooks", "LICENSE", "UPSTREAM.md"]));
   });
 });
 
@@ -338,6 +343,59 @@ describe.if(hasShellTools)("vendored claude-code-tracing hooks", () => {
     expect(turn?.attributes["llm.model_name"]).toBe("claude-opus-5");
     expect(turn?.attributes["llm.token_count.total"]).toBe(14);
     expect(String(turn?.attributes["output.value"]).length).toBe(5000);
+  });
+
+  test("a many-line transcript still posts one Turn span with summed tokens", async () => {
+    const transcript = join(await mkdtemp(join(tmpdir(), "arize-transcript-lines-")), "transcript.jsonl");
+    await writeFile(transcript, "");
+    const n = 40;
+    const lines = Array.from({ length: n }, (_, i) =>
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          model: "claude-opus-5",
+          content: [{ type: "text", text: `line-${i}` }],
+          usage: {
+            input_tokens: 2,
+            output_tokens: 1,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 4,
+          },
+        },
+      })
+    ).join("\n");
+
+    const spans = await withPluginRun(async ({ hook }) => {
+      const session = { session_id: "claude-session-many-lines", cwd: "/work", transcript_path: transcript };
+      expect(await hook("session_start.sh", session)).toBe(0);
+      expect(await hook("user_prompt_submit.sh", session)).toBe(0);
+      await appendFile(transcript, `${lines}\n`);
+      expect(await hook("stop.sh", session)).toBe(0);
+    });
+
+    const turn = spans.map((s) => s.body.data[0]).find((s) => s?.name === "Turn 1");
+    expect(turn).toBeDefined();
+    expect(turn?.attributes["llm.model_name"]).toBe("claude-opus-5");
+    expect(turn?.attributes["llm.token_count.prompt"]).toBe(n * (2 + 3 + 4));
+    expect(turn?.attributes["llm.token_count.completion"]).toBe(n);
+    expect(turn?.attributes["output.value"]).toBe(Array.from({ length: n }, (_, i) => `line-${i}`).join("\n"));
+  });
+
+  test("a tool call outside a turn does not POST a span", async () => {
+    const spans = await withPluginRun(async ({ hook }) => {
+      const session = { session_id: "claude-session-no-turn", cwd: "/work" };
+      expect(await hook("session_start.sh", session)).toBe(0);
+      expect(
+        await hook("post_tool_use.sh", {
+          ...session,
+          tool_use_id: "t1",
+          tool_name: "Bash",
+          tool_input: { command: "true" },
+          tool_response: "ok",
+        })
+      ).toBe(0);
+    });
+    expect(spans).toEqual([]);
   });
 
   test("an unreachable Phoenix leaves the hooks exiting clean", async () => {

@@ -20,36 +20,26 @@ trace_count=$(get_state "trace_count")
 
 # Parse transcript for AI response and tokens. Only the lines this turn added
 # are read, so the span carries this turn's output and not the whole growing
-# conversation.
+# conversation. Jumi: one jq pass over the tail, not 7 jq processes per
+# assistant line — that cost scaled with run length, ate the job timeout, and
+# hit Claude Code's 600s Stop-hook cap so the Turn span (model + tokens) was
+# discarded. @sh so a multiline join does not break the four assignments.
 transcript=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
 output="" model="" in_tokens=0 out_tokens=0
 
 if [[ -f "$transcript" ]]; then
   start_line=$(get_state "trace_start_line")
   skip_lines=$((${start_line:-0}))
-
-  # Use tail to skip already-processed lines instead of iterating from line 0
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-
-    [[ $(echo "$line" | jq -r '.type' 2>/dev/null) == "assistant" ]] || continue
-
-    # Extract text
-    text=$(echo "$line" | jq -r '.message.content | if type=="array" then [.[]|select(.type=="text")|.text]|join("\n") else . end' 2>/dev/null)
-    [[ -n "$text" && "$text" != "null" ]] && output="${output:+$output
-}$text"
-
-    # Extract model and tokens (safe: validate numeric before arithmetic)
-    model=$(echo "$line" | jq -r '.message.model // empty' 2>/dev/null)
-    val=$(echo "$line" | jq -r '.message.usage.input_tokens // 0' 2>/dev/null)
-    [[ "$val" =~ ^[0-9]+$ ]] && in_tokens=$((in_tokens + val))
-    val=$(echo "$line" | jq -r '.message.usage.output_tokens // 0' 2>/dev/null)
-    [[ "$val" =~ ^[0-9]+$ ]] && out_tokens=$((out_tokens + val))
-    val=$(echo "$line" | jq -r '.message.usage.cache_read_input_tokens // 0' 2>/dev/null)
-    [[ "$val" =~ ^[0-9]+$ ]] && in_tokens=$((in_tokens + val))
-    val=$(echo "$line" | jq -r '.message.usage.cache_creation_input_tokens // 0' 2>/dev/null)
-    [[ "$val" =~ ^[0-9]+$ ]] && in_tokens=$((in_tokens + val))
-  done < <(tail -n +"$((skip_lines + 1))" "$transcript")
+  _parsed=$(tail -n +"$((skip_lines + 1))" "$transcript" | jq -sr '
+    [.[]|select(.type=="assistant")] as $a |
+    ([$a[]|.message.content|if type=="array" then [.[]|select(.type=="text")|.text]|join("\n") else . end|select(type=="string" and .!="")]|join("\n")) as $out |
+    ($a[-1].message.model // "") as $model |
+    ([$a[]|.message.usage|((.input_tokens//0)+(.cache_read_input_tokens//0)+(.cache_creation_input_tokens//0))]|add // 0) as $in |
+    ([$a[]|.message.usage.output_tokens//0]|add // 0) as $out_tok |
+    @sh "output=\($out) model=\($model) in_tokens=\($in) out_tokens=\($out_tok)"
+  ' 2>/dev/null) || _parsed=""
+  [[ -n "$_parsed" ]] && eval "$_parsed"
+  unset _parsed
 fi
 
 # Jumi: slice, never `head -c`. Under `set -o pipefail` head exits at its byte

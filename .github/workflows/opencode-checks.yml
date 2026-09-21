@@ -85,8 +85,14 @@ jobs:
           # The parent passes the plugin with --plugin-dir. A CLAUDE_VERSION bump
           # that drops the flag must fail here, not silently stop tracing.
           docker run --rm jumi-reviewer:ci claude --help | grep -F -- '--plugin-dir' >/dev/null
-          if docker run --rm jumi-reviewer:ci sh -c 'ls /app/claude-plugins/claude-code-tracing/skills >/dev/null 2>&1'; then
-            echo "tracing plugin must ship no skills: they load into every child's context" >&2
+          # Plugin root may also carry bin/, agents/, skills/, .mcp.json,
+          # monitors/ and settings.json — any of those reach the untrusted-checkout
+          # child. A re-sync that adds one must fail the build, not ship.
+          plugin_top="$(docker run --rm jumi-reviewer:ci sh -c 'ls -1A /app/claude-plugins/claude-code-tracing' | sort)"
+          plugin_want="$(printf '%s\n' '.claude-plugin' 'LICENSE' 'UPSTREAM.md' 'hooks' | sort)"
+          if [ "$plugin_top" != "$plugin_want" ]; then
+            echo "tracing plugin top level must be only .claude-plugin, hooks, LICENSE, UPSTREAM.md; got:" >&2
+            printf '%s\n' "$plugin_top" >&2
             exit 1
           fi
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-reviewer:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
