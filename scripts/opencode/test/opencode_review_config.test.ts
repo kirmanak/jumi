@@ -206,8 +206,10 @@ describe("worker image JDK", () => {
 
 describe("renovate bun pin", () => {
   const repoRoot = join(process.cwd(), "../..");
-  const renovate = JSON.parse(readFileSync(join(repoRoot, "renovate.json"), "utf8")) as {
+  const renovateRaw = readFileSync(join(repoRoot, "renovate.json"), "utf8");
+  const renovate = JSON.parse(renovateRaw) as {
     constraints?: Record<string, string>;
+    customManagers?: { managerFilePatterns?: string[]; matchStrings?: string[]; depNameTemplate?: string }[];
     packageRules?: { matchPackageNames?: string[]; extractVersion?: string }[];
   };
   const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "utf8");
@@ -216,10 +218,22 @@ describe("renovate bun pin", () => {
   test("runs lockFileMaintenance on the same bun every consumer is pinned to", () => {
     // Without this, Renovate regenerates scripts/opencode/bun.lock with its own
     // (newer) bun, which writes `lockfileVersion: 2`. BUN_VERSION cannot parse
-    // that, so `bun install --frozen-lockfile` silently un-freezes and every
-    // workflow job plus the Dockerfile install layer fails.
+    // that, so bun ignores the lockfile and the frozen check then fails every
+    // workflow job and the Dockerfile install layer.
     expect(pinnedBun).toBeTruthy();
     expect(renovate.constraints?.bun).toBe(pinnedBun);
+  });
+
+  test("lets Renovate bump constraints.bun so the pin above is not hand-maintained", () => {
+    // The assertion above is a tripwire: a PR that moves BUN_VERSION alone turns
+    // it red, and patch updates automerge with ignoreTests: false, so such a PR
+    // would block until someone edited renovate.json inside the Renovate branch.
+    // This custom manager makes both move in one PR instead.
+    const manager = renovate.customManagers?.find((m) => m.managerFilePatterns?.includes("/^renovate\\.json$/"));
+    expect(manager?.depNameTemplate).toBe("oven-sh/bun");
+    const matchString = manager?.matchStrings?.[0];
+    expect(matchString).toBeTruthy();
+    expect(new RegExp(matchString ?? "").exec(renovateRaw)?.groups?.currentValue).toBe(pinnedBun);
   });
 
   test("strips the bun-v tag prefix so BUN_VERSION can be bumped at all", () => {

@@ -13,6 +13,18 @@
       "matchStrings": [
         "# renovate: datasource=(?<datasource>[^\\s]+) depName=(?<depName>[^\\s]+)\\n[A-Z_]+=(?<currentValue>[^\\s]+)"
       ]
+    },
+    {
+      "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^renovate\\.json$/"
+      ],
+      "matchStrings": [
+        "\"constraints\":\\s*\\{[^}]*\"bun\":\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "oven-sh/bun"
     }
   ],
   "packageRules": [
