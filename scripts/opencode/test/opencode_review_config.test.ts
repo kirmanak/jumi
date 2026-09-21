@@ -203,3 +203,31 @@ describe("worker image JDK", () => {
     expect(dockerfile).toMatch(/bun-v\$\{BUN_VERSION\}\/bun-\$\{bun_platform\}\.zip/);
   });
 });
+
+describe("renovate bun pin", () => {
+  const repoRoot = join(process.cwd(), "../..");
+  const renovate = JSON.parse(readFileSync(join(repoRoot, "renovate.json"), "utf8")) as {
+    constraints?: Record<string, string>;
+    packageRules?: { matchPackageNames?: string[]; extractVersion?: string }[];
+  };
+  const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "utf8");
+  const pinnedBun = toolVersions.match(/^BUN_VERSION=(.+)$/m)?.[1];
+
+  test("runs lockFileMaintenance on the same bun every consumer is pinned to", () => {
+    // Without this, Renovate regenerates scripts/opencode/bun.lock with its own
+    // (newer) bun, which writes `lockfileVersion: 2`. BUN_VERSION cannot parse
+    // that, so `bun install --frozen-lockfile` silently un-freezes and every
+    // workflow job plus the Dockerfile install layer fails.
+    expect(pinnedBun).toBeTruthy();
+    expect(renovate.constraints?.bun).toBe(pinnedBun);
+  });
+
+  test("strips the bun-v tag prefix so BUN_VERSION can be bumped at all", () => {
+    // oven-sh/bun tags releases `bun-v1.2.5`; github-releases only strips a
+    // leading `v`, so without extractVersion every candidate is discarded as
+    // non-semver and the pin above silently freezes forever.
+    const rule = renovate.packageRules?.find((r) => r.matchPackageNames?.includes("oven-sh/bun"));
+    expect(rule?.extractVersion).toBe("^bun-v(?<version>.+)$");
+    expect(new RegExp(rule?.extractVersion ?? "").exec("bun-v1.2.5")?.groups?.version).toBe("1.2.5");
+  });
+});

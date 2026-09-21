@@ -33,6 +33,16 @@
       "ignoreTests": false
     },
     {
+      "description": "oven-sh/bun tags releases as bun-v1.2.3, which github-releases cannot parse as semver.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "oven-sh/bun"
+      ],
+      "extractVersion": "^bun-v(?<version>.+)$"
+    },
+    {
       "description": "Keep the worker JDK on Temurin 21.",
       "matchDatasources": [
         "docker"
@@ -44,6 +54,9 @@
       "allowedVersions": "/^21\\./"
     }
   ],
+  "constraints": {
+    "bun": "1.2.5"
+  },
   "minimumReleaseAge": "3 days",
   "prCreation": "not-pending",
   "minimumReleaseAgeBehaviour": "timestamp-optional",
