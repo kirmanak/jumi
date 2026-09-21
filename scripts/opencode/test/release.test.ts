@@ -419,6 +419,9 @@ describe("deploy/contract.md", () => {
       [...worker.gitOps, ...worker.optional].sort()
     );
     expect(contractEnvIssues(parsed, reviewerSrc, workerSrc)).toEqual([]);
+    // Every name the real loaders require resolves, so nothing is skipped by the scanner.
+    expect(reviewer.unresolved).toEqual([]);
+    expect(worker.unresolved).toEqual([]);
     expect(reviewer.required).toContain("DATABASE_URL");
     expect(worker.optional).toContain("DATABASE_URL");
     expect(worker.required).not.toContain("DATABASE_URL");
@@ -491,6 +494,7 @@ requireEnv(resolved, JUMI_ROLE_ENV);
       required: ["GITEA_URL"],
       gitOps: ["FORGE_URL", "GITHUB_APP_ID"],
       optional: ["FORGE"],
+      unresolved: [],
     });
 
     const wrongHeadings = parseContract(`# Deploy contract
@@ -527,6 +531,102 @@ requireEnv(resolved, JUMI_ROLE_ENV);
     expect(formatContractEnvIssue({ image: "worker", name: "GITHUB_APP_ID", kind: "missing" })).toContain(
       "missing from deploy/contract.md"
     );
+  });
+
+  test("a required env name the scanner cannot resolve fails the check instead of vanishing", () => {
+    const reviewerSrc = `const KEYS = { appId: "GITHUB_APP_ID" } as const;
+function requireEnv(env: Env, name: string): string {
+  const value = env[name];
+  if (!value) throw new Error("Missing required environment variable: " + name);
+  return value;
+}
+function requirePem(env: Env, name: string): string {
+  return requireEnv(env, name);
+}
+export function loadForgeBind(env: Env, opts: { kind: "appId" }): ForgeBind {
+  const forge = parseForge(env.FORGE);
+  if (forge === "github") {
+    requireEnv(env, KEYS[opts.kind]);
+    requirePem(env, pick("GITHUB_APP_PRIVATE_KEY"));
+  }
+  return { forge, giteaUrl: requireEnv(env, "GITEA_URL") };
+}
+`;
+    const workerSrc = `loadForgeBind(resolved, { requireWebhookSecret: true });
+`;
+    const reviewer = gitOpsLoaderEnv(reviewerSrc);
+    // The helper declarations forward their own `name`; only the loader's own calls are env reads.
+    expect(reviewer.required).toEqual(["GITEA_URL"]);
+    expect(reviewer.gitOps).toEqual([]);
+    expect(reviewer.unresolved).toEqual(["KEYS[opts.kind]", 'pick("GITHUB_APP_PRIVATE_KEY"']);
+    const contract = parseContract(`# Deploy contract
+
+## GitOps
+
+### reviewer
+
+#### required env
+- \`GITEA_URL\`
+
+#### optional env
+- \`FORGE\`
+
+### worker
+
+#### required env
+- \`GITEA_URL\`
+
+#### optional env
+- \`FORGE\`
+`);
+    // Under-reporting would leave this empty and let an undocumented required env ship as a patch.
+    expect(contractEnvIssues(contract, reviewerSrc, workerSrc)).toEqual([
+      { image: "reviewer", name: "KEYS[opts.kind]", kind: "unresolved_env_ref" },
+      { image: "reviewer", name: 'pick("GITHUB_APP_PRIVATE_KEY"', kind: "unresolved_env_ref" },
+      { image: "worker", name: "KEYS[opts.kind]", kind: "unresolved_env_ref" },
+      { image: "worker", name: 'pick("GITHUB_APP_PRIVATE_KEY"', kind: "unresolved_env_ref" },
+    ]);
+    expect(
+      formatContractEnvIssue({ image: "reviewer", name: "KEYS[opts.kind]", kind: "unresolved_env_ref" })
+    ).toContain("neither a string literal nor a constant");
+  });
+
+  test("a ternary forge guard is forge-conditional, and braces or colons in text do not end a branch", () => {
+    const ternarySrc = `export function loadForgeBind(env: Env): ForgeBind {
+  const forge = parseForge(env.FORGE);
+  return forge === "github"
+    ? {
+        forge,
+        // a colon and a brace in text must not close the branch: "} :"
+        label: "github: }",
+        appId: requireEnv(env, "GITHUB_APP_ID"),
+        giteaUrl: requireEnv(env, "FORGE_URL"),
+      }
+    : { forge, giteaUrl: requireEnv(env, "GITEA_URL") };
+}
+`;
+    expect(gitOpsLoaderEnv(ternarySrc)).toEqual({
+      required: ["GITEA_URL"],
+      gitOps: ["FORGE_URL", "GITHUB_APP_ID"],
+      optional: ["FORGE"],
+      unresolved: [],
+    });
+
+    const bracedSrc = `export function loadForgeBind(env: Env): ForgeBind {
+  const forge = parseForge(env.FORGE);
+  if (forge === "github") {
+    const closing = "}";
+    return { forge, closing, appId: requireEnv(env, "GITHUB_APP_ID") };
+  }
+  return { forge, giteaUrl: requireEnv(env, "GITEA_URL") };
+}
+`;
+    expect(gitOpsLoaderEnv(bracedSrc)).toEqual({
+      required: ["GITEA_URL"],
+      gitOps: ["GITHUB_APP_ID"],
+      optional: ["FORGE"],
+      unresolved: [],
+    });
   });
 
   test("CI fails when a loader env is missing or in the wrong heading", () => {

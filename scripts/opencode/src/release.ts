@@ -6,8 +6,10 @@ export const CONTRACT_PATH = "deploy/contract.md";
 export const REVIEWER_LOADER_PATH = "scripts/opencode/src/config.ts";
 export const WORKER_LOADER_PATH = "scripts/opencode/src/worker_config.ts";
 const SEMVER_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
+/** Env helpers the loaders call; their own declarations read the caller's `name`, not an env name. */
+const ENV_HELPERS = ["requireEnv", "requirePem", "optionalEnv", "intEnv", "csvEnv"];
 /** `helper(env, <ref>)` where `<ref>` is a literal, a const identifier, or a const map property. */
-const LOADER_ENV_HELPER_RE = /\b(requireEnv|requirePem|optionalEnv|intEnv|csvEnv)\(\s*\w+\s*,\s*([^,)]+)/g;
+const LOADER_ENV_HELPER_RE = new RegExp(`\\b(${ENV_HELPERS.join("|")})\\(\\s*\\w+\\s*,\\s*([^,)]+)`, "g");
 const LOADER_ENV_PROP_RE = /\b(?:resolved|env)\.([A-Z][A-Z0-9_]*)\b/g;
 const LOADER_ENV_INDEX_RE = /\b(?:resolved|env)\[\s*([^\]]+?)\s*\]/g;
 /** Helpers that throw when the variable is unset. */
@@ -18,8 +20,10 @@ const CONST_ENV_MAP_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\{([^}]*)\}/g;
 const CONST_ENV_MAP_ENTRY_RE = /([A-Za-z_$][\w$]*)\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"/g;
 /** Shared forge bind the worker loader delegates to; its env belongs to both images. */
 const FORGE_BIND_FN = "loadForgeBind";
-/** `if (forge === "github") { ... }`: everything inside is required only when `FORGE=github`. */
-const FORGE_GITHUB_IF_RE = /\bif\s*\(\s*(?:\w+\.)?forge\s*===\s*"github"\s*\)\s*\{/g;
+/** Guard whose branch is reached only when `FORGE=github`: an `if` block or a ternary. */
+const FORGE_GITHUB_GUARD_RE = /\b(?:\w+\.)?forge\s*===\s*"github"/g;
+/** A `/` right after one of these (or at the start of the file) opens a regex literal, not a division. */
+const REGEX_PREFIX_RE = /^[(,=:[!&|?{};+\-*%^~<>]?$/;
 
 export type BumpKind = "major" | "minor" | "patch" | "initial";
 export type VersionDecision = BumpKind | "reuse";
@@ -52,6 +56,7 @@ export type ContractEnvIssueKind =
   | "optional_as_required"
   | "forge_conditional_as_required"
   | "forge_conditional_as_optional"
+  | "unresolved_env_ref"
   | "duplicate";
 
 export interface ContractEnvIssue {
@@ -163,29 +168,102 @@ function resolveEnvRef(ref: string, consts: Map<string, string>): string | null 
   return null;
 }
 
-function matchingBrace(source: string, open: number): number {
+/**
+ * The source with string, template, regex, and comment bodies blanked, length and newlines kept, so
+ * brace and ternary scans see code only: a `"}"` or a `":"` in a message no longer moves a range.
+ * Indices still line up with the original, which is what the env-read regexes match against.
+ */
+function maskLiterals(source: string): string {
+  const out = source.split("");
+  const blank = (start: number, stop: number): number => {
+    const end = Math.min(stop, source.length);
+    for (let i = start; i < end; i++) {
+      if (out[i] !== "\n") out[i] = " ";
+    }
+    return end;
+  };
+  const stringEnd = (open: number): number => {
+    const quote = source[open];
+    let braces = 0;
+    for (let i = open + 1; i < source.length; i++) {
+      const ch = source[i];
+      if (ch === "\\") i++;
+      else if (quote === "`" && ch === "$" && source[i + 1] === "{") {
+        braces++;
+        i++;
+      } else if (braces > 0) {
+        if (ch === "{") braces++;
+        else if (ch === "}") braces--;
+      } else if (ch === quote) return i + 1;
+      else if (quote !== "`" && ch === "\n") return i;
+    }
+    return source.length;
+  };
+  const regexEnd = (open: number): number => {
+    let inClass = false;
+    for (let i = open + 1; i < source.length; i++) {
+      const ch = source[i];
+      if (ch === "\\") i++;
+      else if (ch === "\n") return i;
+      else if (ch === "[") inClass = true;
+      else if (ch === "]") inClass = false;
+      else if (ch === "/" && !inClass) return i + 1;
+    }
+    return source.length;
+  };
+  let previous = "";
+  let cursor = 0;
+  while (cursor < source.length) {
+    const ch = source[cursor];
+    const pair = source.slice(cursor, cursor + 2);
+    if (pair === "//") {
+      const newline = source.indexOf("\n", cursor);
+      cursor = blank(cursor, newline < 0 ? source.length : newline);
+    } else if (pair === "/*") {
+      const close = source.indexOf("*/", cursor + 2);
+      cursor = blank(cursor, close < 0 ? source.length : close + 2);
+    } else if (ch === '"' || ch === "'" || ch === "`") {
+      cursor = blank(cursor, stringEnd(cursor));
+    } else if (ch === "/" && REGEX_PREFIX_RE.test(previous)) {
+      cursor = blank(cursor, regexEnd(cursor));
+    } else {
+      if (ch.trim()) previous = ch;
+      cursor++;
+    }
+  }
+  return out.join("");
+}
+
+/** Takes masked source: see `maskLiterals`. */
+function matchingBrace(masked: string, open: number): number {
   let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}" && --depth === 0) return i;
+  for (let i = open; i < masked.length; i++) {
+    if (masked[i] === "{") depth++;
+    else if (masked[i] === "}" && --depth === 0) return i;
   }
   return -1;
 }
 
-/** Text of `function <name>(...) { ... }`, or `""` when the source does not declare it. */
-function functionBlock(source: string, name: string): string {
-  const decl = new RegExp(`function\\s+${name}\\s*\\(`).exec(source);
-  if (!decl) return "";
+/** `[start, end)` of `function <name>(...) { ... }`, or `null` when the source does not declare it. */
+function functionRange(source: string, name: string, masked = maskLiterals(source)): [number, number] | null {
+  const decl = new RegExp(`function\\s+${name}\\s*\\(`).exec(masked);
+  if (!decl) return null;
   let cursor = decl.index + decl[0].length - 1;
   let depth = 0;
-  for (; cursor < source.length; cursor++) {
-    if (source[cursor] === "(") depth++;
-    else if (source[cursor] === ")" && --depth === 0) break;
+  for (; cursor < masked.length; cursor++) {
+    if (masked[cursor] === "(") depth++;
+    else if (masked[cursor] === ")" && --depth === 0) break;
   }
-  const open = source.indexOf("{", cursor);
-  if (open < 0) return "";
-  const end = matchingBrace(source, open);
-  return end < 0 ? "" : source.slice(decl.index, end + 1);
+  const open = masked.indexOf("{", cursor);
+  if (open < 0) return null;
+  const end = matchingBrace(masked, open);
+  return end < 0 ? null : [decl.index, end + 1];
+}
+
+/** Text of `function <name>(...) { ... }`, or `""` when the source does not declare it. */
+function functionBlock(source: string, name: string): string {
+  const range = functionRange(source, name);
+  return range ? source.slice(range[0], range[1]) : "";
 }
 
 /** A loader that calls the shared forge bind reads its env too, even across files. */
@@ -196,69 +274,111 @@ function withSharedForgeBind(source: string, shared: string): string {
   return block ? `${source}\n${block}` : source;
 }
 
+/** Index of the `:` closing the true branch of the ternary whose `?` sits at `open`, else `-1`. */
+function ternaryBranchEnd(masked: string, open: number): number {
+  let depth = 0;
+  let nested = 0;
+  for (let i = open + 1; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (--depth < 0) return -1;
+    } else if (depth > 0) continue;
+    else if (ch === "?") {
+      if (masked[i + 1] === "?") i++;
+      else if (masked[i + 1] !== ".") nested++;
+    } else if (ch === ":") {
+      if (nested === 0) return i;
+      nested--;
+    }
+  }
+  return -1;
+}
+
+/** Branches reached only when `FORGE=github`: `if (forge === "github") { … }` and the ternary form. */
 function forgeGithubRanges(source: string): Array<[number, number]> {
+  const masked = maskLiterals(source);
+  const nextCode = (from: number): number => {
+    for (let i = from; i < masked.length; i++) {
+      if (masked[i].trim()) return i;
+    }
+    return -1;
+  };
   const ranges: Array<[number, number]> = [];
-  for (const match of source.matchAll(FORGE_GITHUB_IF_RE)) {
-    const open = match.index + match[0].length - 1;
-    const end = matchingBrace(source, open);
+  for (const match of source.matchAll(FORGE_GITHUB_GUARD_RE)) {
+    let open = nextCode(match.index + match[0].length);
+    if (open >= 0 && masked[open] === ")") open = nextCode(open + 1);
+    if (open < 0) continue;
+    if (masked[open] !== "{" && masked[open] !== "?") continue;
+    const end = masked[open] === "{" ? matchingBrace(masked, open) : ternaryBranchEnd(masked, open);
     if (end > open) ranges.push([open, end]);
   }
   return ranges;
 }
 
 interface EnvRead {
+  /** The resolved env name, or the raw ref text when `resolved` is false. */
   name: string;
   /** The read throws when the variable is unset. */
   requiring: boolean;
+  /** The ref resolved to an env name; unresolved refs are reported, never classified. */
+  resolved: boolean;
   index: number;
 }
 
 function envReads(source: string, consts: Map<string, string>): EnvRead[] {
+  const masked = maskLiterals(source);
+  // The helper declarations pass the caller's `name` around (`requireEnv(env, name)` inside
+  // `requirePem`, `env[name]`): no env name lives there, so their bodies are not scanned.
+  const helpers = ENV_HELPERS.map((helper) => functionRange(source, helper, masked)).filter((range) => range !== null);
+  const declared = (index: number): boolean => helpers.some(([start, end]) => index >= start && index < end);
   const reads: EnvRead[] = [];
   for (const match of source.matchAll(LOADER_ENV_HELPER_RE)) {
+    if (declared(match.index)) continue;
+    const requiring = REQUIRING_HELPERS.has(match[1]);
     const name = resolveEnvRef(match[2], consts);
-    if (name) reads.push({ name, requiring: REQUIRING_HELPERS.has(match[1]), index: match.index });
+    if (name) reads.push({ name, requiring, resolved: true, index: match.index });
+    else if (requiring) reads.push({ name: match[2].trim(), requiring, resolved: false, index: match.index });
   }
   for (const match of source.matchAll(LOADER_ENV_PROP_RE)) {
-    reads.push({ name: match[1], requiring: false, index: match.index });
+    if (declared(match.index)) continue;
+    reads.push({ name: match[1], requiring: false, resolved: true, index: match.index });
   }
   for (const match of source.matchAll(LOADER_ENV_INDEX_RE)) {
+    if (declared(match.index)) continue;
     const name = resolveEnvRef(match[1], consts);
-    if (name) reads.push({ name, requiring: false, index: match.index });
+    if (name) reads.push({ name, requiring: false, resolved: true, index: match.index });
   }
   return reads;
-}
-
-/** `sharedSource` holds helpers the loader imports (the reviewer loader for the worker). */
-export function loaderEnvNames(source: string, sharedSource = ""): string[] {
-  const consts = constEnvNames(`${source}\n${sharedSource}`);
-  const names = new Set(envReads(withSharedForgeBind(source, sharedSource), consts).map((read) => read.name));
-  return [...names].sort();
 }
 
 /**
  * Process-start env as the loader sees it: `requireEnv`/`requirePem` → required, the same call
  * reached only under `FORGE=github` → gitOps (forge-conditional), every other read → optional.
+ * `unresolved` holds refs a throwing helper was handed that are neither literal nor constant: the
+ * scanner cannot name that variable, so it is reported instead of silently dropped.
  */
 export function gitOpsLoaderEnv(
   source: string,
   sharedSource = ""
-): { required: string[]; gitOps: string[]; optional: string[] } {
+): { required: string[]; gitOps: string[]; optional: string[]; unresolved: string[] } {
   const scanned = withSharedForgeBind(source, sharedSource);
   const consts = constEnvNames(`${source}\n${sharedSource}`);
   const reads = envReads(scanned, consts);
+  const named = reads.filter((read) => read.resolved);
   const ranges = forgeGithubRanges(scanned);
   const forgeOnly = (index: number): boolean => ranges.some(([start, end]) => index > start && index < end);
   const required: string[] = [];
   const gitOps: string[] = [];
   const optional: string[] = [];
-  for (const name of [...new Set(reads.map((read) => read.name))].sort()) {
-    const requiring = reads.filter((read) => read.name === name && read.requiring);
+  for (const name of [...new Set(named.map((read) => read.name))].sort()) {
+    const requiring = named.filter((read) => read.name === name && read.requiring);
     if (requiring.some((read) => !forgeOnly(read.index))) required.push(name);
     else if (requiring.length > 0) gitOps.push(name);
     else optional.push(name);
   }
-  return { required, gitOps, optional };
+  const unresolved = [...new Set(reads.filter((read) => !read.resolved).map((read) => read.name))].sort();
+  return { required, gitOps, optional, unresolved };
 }
 
 export function formatContractEnvIssue(issue: ContractEnvIssue): string {
@@ -280,6 +400,9 @@ export function formatContractEnvIssue(issue: ContractEnvIssue): string {
   if (issue.kind === "forge_conditional_as_optional") {
     return `${issue.image} env \`${issue.name}\` fails process start when \`FORGE=github\` but is listed as optional env (use gitops env)`;
   }
+  if (issue.kind === "unresolved_env_ref") {
+    return `${issue.image} loader requires env named by \`${issue.name}\`, which is neither a string literal nor a constant: deploy/contract.md cannot be checked against it (use a literal or a \`const\`)`;
+  }
   return `${issue.image} env \`${issue.name}\` is listed under more than one of required/gitops/optional env`;
 }
 
@@ -299,6 +422,9 @@ export function contractEnvIssues(
     const optionalSet = new Set([...listedGitOps, ...listedOptional]);
     const listed = new Set([...listedRequired, ...listedGitOps, ...listedOptional]);
     const expectedNames = new Set([...expected.required, ...expected.gitOps, ...expected.optional]);
+    for (const ref of expected.unresolved) {
+      issues.push({ image, name: ref, kind: "unresolved_env_ref" });
+    }
     const seen = new Set<string>();
     for (const name of [...listedRequired, ...listedGitOps, ...listedOptional]) {
       if (seen.has(name)) issues.push({ image, name, kind: "duplicate" });
