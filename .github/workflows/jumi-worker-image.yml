@@ -132,6 +132,13 @@ jobs:
 
           docker run --rm "${TEST_TAG}" claude --version
 
+          # The version only proves the binary is there. Run the production
+          # argv against a loopback stub endpoint (nothing billed) so a flag
+          # this release rejects, or silently drops, fails here instead of on
+          # every Claude spawn.
+          docker run --rm "${TEST_TAG}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
+
           docker run --rm "${TEST_TAG}" agy --version
           docker run --rm "${TEST_TAG}" test -f /app/review-skills/gitea-pull-review/SKILL.md
           echo "Verified gitea-pull-review skill"

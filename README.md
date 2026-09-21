@@ -73,6 +73,24 @@ Required:
 | `DATABASE_URL` | `router` / `engine` / worker | Postgres URL for the shared ledger. `router` / `engine` fail process start without it; GitOps must set it on the worker, which otherwise starts in local/dev mode (no ledger) |
 | `JUMI_ROLE` | reviewer | `router` or `engine`. Unset, empty, or unknown fails process start. Worker is a separate image, not this flag |
 
+Required when `FORGE=github` (set `FORGE=github` to select them; they replace `GITEA_URL` / `GITEA_BOT_TOKEN` / `GITEA_WEBHOOK_SECRET`, and with `FORGE` unset, empty, or `gitea` they are never read). GitOps must set every one of them on **both** images, so `deploy/contract.md` lists them under `gitops env` and adding one is a major bump:
+
+| Name | Who | Description |
+|------|-----|-------------|
+| `FORGE_URL` | all | Trusted GitHub base URL (for example `https://github.com`, trailing slashes trimmed). Clone origins and the git auth host are checked against it |
+| `GITHUB_APP_ID` | all | GitHub App id used to mint installation tokens |
+| `GITHUB_APP_PRIVATE_KEY` | all | GitHub App private key, PEM (literal or `\n`-escaped newlines). Not a PEM fails process start |
+| `GITHUB_ALLOWED_ORGS` | all | Comma-separated allowed owners. Unlike `GITEA_ALLOWED_ORGS` there is no compiled default: unset fails process start |
+| `GITHUB_WEBHOOK_SECRET` | `router` / worker | HMAC-SHA256 of the raw body. Not required for `engine`, same as `GITEA_WEBHOOK_SECRET` |
+
+Optional under either forge — unset never fails process start, so `deploy/contract.md` lists these under `optional env` and adding one is a minor bump:
+
+| Name | Who | Description |
+|------|-----|-------------|
+| `FORGE` | all | Set `github` to select the table above. Unset or empty is `gitea`; any other value fails process start |
+| `GITHUB_APP_INSTALLATION_ID` | all | Fallback installation id for calls with no `owner`/`repo` to resolve against; per-repository resolution still wins |
+| `GITHUB_ALLOWED_REPOS` | all | Comma-separated `owner/repo` allowlist |
+
 Optional (unset keeps the compiled default; set your own owners and well-known origin):
 
 | Name | Default | Description |
@@ -88,7 +106,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `OPENCODE_VARIANT` | unset | OpenCode reasoning effort passed to `opencode run --variant`. Unset or empty omits the flag (model default). Do not bake an effort into the image |
 | `OPENCODE_FALLBACK_MODEL` | unset | Optional OpenCode model ID (`provider/model`) for one from-scratch hop when the primary child exits because the provider/model is unavailable. Unset, empty, or same-provider fallback does not hop: Zen/Free quota then delayed-requeues the same job instead of a human kill-switch |
 | `OPENCODE_FALLBACK_VARIANT` | unset | OpenCode reasoning effort for the fallback spawn. Unset or empty omits `--variant` (model default) |
-| `JUMI_RUNNERS_FILE` | unset | Optional JSON catalog of named runners and an ordered hop chain. `type` is `opencode`, `claude`, or `agy`; unknown `type` fails process start. Unset synthesizes a 1–2 entry **OpenCode** chain from `OPENCODE_MODEL` / `OPENCODE_VARIANT` / `OPENCODE_FALLBACK_*` — pinning the Claude binary does not flip either factory. Claude entries use `model`, optional `effort` (`--effort`), and spawn with `--setting-sources user` (untrusted checkout `.claude/` / `.mcp.json` is not loaded) plus `--disallowedTools WebFetch(domain:<forge host>),WebFetch(domain:*.<forge host>)` derived by `src/forge_webfetch.ts` from the spawn's own `GIT_AUTH_HOST`, so the forge host is refused by the binary while `WebFetch` stays on the allow-list for public docs (a deny outranks every allow). Auth is `HOME` / `CLAUDE_CODE_OAUTH_TOKEN` from the parent env, not this file. `agy` entries (official Antigravity CLI, isolated GitHub factory) use `model` and optional `effort` (`--effort`) and spawn `agy -p --output-format stream-json --dangerously-skip-permissions` with `--print-timeout` from the job timeout; extra rounds on the same runner resume its own conversation id, never across runners. The parent never passes a prompt starting with `/`. Token usage comes from the stream-json `result` event (or accumulated `step_update` usage when the child is killed) under `source=agy`. An empty SUCCESS with `denied_actions` is a failed run. `Please sign in` / `authentication required` hops as auth; `RESOURCE_EXHAUSTED` / `out of quota` / 429 / 5xx hop as provider-unavailable. There is no headless quota preflight. Auth is the operator's own login under `$HOME/.gemini/antigravity-cli/` (keep it on the retained auth volume like `~/.claude`); when that directory has no `settings.json`, Jumi seeds `enableTelemetry: false` and `useG1Credits: false` (never overwriting an existing file). Secrets stay in env. Router does not require it |
+| `JUMI_RUNNERS_FILE` | unset | Optional JSON catalog of named runners and an ordered hop chain. `type` is `opencode`, `claude`, or `agy`; unknown `type` fails process start. Unset synthesizes a 1–2 entry **OpenCode** chain from `OPENCODE_MODEL` / `OPENCODE_VARIANT` / `OPENCODE_FALLBACK_*` — pinning the Claude binary does not flip either factory. Claude entries use `model`, optional `effort` (`--effort`; one of `low`, `medium`, `high`, `xhigh`, `max` — any other level fails process start, because the binary only warns about a level it does not know and then silently runs at the default), and spawn with `--setting-sources user` (untrusted checkout `.claude/` / `.mcp.json` is not loaded) plus `--disallowedTools WebFetch(domain:<forge host>),WebFetch(domain:*.<forge host>)` derived by `src/forge_webfetch.ts` from the spawn's own `GIT_AUTH_HOST`, so the forge host is refused by the binary while `WebFetch` stays on the allow-list for public docs (a deny outranks every allow). Auth is `HOME` / `CLAUDE_CODE_OAUTH_TOKEN` from the parent env, not this file. `agy` entries (official Antigravity CLI, isolated GitHub factory) use `model` and optional `effort` (`--effort`) and spawn `agy -p --output-format stream-json --dangerously-skip-permissions` with `--print-timeout` from the job timeout; extra rounds on the same runner resume its own conversation id, never across runners. The parent never passes a prompt starting with `/`. Token usage comes from the stream-json `result` event (or accumulated `step_update` usage when the child is killed) under `source=agy`. An empty SUCCESS with `denied_actions` is a failed run. `Please sign in` / `authentication required` hops as auth; `RESOURCE_EXHAUSTED` / `out of quota` / 429 / 5xx hop as provider-unavailable. There is no headless quota preflight. Auth is the operator's own login under `$HOME/.gemini/antigravity-cli/` (keep it on the retained auth volume like `~/.claude`); when that directory has no `settings.json`, Jumi seeds `enableTelemetry: false` and `useG1Credits: false` (never overwriting an existing file). Secrets stay in env. Router does not require it |
 | `OPENCODE_CONFIG` | `/app/.gitea/opencode-review.json` in the image | Reviewer OpenCode config: bash is allow-by-default; edit/write are allowed so the reviewer can write `JUMI_REVIEW.md`; only `gitops-apply-review` is allowed (`skills.paths`); other skills denied; external_directory is last-match star deny then allow `/app/review-skills`; webfetch JSON stays scalar allow (OpenCode types it as Action); last-match star allow then deny the configured forge host and GitHub search is applied via `OPENCODE_PERMISSION` on **every** OpenCode spawn, worker included (`src/forge_webfetch.ts`); task/lsp stay denied; xAI/OpenAI reviewer reasoning is pinned `high` |
 | `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. Override to **your** well-known host. Unset or empty still defaults to `https://kirmanak.stream`. Set `disabled` to turn well-known **off** (no `auth.json` seed, no fetch). Other non-URL values fail closed. `OPENCODE_MODEL` and `OPENCODE_API_KEY` still apply with well-known off. Otherwise the service seeds a `wellknown` auth entry (and rewrites it when key/token rotate) so OpenCode loads `/.well-known/opencode` before the local review policy |
 | `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
@@ -206,7 +224,9 @@ Required repository variables:
 |------|-------------|
 | `CONTAINER_REGISTRY_USER` | Only needed for manual `bash .gitea/scripts/build-*.sh` pushes |
 
-Pull requests run the same lint/typecheck/test gate and build the image without publishing it.
+Pull requests run the same lint/typecheck/test gate, run the queue/lease suite against a Postgres service container, and build the image without publishing it.
+
+Claude's production flags are verified against the **installed `claude` binary**, not against the constants that built them: every image verification path — the `pull_request` reviewer and worker builds in `opencode-checks.yml`, both publish workflows, and the Gitea buildah scripts — runs `scripts/opencode/src/claude_flag_probe.ts`. It spawns the exact argv `claudeArgv()` emits (`-p --setting-sources user --permission-mode dontAsk --allowedTools … --disallowedTools … --output-format stream-json --verbose --model … --effort …`) with `ANTHROPIC_BASE_URL` pointed at a throwaway loopback endpoint, so nothing is billed and no request leaves the runner — `CLAUDE_CODE_OAUTH_TOKEN` is deliberately kept out of the child env. The run has to exit 0, report back the pinned `permission-mode` and the requested model in its `init` event, name every `--allowedTools` entry as a tool it has, and still produce the stream-json text and token usage the parent accounts from. Because `effort` is operator config rather than a constant, the run is repeated at *every* level a runners file may set (`CLAUDE_EFFORT_LEVELS` in `src/runners.ts`: `low`, `medium`, `high`, `xhigh`, `max`) and each must come back with clean stderr, so a runner on `xhigh` or `max` is covered too. That set is enforced both ways: the probe proves the binary still knows every level, and `JUMI_RUNNERS_FILE` refuses a `type: claude` runner whose `effort` is outside it, so a typo cannot silently downgrade every run of that runner where no check can see it. Then each flag value the binary can refuse (`--permission-mode`, `--setting-sources`, `--output-format`, `--effort`) is re-run as nonsense and must draw an objection, so a release that shrugs at a bad value cannot make the positive case vacuous. `--effort` counts as refused when it merely *warns* and falls back to the default: in production that is a silent downgrade of the whole run, and that negative control additionally has to be caught by the same anchored stderr matcher the positive run relies on, so the detector cannot quietly stop matching. Changing a pinned value to nonsense fails both the unit gate and the image job; `claude --version` alone never did.
 
 ## Review diagnostics
 
@@ -280,6 +300,17 @@ cd scripts/opencode
 bun install --frozen-lockfile
 bun run ci
 ```
+
+`bun run ci` needs no database: `test/review_jobs_pg.test.ts` skips itself unless `JUMI_TEST_DATABASE_URL` is set. That suite runs the real `PgReviewJobStore` — worker leases racing on one issue, reclaim at the attempt cap, in-flight enqueue dedupe, and migrate-then-migrate-again — against a real server, because those invariants are partial unique indexes and `FOR UPDATE SKIP LOCKED`, not TypeScript. CI runs it in the `postgres-queue` job; to run it locally:
+
+```bash
+docker run --rm -d --name jumi-queue-pg -p 5432:5432 \
+  -e POSTGRES_USER=jumi -e POSTGRES_PASSWORD=jumi -e POSTGRES_DB=jumi_queue_test \
+  postgres:18-alpine
+JUMI_TEST_DATABASE_URL=postgres://jumi:jumi@127.0.0.1:5432/jumi_queue_test bun run test:pg
+```
+
+The suite owns its schema: it drops and re-migrates `review_jobs` / `issue_skip_latches`, so point it at a throwaway database, never a live ledger.
 
 Run the service locally:
 

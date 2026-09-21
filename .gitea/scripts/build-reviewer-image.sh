@@ -134,7 +134,17 @@ verify_reviewer_runtime() {
     echo "reviewer webfetch permission probe failed against the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, claude, agy, gitops-apply-review skill, opencode debug config, and webfetch denies"
+  # Same idea for Claude: `--version` says nothing about the flags Jumi spawns
+  # with. Run the production argv against a loopback stub endpoint (nothing
+  # billed, no token in the child env) so a rejected or silently ignored flag
+  # fails the image job, not every Claude run.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "claude production flags rejected by the installed claude binary" >&2
+    exit 1
+  fi
+  echo "Verified python3, helm, claude flags, agy, gitops-apply-review skill, opencode debug config, and webfetch denies"
   buildah rm "${ctr}" >/dev/null
 }
 
