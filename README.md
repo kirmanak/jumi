@@ -224,7 +224,7 @@ Required repository variables:
 |------|-------------|
 | `CONTAINER_REGISTRY_USER` | Only needed for manual `bash .gitea/scripts/build-*.sh` pushes |
 
-Pull requests run the same lint/typecheck/test gate and build the image without publishing it.
+Pull requests run the same lint/typecheck/test gate, run the queue/lease suite against a Postgres service container, and build the image without publishing it.
 
 Claude's production flags are verified against the **installed `claude` binary**, not against the constants that built them: every image verification path — the `pull_request` reviewer and worker builds in `opencode-checks.yml`, both publish workflows, and the Gitea buildah scripts — runs `scripts/opencode/src/claude_flag_probe.ts`. It spawns the exact argv `claudeArgv()` emits (`-p --setting-sources user --permission-mode dontAsk --allowedTools … --disallowedTools … --output-format stream-json --verbose --model … --effort …`) with `ANTHROPIC_BASE_URL` pointed at a throwaway loopback endpoint, so nothing is billed and no request leaves the runner — `CLAUDE_CODE_OAUTH_TOKEN` is deliberately kept out of the child env. The run has to exit 0, report back the pinned `permission-mode` and the requested model in its `init` event, name every `--allowedTools` entry as a tool it has, and still produce the stream-json text and token usage the parent accounts from. Because `effort` is operator config rather than a constant, the run is repeated at *every* level a runners file may set (`CLAUDE_EFFORT_LEVELS` in `src/runners.ts`: `low`, `medium`, `high`, `xhigh`, `max`) and each must come back with clean stderr, so a runner on `xhigh` or `max` is covered too. That set is enforced both ways: the probe proves the binary still knows every level, and `JUMI_RUNNERS_FILE` refuses a `type: claude` runner whose `effort` is outside it, so a typo cannot silently downgrade every run of that runner where no check can see it. Then each flag value the binary can refuse (`--permission-mode`, `--setting-sources`, `--output-format`, `--effort`) is re-run as nonsense and must draw an objection, so a release that shrugs at a bad value cannot make the positive case vacuous. `--effort` counts as refused when it merely *warns* and falls back to the default: in production that is a silent downgrade of the whole run, and that negative control additionally has to be caught by the same anchored stderr matcher the positive run relies on, so the detector cannot quietly stop matching. Changing a pinned value to nonsense fails both the unit gate and the image job; `claude --version` alone never did.
 
@@ -300,6 +300,17 @@ cd scripts/opencode
 bun install --frozen-lockfile
 bun run ci
 ```
+
+`bun run ci` needs no database: `test/review_jobs_pg.test.ts` skips itself unless `JUMI_TEST_DATABASE_URL` is set. That suite runs the real `PgReviewJobStore` — worker leases racing on one issue, reclaim at the attempt cap, in-flight enqueue dedupe, and migrate-then-migrate-again — against a real server, because those invariants are partial unique indexes and `FOR UPDATE SKIP LOCKED`, not TypeScript. CI runs it in the `postgres-queue` job; to run it locally:
+
+```bash
+docker run --rm -d --name jumi-queue-pg -p 5432:5432 \
+  -e POSTGRES_USER=jumi -e POSTGRES_PASSWORD=jumi -e POSTGRES_DB=jumi_queue_test \
+  postgres:18-alpine
+JUMI_TEST_DATABASE_URL=postgres://jumi:jumi@127.0.0.1:5432/jumi_queue_test bun run test:pg
+```
+
+The suite owns its schema: it drops and re-migrates `review_jobs` / `issue_skip_latches`, so point it at a throwaway database, never a live ledger.
 
 Run the service locally:
 

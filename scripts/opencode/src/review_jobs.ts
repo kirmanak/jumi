@@ -840,11 +840,15 @@ type ReviewJobRow = {
   updated_at: unknown;
 };
 
+// Bun's `PostgresError` carries the SQLSTATE in `errno` and puts `ERR_POSTGRES_SERVER_ERROR`
+// in `code`, so reading `code` / `sqlState` alone never matches a real unique violation and
+// `lease()` would surface a routine index race as a dead queue. Covered by the real-Postgres
+// suite in test/review_jobs_pg.test.ts.
 export function isUniqueViolation(err: unknown): boolean {
   let current: unknown = err;
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth++) {
-    const rec = current as { code?: unknown; sqlState?: unknown; cause?: unknown };
-    for (const value of [rec.code, rec.sqlState]) {
+    const rec = current as { code?: unknown; sqlState?: unknown; errno?: unknown; cause?: unknown };
+    for (const value of [rec.code, rec.sqlState, rec.errno]) {
       if (value === "23505" || value === 23505) return true;
     }
     current = rec.cause;

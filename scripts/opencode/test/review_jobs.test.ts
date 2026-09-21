@@ -682,6 +682,15 @@ describe("PgReviewJobStore.migrate", () => {
 describe("isUniqueViolation", () => {
   test("detects postgres 23505 including wrapped queue errors", () => {
     expect(isUniqueViolation(Object.assign(new Error("duplicate key"), { code: "23505" }))).toBe(true);
+    // The shape Bun actually throws; test/review_jobs_pg.test.ts pins it against a real server.
+    expect(
+      isUniqueViolation(
+        Object.assign(new Error("duplicate key value violates unique constraint"), {
+          code: "ERR_POSTGRES_SERVER_ERROR",
+          errno: "23505",
+        })
+      )
+    ).toBe(true);
     expect(
       isUniqueViolation(new QueueUnavailableError(Object.assign(new Error("duplicate key"), { code: "23505" })))
     ).toBe(true);
