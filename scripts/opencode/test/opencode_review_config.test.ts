@@ -203,3 +203,60 @@ describe("worker image JDK", () => {
     expect(dockerfile).toMatch(/bun-v\$\{BUN_VERSION\}\/bun-\$\{bun_platform\}\.zip/);
   });
 });
+
+describe("renovate bun pin", () => {
+  const repoRoot = join(process.cwd(), "../..");
+  const renovateRaw = readFileSync(join(repoRoot, "renovate.json"), "utf8");
+  const renovate = JSON.parse(renovateRaw) as {
+    constraints?: Record<string, string>;
+    customManagers?: { managerFilePatterns?: string[]; matchStrings?: string[]; depNameTemplate?: string }[];
+    packageRules?: { matchPackageNames?: string[]; extractVersion?: string }[];
+  };
+  const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "utf8");
+  const pinnedBun = toolVersions.match(/^BUN_VERSION=(.+)$/m)?.[1];
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+
+  test("runs lockFileMaintenance on the same bun every consumer is pinned to", () => {
+    // Without this, Renovate regenerates scripts/opencode/bun.lock with its own
+    // (newer) bun, which writes `lockfileVersion: 2`. BUN_VERSION cannot read
+    // that -- it aborts with `UnknownLockfileVersion` at bun.lock:2:22, warns
+    // `Ignoring lockfile`, and then fails the frozen check, taking out every
+    // workflow job and the Dockerfile install layer. Only `lockfileVersion`
+    // does this; the `configVersion` key newer bun also writes parses fine
+    // under 1.2.5 and is absent here merely because 1.2.5 does not emit it.
+    expect(pinnedBun).toBeTruthy();
+    expect(renovate.constraints?.bun).toBe(pinnedBun);
+  });
+
+  test("keeps the Dockerfile from carrying a third copy of the pin", () => {
+    // build-worker-image.sh and build-reviewer-image.sh both require
+    // BUN_VERSION and pass --build-arg, so a default here is only ever reached
+    // by a bare `docker build .` -- and now that extractVersion lets Renovate
+    // move BUN_VERSION, it would go stale the way HELM_VERSION already has.
+    // Bare ARG makes such a build fail at the bun download instead of quietly
+    // installing against a lockfile another bun generated.
+    expect(dockerfile).toMatch(/^ARG BUN_VERSION$/m);
+    expect(dockerfile).not.toMatch(/^ARG BUN_VERSION=/m);
+  });
+
+  test("lets Renovate bump constraints.bun so the pin above is not hand-maintained", () => {
+    // The assertion above is a tripwire: a PR that moves BUN_VERSION alone turns
+    // it red, and patch updates automerge with ignoreTests: false, so such a PR
+    // would block until someone edited renovate.json inside the Renovate branch.
+    // This custom manager makes both move in one PR instead.
+    const manager = renovate.customManagers?.find((m) => m.managerFilePatterns?.includes("/^renovate\\.json$/"));
+    expect(manager?.depNameTemplate).toBe("oven-sh/bun");
+    const matchString = manager?.matchStrings?.[0];
+    expect(matchString).toBeTruthy();
+    expect(new RegExp(matchString ?? "").exec(renovateRaw)?.groups?.currentValue).toBe(pinnedBun);
+  });
+
+  test("strips the bun-v tag prefix so BUN_VERSION can be bumped at all", () => {
+    // oven-sh/bun tags releases `bun-v1.2.5`; github-releases only strips a
+    // leading `v`, so without extractVersion every candidate is discarded as
+    // non-semver and the pin above silently freezes forever.
+    const rule = renovate.packageRules?.find((r) => r.matchPackageNames?.includes("oven-sh/bun"));
+    expect(rule?.extractVersion).toBe("^bun-v(?<version>.+)$");
+    expect(new RegExp(rule?.extractVersion ?? "").exec("bun-v1.2.5")?.groups?.version).toBe("1.2.5");
+  });
+});
