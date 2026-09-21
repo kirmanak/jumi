@@ -8,8 +8,8 @@ export const WORKER_LOADER_PATH = "scripts/opencode/src/worker_config.ts";
 const SEMVER_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
 /** Env helpers the loaders call; their own declarations read the caller's `name`, not an env name. */
 const ENV_HELPERS = ["requireEnv", "requirePem", "optionalEnv", "intEnv", "csvEnv"];
-/** `helper(env, <ref>)` where `<ref>` is a literal, a const identifier, or a const map property. */
-const LOADER_ENV_HELPER_RE = new RegExp(`\\b(${ENV_HELPERS.join("|")})\\(\\s*\\w+\\s*,\\s*([^,)]+)`, "g");
+/** Call site of an env helper; the arguments are split by a paren scan, not by the regex. */
+const LOADER_ENV_HELPER_RE = new RegExp(`\\b(${ENV_HELPERS.join("|")})\\s*\\(`, "g");
 const LOADER_ENV_PROP_RE = /\b(?:resolved|env)\.([A-Z][A-Z0-9_]*)\b/g;
 const LOADER_ENV_INDEX_RE = /\b(?:resolved|env)\[\s*([^\]]+?)\s*\]/g;
 /** Helpers that throw when the variable is unset. */
@@ -150,8 +150,8 @@ function parseImage(section: string): ImageContract {
 
 /**
  * Env names behind constants: `const X = "NAME"`, `const M = { key: "NAME" }` (`M.key`), and
- * `const L = ["A", "B"]` — including the binding of a `for (const k of L)`, which stands for every
- * entry of the list, so an `env[k]` inside the loop names them all instead of resolving to nothing.
+ * `const L = ["A", "B"]`. A `for (const k of L)` binding is not one of these — it is scoped to its
+ * own loop body, so `forOfScopes` keeps it out of this file-global map.
  */
 function constEnvNames(source: string): Map<string, string[]> {
   const consts = new Map<string, string[]>();
@@ -168,9 +168,6 @@ function constEnvNames(source: string): Map<string, string[]> {
   for (const match of source.matchAll(CONST_ENV_LIST_RE)) {
     for (const entry of match[2].matchAll(CONST_ENV_LIST_ENTRY_RE)) add(match[1], entry[1]);
   }
-  for (const match of source.matchAll(FOR_OF_CONST_RE)) {
-    for (const name of consts.get(match[2]) ?? []) add(match[1], name);
-  }
   return consts;
 }
 
@@ -185,8 +182,9 @@ function resolveEnvRef(ref: string, consts: Map<string, string[]>): string[] {
 
 /**
  * The source with string, template, regex, and comment bodies blanked, length and newlines kept, so
- * brace and ternary scans see code only: a `"}"` or a `":"` in a message no longer moves a range.
- * Indices still line up with the original, which is what the env-read regexes match against.
+ * brace, ternary, and env-read scans see code only: a `"}"` in a message no longer moves a range,
+ * and a comment that spells `env[name]` is not a read. Indices still line up with the original, so
+ * the ref text is recovered from `source` at the same offsets.
  */
 function maskLiterals(source: string): string {
   const out = source.split("");
@@ -257,6 +255,74 @@ function matchingBrace(masked: string, open: number): number {
     else if (masked[i] === "}" && --depth === 0) return i;
   }
   return -1;
+}
+
+/**
+ * `[start, end)` of each top-level argument of the call whose `(` sits at `open`, or `null` when the
+ * parentheses never close. A scan rather than a regex, so an argument may be any expression — a
+ * call, a member access, an object — instead of the bare identifier a regex can spell. Takes masked
+ * source, so a comma inside a string does not split an argument.
+ */
+function callArguments(masked: string, open: number): Array<[number, number]> | null {
+  const args: Array<[number, number]> = [];
+  let depth = 0;
+  let start = open + 1;
+  for (let i = open; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (--depth > 0) continue;
+      args.push([start, i]);
+      return args;
+    } else if (ch === "," && depth === 1) {
+      args.push([start, i]);
+      start = i + 1;
+    }
+  }
+  return null;
+}
+
+/** `[start, end)` of the body a `for (…)` header ending at `from` covers. Takes masked source. */
+function loopBodyRange(masked: string, from: number): [number, number] | null {
+  let start = from;
+  while (start < masked.length && !masked[start].trim()) start++;
+  if (start >= masked.length) return null;
+  if (masked[start] === "{") {
+    const end = matchingBrace(masked, start);
+    return end < 0 ? null : [start, end + 1];
+  }
+  let depth = 0;
+  for (let i = start; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === ";" && depth === 0) return [start, i + 1];
+  }
+  return null;
+}
+
+/** A `for (const k of LIST)` binding, together with the loop body it stands for the list inside. */
+interface EnvScope {
+  binding: string;
+  names: string[];
+  start: number;
+  end: number;
+}
+
+/**
+ * Loop bindings over a const list: inside the body, `env[k]` names every entry of the list. Scoped
+ * to the body rather than added to the file-global consts, so two loops binding the same name do not
+ * union their lists and a binding over a runtime value stays unresolved instead of borrowing one.
+ */
+function forOfScopes(masked: string, consts: Map<string, string[]>): EnvScope[] {
+  const scopes: EnvScope[] = [];
+  for (const match of masked.matchAll(FOR_OF_CONST_RE)) {
+    const names = consts.get(match[2]);
+    if (!names) continue;
+    const body = loopBodyRange(masked, match.index + match[0].length);
+    if (body) scopes.push({ binding: match[1], names, start: body[0], end: body[1] });
+  }
+  return scopes;
 }
 
 /**
@@ -367,31 +433,49 @@ interface EnvRead {
   index: number;
 }
 
+/**
+ * Every env read the loader makes. The scans run over the masked source, so a comment or a message
+ * that mentions `env.X` or spells a `requireEnv` call is text, not a read; the ref text is recovered
+ * from the original at the same offsets, because masking keeps lengths.
+ */
 function envReads(source: string, consts: Map<string, string[]>): EnvRead[] {
   const masked = maskLiterals(source);
   // The helper declarations pass the caller's `name` around (`requireEnv(env, name)` inside
   // `requirePem`, `env[name]`): no env name lives there, so their bodies are not scanned.
   const helpers = ENV_HELPERS.map((helper) => functionRange(source, helper, masked)).filter((range) => range !== null);
   const declared = (index: number): boolean => helpers.some(([start, end]) => index >= start && index < end);
+  const scopes = forOfScopes(masked, consts);
   const reads: EnvRead[] = [];
   // An unresolvable ref is recorded whatever the helper: a gitops variable reaches the loader
   // through `optionalEnv` or a plain index read just as often as through a throwing helper.
   const push = (ref: string, requiring: boolean, index: number): void => {
-    const names = resolveEnvRef(ref, consts);
-    if (names.length === 0) reads.push({ name: ref.trim(), requiring, resolved: false, index });
+    const trimmed = ref.trim();
+    const scope = scopes.filter((s) => s.binding === trimmed && index > s.start && index < s.end).pop();
+    const names = scope ? scope.names : resolveEnvRef(trimmed, consts);
+    if (names.length === 0) reads.push({ name: trimmed, requiring, resolved: false, index });
     for (const name of names) reads.push({ name, requiring, resolved: true, index });
   };
-  for (const match of source.matchAll(LOADER_ENV_HELPER_RE)) {
+  // The env argument of a helper call, or the call text when it has no readable name argument: a
+  // call the scan cannot read still reads env under some name, so it is reported, never dropped.
+  const callRef = (call: number, open: number): string => {
+    const args = callArguments(masked, open);
+    const named = args?.[1];
+    if (named && source.slice(named[0], named[1]).trim()) return source.slice(named[0], named[1]);
+    return source.slice(call, args ? args[args.length - 1][1] + 1 : open + 1);
+  };
+  for (const match of masked.matchAll(LOADER_ENV_HELPER_RE)) {
     if (declared(match.index)) continue;
-    push(match[2], REQUIRING_HELPERS.has(match[1]), match.index);
+    const open = match.index + match[0].length - 1;
+    push(callRef(match.index, open), REQUIRING_HELPERS.has(match[1]), match.index);
   }
-  for (const match of source.matchAll(LOADER_ENV_PROP_RE)) {
+  for (const match of masked.matchAll(LOADER_ENV_PROP_RE)) {
     if (declared(match.index)) continue;
     reads.push({ name: match[1], requiring: false, resolved: true, index: match.index });
   }
-  for (const match of source.matchAll(LOADER_ENV_INDEX_RE)) {
+  for (const match of masked.matchAll(LOADER_ENV_INDEX_RE)) {
     if (declared(match.index)) continue;
-    push(match[1], false, match.index);
+    const start = match.index + match[0].indexOf("[") + 1;
+    push(source.slice(start, match.index + match[0].length - 1), false, match.index);
   }
   return reads;
 }

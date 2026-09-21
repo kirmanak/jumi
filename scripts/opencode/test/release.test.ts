@@ -558,7 +558,7 @@ export function loadForgeBind(env: Env, opts: { kind: "appId" }): ForgeBind {
     // The helper declarations forward their own `name`; only the loader's own calls are env reads.
     expect(reviewer.required).toEqual(["GITEA_URL"]);
     expect(reviewer.gitOps).toEqual([]);
-    expect(reviewer.unresolved).toEqual(["KEYS[opts.kind]", 'pick("GITHUB_APP_PRIVATE_KEY"']);
+    expect(reviewer.unresolved).toEqual(["KEYS[opts.kind]", 'pick("GITHUB_APP_PRIVATE_KEY")']);
     const contract = parseContract(`# Deploy contract
 
 ## GitOps
@@ -582,13 +582,70 @@ export function loadForgeBind(env: Env, opts: { kind: "appId" }): ForgeBind {
     // Under-reporting would leave this empty and let an undocumented required env ship as a patch.
     expect(contractEnvIssues(contract, reviewerSrc, workerSrc)).toEqual([
       { image: "reviewer", name: "KEYS[opts.kind]", kind: "unresolved_env_ref" },
-      { image: "reviewer", name: 'pick("GITHUB_APP_PRIVATE_KEY"', kind: "unresolved_env_ref" },
+      { image: "reviewer", name: 'pick("GITHUB_APP_PRIVATE_KEY")', kind: "unresolved_env_ref" },
       { image: "worker", name: "KEYS[opts.kind]", kind: "unresolved_env_ref" },
-      { image: "worker", name: 'pick("GITHUB_APP_PRIVATE_KEY"', kind: "unresolved_env_ref" },
+      { image: "worker", name: 'pick("GITHUB_APP_PRIVATE_KEY")', kind: "unresolved_env_ref" },
     ]);
     expect(
       formatContractEnvIssue({ image: "reviewer", name: "KEYS[opts.kind]", kind: "unresolved_env_ref" })
     ).toContain("neither a string literal nor a constant");
+  });
+
+  test("a helper whose env argument is not a bare identifier still records the read", () => {
+    const reviewerSrc = `export function loadConfig(env: Env): Config {
+  const newKey = requireEnv(overlaySecretsFromFile(env), "BRAND_NEW_REQUIRED");
+  return { url: requireEnv(ctx.env, "NEW_REQUIRED_KEY") };
+}
+`;
+    const workerSrc = `export function loadWorkerConfig(env: Env): WorkerConfig {
+  return { url: requireEnv(ctx.env, "NEW_REQUIRED_KEY") };
+}
+`;
+    expect(gitOpsLoaderEnv(reviewerSrc)).toEqual({
+      required: ["BRAND_NEW_REQUIRED", "NEW_REQUIRED_KEY"],
+      gitOps: [],
+      optional: [],
+      unresolved: [],
+    });
+    expect(gitOpsLoaderEnv(workerSrc, reviewerSrc).required).toEqual(["NEW_REQUIRED_KEY"]);
+    const contract = parseContract(`# Deploy contract
+
+## GitOps
+
+### reviewer
+
+#### required env
+
+### worker
+
+#### required env
+`);
+    expect(contractEnvIssues(contract, reviewerSrc, workerSrc)).toEqual([
+      { image: "reviewer", name: "BRAND_NEW_REQUIRED", kind: "missing" },
+      { image: "reviewer", name: "NEW_REQUIRED_KEY", kind: "missing" },
+      { image: "worker", name: "NEW_REQUIRED_KEY", kind: "missing" },
+    ]);
+  });
+
+  test("comments and string bodies are not env reads", () => {
+    const reviewerSrc = `/** Throws when env[name] is unset. */
+function requireEnv(env: Env, name: string): string {
+  const value = env[name];
+  if (!value) throw new Error("Missing required environment variable: " + name);
+  return value;
+}
+export function loadConfig(env: Env): Config {
+  // env.LEGACY_TOKEN was the old name
+  const hint = "call requireEnv(env, NAME) instead";
+  return { url: requireEnv(env, "GITEA_URL") };
+}
+`;
+    expect(gitOpsLoaderEnv(reviewerSrc)).toEqual({
+      required: ["GITEA_URL"],
+      gitOps: [],
+      optional: [],
+      unresolved: [],
+    });
   });
 
   test("a computed name is reported whatever helper reads it, while a const list resolves", () => {
@@ -612,6 +669,21 @@ export function loadForgeBind(env: Env, opts: { k: string }): ForgeBind {
     // `for (const key of SECRETS)` binds every entry of the list, so `env[key]` names them all.
     expect(reviewer.optional).toEqual(["FORGE", "GITEA_BOT_TOKEN", "GITHUB_WEBHOOK_SECRET"]);
     expect(gitOpsLoaderEnv(workerSrc, reviewerSrc).unresolved).toEqual(["LOOKUP[opts.k]"]);
+  });
+
+  test("a for-of binding is scoped to its own loop body", () => {
+    const reviewerSrc = `const SECRETS = ["GITEA_BOT_TOKEN"] as const;
+const OTHER = ["GITEA_URL"] as const;
+for (const key of SECRETS) { delete env[key]; }
+for (const key of extra) { requireEnv(env, key); }
+for (const key of OTHER) { requireEnv(env, key); }
+`;
+    expect(gitOpsLoaderEnv(reviewerSrc)).toEqual({
+      required: ["GITEA_URL"],
+      gitOps: [],
+      optional: ["GITEA_BOT_TOKEN"],
+      unresolved: ["key"],
+    });
   });
 
   test("an inline return-type annotation does not truncate the shared forge bind", () => {
