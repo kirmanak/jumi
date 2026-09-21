@@ -73,6 +73,19 @@ Required:
 | `DATABASE_URL` | `router` / `engine` / worker | Postgres URL for the shared ledger. `router` / `engine` fail process start without it; GitOps must set it on the worker, which otherwise starts in local/dev mode (no ledger) |
 | `JUMI_ROLE` | reviewer | `router` or `engine`. Unset, empty, or unknown fails process start. Worker is a separate image, not this flag |
 
+Required when `FORGE=github` (these replace `GITEA_URL` / `GITEA_BOT_TOKEN` / `GITEA_WEBHOOK_SECRET`; with `FORGE` unset, empty, or `gitea` they are never read). GitOps must set every one of them on **both** images, so `deploy/contract.md` lists them under `gitops env` and adding one is a major bump:
+
+| Name | Who | Description |
+|------|-----|-------------|
+| `FORGE` | all | Set `github` to select this table. Unset or empty is `gitea`; any other value fails process start |
+| `FORGE_URL` | all | Trusted GitHub base URL (for example `https://github.com`, trailing slashes trimmed). Clone origins and the git auth host are checked against it |
+| `GITHUB_APP_ID` | all | GitHub App id used to mint installation tokens |
+| `GITHUB_APP_PRIVATE_KEY` | all | GitHub App private key, PEM (literal or `\n`-escaped newlines). Not a PEM fails process start |
+| `GITHUB_ALLOWED_ORGS` | all | Comma-separated allowed owners. Unlike `GITEA_ALLOWED_ORGS` there is no compiled default: unset fails process start |
+| `GITHUB_WEBHOOK_SECRET` | `router` / worker | HMAC-SHA256 of the raw body. Not required for `engine`, same as `GITEA_WEBHOOK_SECRET` |
+| `GITHUB_APP_INSTALLATION_ID` | all | Optional fallback installation id for calls with no `owner`/`repo` to resolve against; per-repository resolution still wins |
+| `GITHUB_ALLOWED_REPOS` | all | Optional comma-separated `owner/repo` allowlist |
+
 Optional (unset keeps the compiled default; set your own owners and well-known origin):
 
 | Name | Default | Description |

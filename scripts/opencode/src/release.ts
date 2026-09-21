@@ -6,9 +6,20 @@ export const CONTRACT_PATH = "deploy/contract.md";
 export const REVIEWER_LOADER_PATH = "scripts/opencode/src/config.ts";
 export const WORKER_LOADER_PATH = "scripts/opencode/src/worker_config.ts";
 const SEMVER_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
-const LOADER_ENV_HELPER_RE = /(?:requireEnv|optionalEnv|intEnv|csvEnv)\(\s*\w+\s*,\s*"([A-Z][A-Z0-9_]*)"/g;
+/** `helper(env, <ref>)` where `<ref>` is a literal, a const identifier, or a const map property. */
+const LOADER_ENV_HELPER_RE = /\b(requireEnv|requirePem|optionalEnv|intEnv|csvEnv)\(\s*\w+\s*,\s*([^,)]+)/g;
 const LOADER_ENV_PROP_RE = /\b(?:resolved|env)\.([A-Z][A-Z0-9_]*)\b/g;
-const REQUIRE_ENV_RE = /requireEnv\(\s*\w+\s*,\s*"([A-Z][A-Z0-9_]*)"/g;
+const LOADER_ENV_INDEX_RE = /\b(?:resolved|env)\[\s*([^\]]+?)\s*\]/g;
+/** Helpers that throw when the variable is unset. */
+const REQUIRING_HELPERS = new Set(["requireEnv", "requirePem"]);
+const ENV_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
+const CONST_ENV_NAME_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"/g;
+const CONST_ENV_MAP_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\{([^}]*)\}/g;
+const CONST_ENV_MAP_ENTRY_RE = /([A-Za-z_$][\w$]*)\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"/g;
+/** Shared forge bind the worker loader delegates to; its env belongs to both images. */
+const FORGE_BIND_FN = "loadForgeBind";
+/** `if (forge === "github") { ... }`: everything inside is required only when `FORGE=github`. */
+const FORGE_GITHUB_IF_RE = /\bif\s*\(\s*(?:\w+\.)?forge\s*===\s*"github"\s*\)\s*\{/g;
 
 export type BumpKind = "major" | "minor" | "patch" | "initial";
 export type VersionDecision = BumpKind | "reuse";
@@ -21,9 +32,9 @@ export interface SemVer {
 }
 
 export interface ImageContract {
-  /** Loader fails process start when unset (`requireEnv`). */
+  /** Loader fails process start when unset under the default `FORGE` (`requireEnv` / `requirePem`). */
   requiredEnv: string[];
-  /** GitOps must set it, but the loader tolerates unset (local/dev mode). */
+  /** GitOps must set it, but the loader tolerates unset (local/dev mode, or another `FORGE`). */
   gitOpsEnv: string[];
   optionalEnv: string[];
   ports: string[];
@@ -34,7 +45,14 @@ export interface ImageContract {
   volumes: string[];
 }
 
-export type ContractEnvIssueKind = "missing" | "extra" | "required_as_optional" | "optional_as_required" | "duplicate";
+export type ContractEnvIssueKind =
+  | "missing"
+  | "extra"
+  | "required_as_optional"
+  | "optional_as_required"
+  | "forge_conditional_as_required"
+  | "forge_conditional_as_optional"
+  | "duplicate";
 
 export interface ContractEnvIssue {
   image: ImageName;
@@ -122,33 +140,125 @@ function parseImage(section: string): ImageContract {
   };
 }
 
-export function loaderEnvNames(source: string): string[] {
-  const names = new Set<string>();
+/** Env names behind constants: `const X = "NAME"` and `const M = { key: "NAME" }` (`M.key`). */
+function constEnvNames(source: string): Map<string, string> {
+  const consts = new Map<string, string>();
+  for (const match of source.matchAll(CONST_ENV_NAME_RE)) {
+    if (ENV_NAME_RE.test(match[2])) consts.set(match[1], match[2]);
+  }
+  for (const match of source.matchAll(CONST_ENV_MAP_RE)) {
+    for (const entry of match[2].matchAll(CONST_ENV_MAP_ENTRY_RE)) {
+      if (ENV_NAME_RE.test(entry[2])) consts.set(`${match[1]}.${entry[1]}`, entry[2]);
+    }
+  }
+  return consts;
+}
+
+/** `null` for refs with no env name behind them: helper definitions (`env[name]`), computed keys. */
+function resolveEnvRef(ref: string, consts: Map<string, string>): string | null {
+  const trimmed = ref.trim();
+  const literal = /^"([A-Za-z_][A-Za-z0-9_]*)"$/.exec(trimmed);
+  if (literal) return ENV_NAME_RE.test(literal[1]) ? literal[1] : null;
+  if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?$/.test(trimmed)) return consts.get(trimmed) ?? null;
+  return null;
+}
+
+function matchingBrace(source: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** Text of `function <name>(...) { ... }`, or `""` when the source does not declare it. */
+function functionBlock(source: string, name: string): string {
+  const decl = new RegExp(`function\\s+${name}\\s*\\(`).exec(source);
+  if (!decl) return "";
+  let cursor = decl.index + decl[0].length - 1;
+  let depth = 0;
+  for (; cursor < source.length; cursor++) {
+    if (source[cursor] === "(") depth++;
+    else if (source[cursor] === ")" && --depth === 0) break;
+  }
+  const open = source.indexOf("{", cursor);
+  if (open < 0) return "";
+  const end = matchingBrace(source, open);
+  return end < 0 ? "" : source.slice(decl.index, end + 1);
+}
+
+/** A loader that calls the shared forge bind reads its env too, even across files. */
+function withSharedForgeBind(source: string, shared: string): string {
+  if (!new RegExp(`\\b${FORGE_BIND_FN}\\s*\\(`).test(source)) return source;
+  if (new RegExp(`function\\s+${FORGE_BIND_FN}\\b`).test(source)) return source;
+  const block = functionBlock(shared, FORGE_BIND_FN);
+  return block ? `${source}\n${block}` : source;
+}
+
+function forgeGithubRanges(source: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  for (const match of source.matchAll(FORGE_GITHUB_IF_RE)) {
+    const open = match.index + match[0].length - 1;
+    const end = matchingBrace(source, open);
+    if (end > open) ranges.push([open, end]);
+  }
+  return ranges;
+}
+
+interface EnvRead {
+  name: string;
+  /** The read throws when the variable is unset. */
+  requiring: boolean;
+  index: number;
+}
+
+function envReads(source: string, consts: Map<string, string>): EnvRead[] {
+  const reads: EnvRead[] = [];
   for (const match of source.matchAll(LOADER_ENV_HELPER_RE)) {
-    names.add(match[1]);
+    const name = resolveEnvRef(match[2], consts);
+    if (name) reads.push({ name, requiring: REQUIRING_HELPERS.has(match[1]), index: match.index });
   }
   for (const match of source.matchAll(LOADER_ENV_PROP_RE)) {
-    names.add(match[1]);
+    reads.push({ name: match[1], requiring: false, index: match.index });
   }
+  for (const match of source.matchAll(LOADER_ENV_INDEX_RE)) {
+    const name = resolveEnvRef(match[1], consts);
+    if (name) reads.push({ name, requiring: false, index: match.index });
+  }
+  return reads;
+}
+
+/** `sharedSource` holds helpers the loader imports (the reviewer loader for the worker). */
+export function loaderEnvNames(source: string, sharedSource = ""): string[] {
+  const consts = constEnvNames(`${source}\n${sharedSource}`);
+  const names = new Set(envReads(withSharedForgeBind(source, sharedSource), consts).map((read) => read.name));
   return [...names].sort();
 }
 
-function requireEnvNames(source: string): Set<string> {
-  const names = new Set<string>();
-  for (const match of source.matchAll(REQUIRE_ENV_RE)) {
-    names.add(match[1]);
+/**
+ * Process-start env as the loader sees it: `requireEnv`/`requirePem` → required, the same call
+ * reached only under `FORGE=github` → gitOps (forge-conditional), every other read → optional.
+ */
+export function gitOpsLoaderEnv(
+  source: string,
+  sharedSource = ""
+): { required: string[]; gitOps: string[]; optional: string[] } {
+  const scanned = withSharedForgeBind(source, sharedSource);
+  const consts = constEnvNames(`${source}\n${sharedSource}`);
+  const reads = envReads(scanned, consts);
+  const ranges = forgeGithubRanges(scanned);
+  const forgeOnly = (index: number): boolean => ranges.some(([start, end]) => index > start && index < end);
+  const required: string[] = [];
+  const gitOps: string[] = [];
+  const optional: string[] = [];
+  for (const name of [...new Set(reads.map((read) => read.name))].sort()) {
+    const requiring = reads.filter((read) => read.name === name && read.requiring);
+    if (requiring.some((read) => !forgeOnly(read.index))) required.push(name);
+    else if (requiring.length > 0) gitOps.push(name);
+    else optional.push(name);
   }
-  return names;
-}
-
-/** Process-start env as the loader sees it: `requireEnv` → required, every other read → optional. */
-export function gitOpsLoaderEnv(source: string): { required: string[]; optional: string[] } {
-  const names = loaderEnvNames(source);
-  const requiredSet = requireEnvNames(source);
-  return {
-    required: names.filter((name) => requiredSet.has(name)).sort(),
-    optional: names.filter((name) => !requiredSet.has(name)).sort(),
-  };
+  return { required, gitOps, optional };
 }
 
 export function formatContractEnvIssue(issue: ContractEnvIssue): string {
@@ -164,6 +274,12 @@ export function formatContractEnvIssue(issue: ContractEnvIssue): string {
   if (issue.kind === "optional_as_required") {
     return `${issue.image} env \`${issue.name}\` does not fail process start when unset but is listed as required env (use gitops env if GitOps must set it)`;
   }
+  if (issue.kind === "forge_conditional_as_required") {
+    return `${issue.image} env \`${issue.name}\` only fails process start when \`FORGE=github\` but is listed as required env (use gitops env)`;
+  }
+  if (issue.kind === "forge_conditional_as_optional") {
+    return `${issue.image} env \`${issue.name}\` fails process start when \`FORGE=github\` but is listed as optional env (use gitops env)`;
+  }
   return `${issue.image} env \`${issue.name}\` is listed under more than one of required/gitops/optional env`;
 }
 
@@ -174,14 +290,15 @@ export function contractEnvIssues(
 ): ContractEnvIssue[] {
   const issues: ContractEnvIssue[] = [];
   for (const image of ["reviewer", "worker"] as const) {
-    const expected = gitOpsLoaderEnv(image === "reviewer" ? reviewerSrc : workerSrc);
+    const expected = image === "reviewer" ? gitOpsLoaderEnv(reviewerSrc) : gitOpsLoaderEnv(workerSrc, reviewerSrc);
     const listedRequired = contract[image].requiredEnv;
     const listedGitOps = contract[image].gitOpsEnv;
     const listedOptional = contract[image].optionalEnv;
     const requiredSet = new Set(listedRequired);
+    const gitOpsSet = new Set(listedGitOps);
     const optionalSet = new Set([...listedGitOps, ...listedOptional]);
     const listed = new Set([...listedRequired, ...listedGitOps, ...listedOptional]);
-    const expectedNames = new Set([...expected.required, ...expected.optional]);
+    const expectedNames = new Set([...expected.required, ...expected.gitOps, ...expected.optional]);
     const seen = new Set<string>();
     for (const name of [...listedRequired, ...listedGitOps, ...listedOptional]) {
       if (seen.has(name)) issues.push({ image, name, kind: "duplicate" });
@@ -202,6 +319,14 @@ export function contractEnvIssues(
       if (requiredSet.has(name) && !optionalSet.has(name)) {
         issues.push({ image, name, kind: "optional_as_required" });
       }
+    }
+    for (const name of expected.gitOps) {
+      if (!listed.has(name) || gitOpsSet.has(name)) continue;
+      issues.push({
+        image,
+        name,
+        kind: requiredSet.has(name) ? "forge_conditional_as_required" : "forge_conditional_as_optional",
+      });
     }
   }
   return issues;

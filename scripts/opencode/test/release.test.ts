@@ -10,6 +10,7 @@ import {
   classifyBump,
   computeRelease,
   contractEnvIssues,
+  formatContractEnvIssue,
   gitOpsLoaderEnv,
   nextVersionFrom,
   parseContract,
@@ -301,7 +302,13 @@ describe("deploy/contract.md", () => {
       "JUMI_ROLE",
       "DATABASE_URL",
     ]);
-    expect(parsed.reviewer.gitOpsEnv).toEqual([]);
+    expect(parsed.reviewer.gitOpsEnv).toEqual([
+      "FORGE_URL",
+      "GITHUB_APP_ID",
+      "GITHUB_APP_PRIVATE_KEY",
+      "GITHUB_ALLOWED_ORGS",
+      "GITHUB_WEBHOOK_SECRET",
+    ]);
     expect(parsed.reviewer.optionalEnv).toEqual([
       "HOST",
       "PORT",
@@ -309,6 +316,9 @@ describe("deploy/contract.md", () => {
       "GITEA_WEBHOOK_AUTH_TOKEN",
       "GITEA_ALLOWED_ORGS",
       "GITEA_ALLOWED_REPOS",
+      "GITHUB_APP_INSTALLATION_ID",
+      "GITHUB_ALLOWED_REPOS",
+      "JUMI_SECRETS_FILE",
       "BOT_USERNAME",
       "FOLLOWUP_IGNORE_LOGINS",
       "OPENCODE_MODEL",
@@ -330,10 +340,19 @@ describe("deploy/contract.md", () => {
       "OPENCODE_TIMEOUT_MS",
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",
+      "MAX_FOLLOWUP_ROUNDS",
+      "MAX_INCOMPLETE_RETRIES",
       "PHOENIX_OTLP_ENDPOINT",
     ]);
     expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
-    expect(parsed.worker.gitOpsEnv).toEqual(["DATABASE_URL"]);
+    expect(parsed.worker.gitOpsEnv).toEqual([
+      "DATABASE_URL",
+      "FORGE_URL",
+      "GITHUB_APP_ID",
+      "GITHUB_APP_PRIVATE_KEY",
+      "GITHUB_ALLOWED_ORGS",
+      "GITHUB_WEBHOOK_SECRET",
+    ]);
     expect(parsed.worker.optionalEnv).toEqual([
       "HOST",
       "PORT",
@@ -341,6 +360,9 @@ describe("deploy/contract.md", () => {
       "GITEA_WEBHOOK_AUTH_TOKEN",
       "GITEA_ALLOWED_ORGS",
       "GITEA_ALLOWED_REPOS",
+      "GITHUB_APP_INSTALLATION_ID",
+      "GITHUB_ALLOWED_REPOS",
+      "JUMI_SECRETS_FILE",
       "BOT_USERNAME",
       "FOLLOWUP_IGNORE_LOGINS",
       "OPENCODE_MODEL",
@@ -387,15 +409,124 @@ describe("deploy/contract.md", () => {
     const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
     const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
     const reviewer = gitOpsLoaderEnv(reviewerSrc);
-    const worker = gitOpsLoaderEnv(workerSrc);
+    const worker = gitOpsLoaderEnv(workerSrc, reviewerSrc);
     expect([...parsed.reviewer.requiredEnv].sort()).toEqual(reviewer.required);
-    expect([...parsed.reviewer.gitOpsEnv, ...parsed.reviewer.optionalEnv].sort()).toEqual(reviewer.optional);
+    expect([...parsed.reviewer.gitOpsEnv, ...parsed.reviewer.optionalEnv].sort()).toEqual(
+      [...reviewer.gitOps, ...reviewer.optional].sort()
+    );
     expect([...parsed.worker.requiredEnv].sort()).toEqual(worker.required);
-    expect([...parsed.worker.gitOpsEnv, ...parsed.worker.optionalEnv].sort()).toEqual(worker.optional);
+    expect([...parsed.worker.gitOpsEnv, ...parsed.worker.optionalEnv].sort()).toEqual(
+      [...worker.gitOps, ...worker.optional].sort()
+    );
     expect(contractEnvIssues(parsed, reviewerSrc, workerSrc)).toEqual([]);
     expect(reviewer.required).toContain("DATABASE_URL");
     expect(worker.optional).toContain("DATABASE_URL");
     expect(worker.required).not.toContain("DATABASE_URL");
+  });
+
+  test("FORGE=github keys are forge-conditional gitops env on both images", async () => {
+    const markdown = await readFile(join(repoRoot, "deploy/contract.md"), "utf8");
+    const parsed = parseContract(markdown);
+    const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
+    const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
+    const githubKeys = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "FORGE_URL", "GITHUB_ALLOWED_ORGS"];
+    const reviewer = gitOpsLoaderEnv(reviewerSrc);
+    const worker = gitOpsLoaderEnv(workerSrc, reviewerSrc);
+    for (const key of [...githubKeys, "GITHUB_WEBHOOK_SECRET"]) {
+      // The worker reaches them through the reviewer loader's shared loadForgeBind.
+      expect(reviewer.gitOps).toContain(key);
+      expect(worker.gitOps).toContain(key);
+      expect(parsed.reviewer.gitOpsEnv).toContain(key);
+      expect(parsed.worker.gitOpsEnv).toContain(key);
+      expect(reviewer.required).not.toContain(key);
+      expect(worker.required).not.toContain(key);
+    }
+    // Siblings the loader tolerates unset under either forge stay optional.
+    expect(reviewer.optional).toContain("GITHUB_APP_INSTALLATION_ID");
+    expect(reviewer.optional).toContain("GITHUB_ALLOWED_REPOS");
+    expect(worker.optional).toContain("GITHUB_APP_INSTALLATION_ID");
+
+    // Dropping one from the contract fails the gate on both images.
+    for (const key of githubKeys) {
+      const dropped = parseContract(markdown.replaceAll(`- \`${key}\`\n`, ""));
+      expect(contractEnvIssues(dropped, reviewerSrc, workerSrc)).toEqual([
+        { image: "reviewer", name: key, kind: "missing" },
+        { image: "worker", name: key, kind: "missing" },
+      ]);
+    }
+
+    // Adding them to gitops env is a required-GitOps change: major.
+    const withoutGithub = markdown
+      .split("\n")
+      .filter((line) => !githubKeys.some((key) => line === `- \`${key}\``))
+      .join("\n");
+    expect(classifyBump(withoutGithub, markdown)).toBe("major");
+  });
+
+  test("the gate sees env names behind a constant map and rejects the wrong heading", () => {
+    const reviewerSrc = `const GITHUB_ENV = {
+  appId: "GITHUB_APP_ID",
+  url: "FORGE_URL",
+} as const;
+const JUMI_ROLE_ENV = "JUMI_ROLE";
+export function loadForgeBind(env: Env, opts: { requireWebhookSecret: boolean }): ForgeBind {
+  const forge = parseForge(env.FORGE);
+  if (forge === "github") {
+    requireEnv(env, GITHUB_ENV.appId);
+    requireEnv(env, GITHUB_ENV.url);
+    return { forge };
+  }
+  return { forge, giteaUrl: requireEnv(env, "GITEA_URL") };
+}
+requireEnv(resolved, JUMI_ROLE_ENV);
+`;
+    const workerSrc = `loadForgeBind(resolved, { requireWebhookSecret: true });
+`;
+    const reviewer = gitOpsLoaderEnv(reviewerSrc);
+    expect(reviewer.required).toEqual(["GITEA_URL", "JUMI_ROLE"]);
+    expect(reviewer.gitOps).toEqual(["FORGE_URL", "GITHUB_APP_ID"]);
+    expect(reviewer.optional).toEqual(["FORGE"]);
+    // The worker delegates to the shared bind, so it inherits the same forge env.
+    expect(gitOpsLoaderEnv(workerSrc, reviewerSrc)).toEqual({
+      required: ["GITEA_URL"],
+      gitOps: ["FORGE_URL", "GITHUB_APP_ID"],
+      optional: ["FORGE"],
+    });
+
+    const wrongHeadings = parseContract(`# Deploy contract
+
+## GitOps
+
+### reviewer
+
+#### required env
+- \`GITEA_URL\`
+- \`JUMI_ROLE\`
+- \`GITHUB_APP_ID\`
+
+#### optional env
+- \`FORGE\`
+- \`FORGE_URL\`
+
+### worker
+
+#### required env
+- \`GITEA_URL\`
+
+#### gitops env
+- \`FORGE_URL\`
+- \`GITHUB_APP_ID\`
+
+#### optional env
+- \`FORGE\`
+`);
+    expect(contractEnvIssues(wrongHeadings, reviewerSrc, workerSrc)).toEqual([
+      { image: "reviewer", name: "FORGE_URL", kind: "forge_conditional_as_optional" },
+      { image: "reviewer", name: "GITHUB_APP_ID", kind: "forge_conditional_as_required" },
+    ]);
+    expect(formatContractEnvIssue({ image: "worker", name: "GITHUB_APP_ID", kind: "missing" })).toContain(
+      "missing from deploy/contract.md"
+    );
   });
 
   test("CI fails when a loader env is missing or in the wrong heading", () => {
