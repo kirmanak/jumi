@@ -69,6 +69,12 @@ Keep this list current when re-syncing with upstream.
   / `tool.url` / `tool.query` attributes, which restate the already-capped
   `input.value`. Regression cases live in
   `scripts/opencode/test/claude_tracing.test.ts`.
+- **Bounded Phoenix POSTs.** Upstream has no per-POST timeout the parent
+  controls, and retries every tool. A ClusterIP with no endpoints would stall
+  `ARIZE_HTTP_TIMEOUT` × tool-calls inside blocking `PostToolUse` hooks and eat
+  `OPENCODE_TIMEOUT_MS`. `ARIZE_HTTP_TIMEOUT` defaults to 2s (the parent pins
+  the same from `claudeTracingEnv`), and after 3 failed POSTs further sends are
+  skipped.
 - **Age-based state GC.** A child killed by timeout or a quota abort never fires
   `SessionEnd`, so `session_start.sh` also drops session state files older than
   a day instead of leaking them onto the `HOME` volume.

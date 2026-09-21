@@ -13,7 +13,8 @@
  *
  * Everything is fail-open. No endpoint, an endpoint that is not an in-cluster
  * URL, or a missing plugin directory means the child runs untraced; a Phoenix
- * that is down or slow is the plugin's problem and never the job's.
+ * that is down or slow (2s per POST, then skip after 3 failures) is the
+ * plugin's problem and never the job's.
  */
 
 import { existsSync } from "node:fs";
@@ -85,6 +86,10 @@ export function claudeTracingEnv(trace?: TraceContext): Record<string, string> {
     // CI prose into it. Tool names, arguments and results still ride along, as
     // they do on OpenCode TOOL spans.
     ARIZE_LOG_PROMPTS: "false",
+    // Same-cluster ClusterIP; phoenixPluginEndpoint already refuses anything
+    // else. 2s bounds a black hole, and the hooks skip further POSTs after a
+    // few failures so this cannot become 2s × tool-calls.
+    ARIZE_HTTP_TIMEOUT: "2",
     JUMI_AGENT_INSTANCE: agent,
   };
   if (trace) {

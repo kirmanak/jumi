@@ -23,7 +23,11 @@
  *     `ClaudeStreamParser` reads text and token usage from;
  *   - every name in `--allowedTools` is a tool this binary actually has;
  *   - every `--effort` level an operator may configure is still known, since a
- *     level this release dropped only warns and runs at the default.
+ *     level this release dropped only warns and runs at the default;
+ *   - `--plugin-dir` is on the argv, so a CLAUDE_VERSION bump that rejects the
+ *     flag fails here instead of every homelab Claude spawn. The probe sets a
+ *     dummy `PHOENIX_OTLP_ENDPOINT` so `claudeArgv()` emits the production flag;
+ *     the child env still has no `PHOENIX_ENDPOINT`, so hooks do not POST.
  *
  * Then each flag value the binary is able to reject is re-run with a nonsense
  * value and must draw an objection. That is what keeps the positive case
@@ -386,10 +390,23 @@ async function main(): Promise<number> {
   const results: CaseResult[] = [];
 
   try {
+    // Homelab always has this env (that is the whole point of tracing). Image
+    // jobs do not, so without it `claudeArgv()` omits `--plugin-dir` and the
+    // probe never sees the one new production flag. The child env below still
+    // has no `PHOENIX_ENDPOINT`, so `get_target` returns `none` and hooks do
+    // not touch the network.
+    process.env.PHOENIX_OTLP_ENDPOINT ??= "http://127.0.0.1:6006/v1/traces";
     const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir });
     const pinned = pinnedFlagValues(argv);
     console.log(`argv under test: ${argv.join(" ")}`);
     console.log(`pinned values: ${pinned.map(({ flag, value }) => `${flag}=${value}`).join(" ")}`);
+    if (!argv.includes("--plugin-dir")) {
+      results.push({
+        name: "production argv still carries --plugin-dir",
+        ok: false,
+        observed: "missing --plugin-dir (plugin path missing from the image, or tracing did not enable)",
+      });
+    }
     if (pinned.length !== CLAUDE_REJECTABLE_FLAGS.length) {
       results.push({
         name: "production argv still carries every rejectable flag",

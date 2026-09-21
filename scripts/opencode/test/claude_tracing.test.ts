@@ -78,6 +78,7 @@ describe("claudeTracingEnv", () => {
       ARIZE_PROJECT_NAME: "jumi-worker",
       ARIZE_TRACE_ENABLED: "true",
       ARIZE_LOG_PROMPTS: "false",
+      ARIZE_HTTP_TIMEOUT: "2",
       JUMI_AGENT_INSTANCE: "jumi-worker",
       JUMI_TRACE_KIND: "implement",
       JUMI_OWNER: "kirmanak",
@@ -397,6 +398,68 @@ describe.if(hasShellTools)("vendored claude-code-tracing hooks", () => {
     });
     expect(spans).toEqual([]);
   });
+
+  test("a black-holing Phoenix is given up on after a few POSTs", async () => {
+    let posts = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch() {
+        posts += 1;
+        // Accept and never reply: the failure mode that costs ARIZE_HTTP_TIMEOUT
+        // per tool, not the refused 127.0.0.1:9 path that returns in microseconds.
+        await Bun.sleep(60_000);
+        return new Response("ok");
+      },
+    });
+    const state = await mkdtemp(join(tmpdir(), "arize-state-hang-"));
+    const started = Date.now();
+    try {
+      const env: Record<string, string> = {
+        PATH: process.env.PATH ?? "",
+        HOME: state,
+        PHOENIX_ENDPOINT: `http://127.0.0.1:${server.port}`,
+        ARIZE_PROJECT_NAME: "jumi",
+        ARIZE_TRACE_ENABLED: "true",
+        ARIZE_LOG_PROMPTS: "false",
+        ARIZE_HTTP_TIMEOUT: "1",
+        JUMI_JOB_ID: "job-42",
+      };
+      const session = { session_id: "claude-session-hang", cwd: "/work" };
+      const hook = async (name: string, input: unknown): Promise<number> => {
+        const proc = Bun.spawn(["bash", join(hooks, name)], {
+          env,
+          stdin: new TextEncoder().encode(JSON.stringify(input)),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const code = await proc.exited;
+        expect(await new Response(proc.stdout).text()).toBe("");
+        expect(await new Response(proc.stderr).text()).toBe("");
+        return code;
+      };
+      expect(await hook("session_start.sh", session)).toBe(0);
+      expect(await hook("user_prompt_submit.sh", session)).toBe(0);
+      for (let i = 0; i < 5; i++) {
+        expect(
+          await hook("post_tool_use.sh", {
+            ...session,
+            tool_use_id: `t${i}`,
+            tool_name: "Bash",
+            tool_input: { command: "true" },
+            tool_response: "ok",
+          })
+        ).toBe(0);
+      }
+      // Three failed POSTs, then skip. Without the breaker this is 5×timeout
+      // (or 10s × tools in production) and eats the job timeout.
+      expect(posts).toBe(3);
+      expect(Date.now() - started).toBeLessThan(15_000);
+    } finally {
+      server.stop(true);
+      await rm(state, { recursive: true, force: true });
+    }
+  }, 25_000);
 
   test("an unreachable Phoenix leaves the hooks exiting clean", async () => {
     const state = await mkdtemp(join(tmpdir(), "arize-state-"));

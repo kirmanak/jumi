@@ -26,9 +26,13 @@ ARIZE_LOG_PROMPTS="${ARIZE_LOG_PROMPTS:-false}"
 # Jumi: file logging is off by default. `-` not `:-`, so an explicitly empty
 # value disables it as documented; the pod's /tmp is a small memory emptyDir.
 ARIZE_LOG_FILE="${ARIZE_LOG_FILE-}"
-# Jumi: seconds any single span POST may take, so an unreachable Phoenix cannot
-# stall the hook until Claude Code's own hook timeout.
-ARIZE_HTTP_TIMEOUT="${ARIZE_HTTP_TIMEOUT:-10}"
+# Jumi: seconds any single span POST may take. The parent pins this to 2s
+# (same-cluster ClusterIP); 2s is also the fallback so a spawn that lost the
+# env cannot stall 10s × tool-calls. After this many failed POSTs, further
+# sends are skipped — Claude Code waits for PostToolUse before the next model
+# step, so a ClusterIP with no endpoints would otherwise eat OPENCODE_TIMEOUT_MS.
+ARIZE_HTTP_TIMEOUT="${ARIZE_HTTP_TIMEOUT:-2}"
+PHOENIX_POST_FAILURE_LIMIT=3
 
 # --- Logging ---
 # Jumi: the parent reads the child's stderr to classify auth, quota and infra
@@ -216,7 +220,18 @@ send_span() {
   [[ "$ARIZE_VERBOSE" == "true" ]] && echo "$span_json" | jq -c . >&2
 
   case "$target" in
-    phoenix) send_to_phoenix "$span_json" ;;
+    phoenix)
+      local failures
+      failures=$(get_state "phoenix_post_failures")
+      if [[ "${failures:-0}" -ge "$PHOENIX_POST_FAILURE_LIMIT" ]]; then
+        log "skipping span POST after ${failures} Phoenix failures"
+        return 0
+      fi
+      if ! send_to_phoenix "$span_json"; then
+        inc_state "phoenix_post_failures"
+        return 0
+      fi
+      ;;
     *) error "No target. Set PHOENIX_ENDPOINT"; return 1 ;;
   esac
 
