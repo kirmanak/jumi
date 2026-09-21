@@ -28,6 +28,17 @@ export interface AgyRunnerConfig {
 export type RunnerConfig = OpenCodeRunnerConfig | ClaudeRunnerConfig | AgyRunnerConfig;
 export type RunnerType = RunnerConfig["type"];
 
+/**
+ * `--effort` levels the installed `claude` binary accepts, proved against that
+ * binary by `claude_flag_probe.ts` in the image job. An unknown level is not an
+ * error there — claude warns on stderr and runs at the default — so a typo like
+ * `hihg` in `JUMI_RUNNERS_FILE` would silently downgrade every run of that
+ * runner, and the image probe cannot see operator config. Reject it at load
+ * instead, where the operator gets a named error. `agy` has its own levels, so
+ * this is claude-only.
+ */
+export const CLAUDE_EFFORT_LEVELS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+
 /** First-party CLI runners that take `effort` rather than OpenCode's `variant`. */
 export function usesEffort(type: string | undefined): type is typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE {
   return type === CLAUDE_RUNNER_TYPE || type === AGY_RUNNER_TYPE;
@@ -83,6 +94,16 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
     const effort = spec.effort;
     if (effort != null && typeof effort !== "string") {
       fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid effort`);
+    }
+    if (
+      spec.type === CLAUDE_RUNNER_TYPE &&
+      typeof effort === "string" &&
+      effort &&
+      !CLAUDE_EFFORT_LEVELS.includes(effort)
+    ) {
+      fail(
+        `Invalid ${RUNNERS_FILE_ENV}: runner ${name} effort ${effort} is not one of ${CLAUDE_EFFORT_LEVELS.join(", ")}`
+      );
     }
     return effortRunner(
       spec.type as typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE,

@@ -138,6 +138,16 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/webfetch_probe.ts'
 
+      - name: Verify claude production flags against the installed binary
+        if: ${{ env.VERSION != '' }}
+        # Runs the argv `claudeArgv()` emits against a loopback stub endpoint,
+        # so a flag this Claude release rejects or silently ignores fails the
+        # image job instead of every Claude spawn in production.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
+
       - name: Record registry manifest digest
         if: ${{ env.VERSION != '' }}
         run: |

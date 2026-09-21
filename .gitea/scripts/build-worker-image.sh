@@ -149,7 +149,17 @@ verify_worker_skills() {
     echo "agy missing in worker image" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude, agy, and opencode debug config"
+  # `--version` only proves the binary is there. Run the argv `claudeArgv()`
+  # emits against a loopback stub endpoint (nothing billed, no token in the
+  # child env) so a flag this Claude release rejects — or silently ignores —
+  # fails the image job instead of every Claude spawn in production.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "claude production flags rejected by the installed claude binary" >&2
+    exit 1
+  fi
+  echo "Verified gitea-pull-review skill, claude flags, agy, and opencode debug config"
   buildah rm "${ctr}" >/dev/null
 }
 

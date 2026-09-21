@@ -104,8 +104,13 @@ describe("claudeArgv", () => {
       "high",
     ]);
     expect(args).not.toContain("--bare");
+    // Values, not just shape: these three are the ones the claude binary
+    // validates, and a rejected value is a generic non-zero exit on every
+    // spawn. `src/claude_flag_probe.ts` re-runs the same literals against the
+    // installed binary in the image job.
     expect(CLAUDE_SETTING_SOURCES).toBe("user");
     expect(CLAUDE_OUTPUT_FORMAT).toBe("stream-json");
+    expect(CLAUDE_PERMISSION_MODE).toBe("dontAsk");
   });
 
   test("denies WebFetch of the forge apex and its subdomains by host, not by prose", () => {
