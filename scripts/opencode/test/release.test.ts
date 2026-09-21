@@ -591,6 +591,49 @@ export function loadForgeBind(env: Env, opts: { kind: "appId" }): ForgeBind {
     ).toContain("neither a string literal nor a constant");
   });
 
+  test("a computed name is reported whatever helper reads it, while a const list resolves", () => {
+    // gitops env reaches the loader through non-throwing reads too, so hiding one behind a
+    // computed key must not be a way to add a major-bump variable while the gate stays green.
+    const reviewerSrc = `const SECRETS = ["GITEA_BOT_TOKEN", "GITHUB_WEBHOOK_SECRET"] as const;
+export function loadForgeBind(env: Env, opts: { k: string }): ForgeBind {
+  const forge = parseForge(env.FORGE);
+  if (forge === "github") {
+    optionalEnv(env, LOOKUP[opts.k]);
+  }
+  for (const key of SECRETS) {
+    delete env[key];
+  }
+  return { forge, giteaUrl: requireEnv(env, "GITEA_URL") };
+}
+`;
+    const workerSrc = 'loadForgeBind(resolved, { k: "appId" });\n';
+    const reviewer = gitOpsLoaderEnv(reviewerSrc);
+    expect(reviewer.unresolved).toEqual(["LOOKUP[opts.k]"]);
+    // `for (const key of SECRETS)` binds every entry of the list, so `env[key]` names them all.
+    expect(reviewer.optional).toEqual(["FORGE", "GITEA_BOT_TOKEN", "GITHUB_WEBHOOK_SECRET"]);
+    expect(gitOpsLoaderEnv(workerSrc, reviewerSrc).unresolved).toEqual(["LOOKUP[opts.k]"]);
+  });
+
+  test("an inline return-type annotation does not truncate the shared forge bind", () => {
+    // `masked.indexOf("{")` after the parameter list would take the annotation's brace as the
+    // body, leaving `withSharedForgeBind` to append a signature with no env reads at all.
+    const reviewerSrc = `export function loadForgeBind(env: Env): { forge: string; giteaUrl: string } {
+  const forge = parseForge(env.FORGE);
+  if (forge === "github") {
+    return { forge, giteaUrl: requireEnv(env, "GITHUB_APP_ID") };
+  }
+  return { forge, giteaUrl: requireEnv(env, "GITEA_URL") };
+}
+`;
+    const workerSrc = "loadForgeBind(resolved, { requireWebhookSecret: true });\n";
+    const inherited = { required: ["GITEA_URL"], gitOps: ["GITHUB_APP_ID"], optional: ["FORGE"], unresolved: [] };
+    expect(gitOpsLoaderEnv(reviewerSrc)).toEqual(inherited);
+    expect(gitOpsLoaderEnv(workerSrc, reviewerSrc)).toEqual(inherited);
+    // A generic wrapping an object type ends at the same body brace.
+    const promiseSrc = reviewerSrc.replace(": { forge: string; giteaUrl: string }", ": Promise<{ forge: string }>");
+    expect(gitOpsLoaderEnv(promiseSrc)).toEqual(inherited);
+  });
+
   test("a ternary forge guard is forge-conditional, and braces or colons in text do not end a branch", () => {
     const ternarySrc = `export function loadForgeBind(env: Env): ForgeBind {
   const forge = parseForge(env.FORGE);

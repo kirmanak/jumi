@@ -18,6 +18,9 @@ const ENV_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
 const CONST_ENV_NAME_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"/g;
 const CONST_ENV_MAP_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\{([^}]*)\}/g;
 const CONST_ENV_MAP_ENTRY_RE = /([A-Za-z_$][\w$]*)\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"/g;
+const CONST_ENV_LIST_RE = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]/g;
+const CONST_ENV_LIST_ENTRY_RE = /"([A-Za-z_][A-Za-z0-9_]*)"/g;
+const FOR_OF_CONST_RE = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\s*\)/g;
 /** Shared forge bind the worker loader delegates to; its env belongs to both images. */
 const FORGE_BIND_FN = "loadForgeBind";
 /** Guard whose branch is reached only when `FORGE=github`: an `if` block or a ternary. */
@@ -145,27 +148,39 @@ function parseImage(section: string): ImageContract {
   };
 }
 
-/** Env names behind constants: `const X = "NAME"` and `const M = { key: "NAME" }` (`M.key`). */
-function constEnvNames(source: string): Map<string, string> {
-  const consts = new Map<string, string>();
-  for (const match of source.matchAll(CONST_ENV_NAME_RE)) {
-    if (ENV_NAME_RE.test(match[2])) consts.set(match[1], match[2]);
-  }
+/**
+ * Env names behind constants: `const X = "NAME"`, `const M = { key: "NAME" }` (`M.key`), and
+ * `const L = ["A", "B"]` — including the binding of a `for (const k of L)`, which stands for every
+ * entry of the list, so an `env[k]` inside the loop names them all instead of resolving to nothing.
+ */
+function constEnvNames(source: string): Map<string, string[]> {
+  const consts = new Map<string, string[]>();
+  const add = (ref: string, name: string): void => {
+    if (!ENV_NAME_RE.test(name)) return;
+    const names = consts.get(ref);
+    if (!names) consts.set(ref, [name]);
+    else if (!names.includes(name)) names.push(name);
+  };
+  for (const match of source.matchAll(CONST_ENV_NAME_RE)) add(match[1], match[2]);
   for (const match of source.matchAll(CONST_ENV_MAP_RE)) {
-    for (const entry of match[2].matchAll(CONST_ENV_MAP_ENTRY_RE)) {
-      if (ENV_NAME_RE.test(entry[2])) consts.set(`${match[1]}.${entry[1]}`, entry[2]);
-    }
+    for (const entry of match[2].matchAll(CONST_ENV_MAP_ENTRY_RE)) add(`${match[1]}.${entry[1]}`, entry[2]);
+  }
+  for (const match of source.matchAll(CONST_ENV_LIST_RE)) {
+    for (const entry of match[2].matchAll(CONST_ENV_LIST_ENTRY_RE)) add(match[1], entry[1]);
+  }
+  for (const match of source.matchAll(FOR_OF_CONST_RE)) {
+    for (const name of consts.get(match[2]) ?? []) add(match[1], name);
   }
   return consts;
 }
 
-/** `null` for refs with no env name behind them: helper definitions (`env[name]`), computed keys. */
-function resolveEnvRef(ref: string, consts: Map<string, string>): string | null {
+/** Empty for refs with no env name behind them: helper definitions (`env[name]`), computed keys. */
+function resolveEnvRef(ref: string, consts: Map<string, string[]>): string[] {
   const trimmed = ref.trim();
   const literal = /^"([A-Za-z_][A-Za-z0-9_]*)"$/.exec(trimmed);
-  if (literal) return ENV_NAME_RE.test(literal[1]) ? literal[1] : null;
-  if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?$/.test(trimmed)) return consts.get(trimmed) ?? null;
-  return null;
+  if (literal) return ENV_NAME_RE.test(literal[1]) ? [literal[1]] : [];
+  if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?$/.test(trimmed)) return consts.get(trimmed) ?? [];
+  return [];
 }
 
 /**
@@ -244,6 +259,32 @@ function matchingBrace(masked: string, open: number): number {
   return -1;
 }
 
+/**
+ * Index of the `{` opening the body of a function whose parameter list closes at `close`, or `-1`.
+ * A return-type annotation brings braces of its own — `: { forge: string }`, `: Promise<{ … }>` —
+ * so the scan skips any `{…}` that follows a token a type can continue from (`:`, `|`, `&`, `,`,
+ * `<`, `(`, `=>`) and stops at the first `{` that follows a complete type. Takes masked source.
+ */
+function bodyBrace(masked: string, close: number): number {
+  let complete = true;
+  let previous = "";
+  for (let i = close + 1; i < masked.length; i++) {
+    const ch = masked[i];
+    if (!ch.trim()) continue;
+    if (ch === "{") {
+      if (complete) return i;
+      const end = matchingBrace(masked, i);
+      if (end < 0) return -1;
+      i = end;
+      complete = true;
+    } else {
+      complete = !("|&,<(=?:".includes(ch) || (ch === ">" && previous === "="));
+    }
+    previous = masked[i];
+  }
+  return -1;
+}
+
 /** `[start, end)` of `function <name>(...) { ... }`, or `null` when the source does not declare it. */
 function functionRange(source: string, name: string, masked = maskLiterals(source)): [number, number] | null {
   const decl = new RegExp(`function\\s+${name}\\s*\\(`).exec(masked);
@@ -254,7 +295,7 @@ function functionRange(source: string, name: string, masked = maskLiterals(sourc
     if (masked[cursor] === "(") depth++;
     else if (masked[cursor] === ")" && --depth === 0) break;
   }
-  const open = masked.indexOf("{", cursor);
+  const open = bodyBrace(masked, cursor);
   if (open < 0) return null;
   const end = matchingBrace(masked, open);
   return end < 0 ? null : [decl.index, end + 1];
@@ -326,19 +367,23 @@ interface EnvRead {
   index: number;
 }
 
-function envReads(source: string, consts: Map<string, string>): EnvRead[] {
+function envReads(source: string, consts: Map<string, string[]>): EnvRead[] {
   const masked = maskLiterals(source);
   // The helper declarations pass the caller's `name` around (`requireEnv(env, name)` inside
   // `requirePem`, `env[name]`): no env name lives there, so their bodies are not scanned.
   const helpers = ENV_HELPERS.map((helper) => functionRange(source, helper, masked)).filter((range) => range !== null);
   const declared = (index: number): boolean => helpers.some(([start, end]) => index >= start && index < end);
   const reads: EnvRead[] = [];
+  // An unresolvable ref is recorded whatever the helper: a gitops variable reaches the loader
+  // through `optionalEnv` or a plain index read just as often as through a throwing helper.
+  const push = (ref: string, requiring: boolean, index: number): void => {
+    const names = resolveEnvRef(ref, consts);
+    if (names.length === 0) reads.push({ name: ref.trim(), requiring, resolved: false, index });
+    for (const name of names) reads.push({ name, requiring, resolved: true, index });
+  };
   for (const match of source.matchAll(LOADER_ENV_HELPER_RE)) {
     if (declared(match.index)) continue;
-    const requiring = REQUIRING_HELPERS.has(match[1]);
-    const name = resolveEnvRef(match[2], consts);
-    if (name) reads.push({ name, requiring, resolved: true, index: match.index });
-    else if (requiring) reads.push({ name: match[2].trim(), requiring, resolved: false, index: match.index });
+    push(match[2], REQUIRING_HELPERS.has(match[1]), match.index);
   }
   for (const match of source.matchAll(LOADER_ENV_PROP_RE)) {
     if (declared(match.index)) continue;
@@ -346,8 +391,7 @@ function envReads(source: string, consts: Map<string, string>): EnvRead[] {
   }
   for (const match of source.matchAll(LOADER_ENV_INDEX_RE)) {
     if (declared(match.index)) continue;
-    const name = resolveEnvRef(match[1], consts);
-    if (name) reads.push({ name, requiring: false, resolved: true, index: match.index });
+    push(match[1], false, match.index);
   }
   return reads;
 }
@@ -355,8 +399,8 @@ function envReads(source: string, consts: Map<string, string>): EnvRead[] {
 /**
  * Process-start env as the loader sees it: `requireEnv`/`requirePem` → required, the same call
  * reached only under `FORGE=github` → gitOps (forge-conditional), every other read → optional.
- * `unresolved` holds refs a throwing helper was handed that are neither literal nor constant: the
- * scanner cannot name that variable, so it is reported instead of silently dropped.
+ * `unresolved` holds refs that are neither literal nor constant, from any read: the scanner cannot
+ * name that variable, so it is reported instead of silently dropped.
  */
 export function gitOpsLoaderEnv(
   source: string,
@@ -401,7 +445,7 @@ export function formatContractEnvIssue(issue: ContractEnvIssue): string {
     return `${issue.image} env \`${issue.name}\` fails process start when \`FORGE=github\` but is listed as optional env (use gitops env)`;
   }
   if (issue.kind === "unresolved_env_ref") {
-    return `${issue.image} loader requires env named by \`${issue.name}\`, which is neither a string literal nor a constant: deploy/contract.md cannot be checked against it (use a literal or a \`const\`)`;
+    return `${issue.image} loader reads env named by \`${issue.name}\`, which is neither a string literal nor a constant: deploy/contract.md cannot be checked against it (use a literal or a \`const\`)`;
   }
   return `${issue.image} env \`${issue.name}\` is listed under more than one of required/gitops/optional env`;
 }
