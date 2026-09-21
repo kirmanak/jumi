@@ -42,6 +42,18 @@ Keep this list current when re-syncing with upstream.
 - **`ARIZE_LOG_FILE` defaults to empty (off).** The pod's `/tmp` is a 256Mi
   memory `emptyDir`, and upstream's `:-` default meant the documented "set empty
   to disable" never disabled anything.
+- **Truncate by slicing, not `head -c`.** Upstream truncates with
+  `value=$(echo "$var" | head -c N)`. `common.sh` runs under `set -euo
+  pipefail`: `head` exits at its byte limit and SIGPIPEs the writer, the
+  pipeline reports 141, and the hook dies — for any value past the 64 KiB pipe
+  buffer, i.e. exactly the inputs the truncation exists to handle. `stop.sh` was
+  the worst case: it died before sending the `Turn` span, the only span carrying
+  the model and token counts, and a Jumi run's assistant prose clears 64 KiB
+  routinely. Every such site now uses `${var:0:N}`, which opens no pipe.
+  `post_tool_use.sh` also caps the structured `tool.command` / `tool.file_path`
+  / `tool.url` / `tool.query` attributes, which restate the already-capped
+  `input.value`. Regression cases live in
+  `scripts/opencode/test/claude_tracing.test.ts`.
 - **Age-based state GC.** A child killed by timeout or a quota abort never fires
   `SessionEnd`, so `session_start.sh` also drops session state files older than
   a day instead of leaking them onto the `HOME` volume.

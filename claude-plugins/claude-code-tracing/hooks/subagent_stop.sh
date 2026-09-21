@@ -66,7 +66,8 @@ if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
     [[ "$val" =~ ^[0-9]+$ ]] && in_tokens=$((in_tokens + val))
   done < "$transcript_path"
 
-  subagent_output=$(echo "$subagent_output" | head -c 5000)
+  # Jumi: slice, never `head -c` — see the note in post_tool_use.sh.
+  subagent_output="${subagent_output:0:5000}"
 fi
 
 # Fall back to current time if no start time found

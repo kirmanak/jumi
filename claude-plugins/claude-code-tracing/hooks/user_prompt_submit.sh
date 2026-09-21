@@ -52,7 +52,10 @@ set_state "current_trace_start_time" "$(get_timestamp_ms)"
 # otherwise.
 prompt_value=""
 if [[ "$ARIZE_LOG_PROMPTS" == "true" ]]; then
-  prompt_value=$(echo "$input" | jq -r '.prompt // empty' 2>/dev/null | head -c 1000)
+  # Jumi: capture first, then slice. `head -c` in the pipeline would SIGPIPE jq
+  # and take the hook down with it — see the note in post_tool_use.sh.
+  prompt_value=$(echo "$input" | jq -r '.prompt // empty' 2>/dev/null || echo "")
+  prompt_value="${prompt_value:0:1000}"
 fi
 set_state "current_trace_prompt" "$prompt_value"
 

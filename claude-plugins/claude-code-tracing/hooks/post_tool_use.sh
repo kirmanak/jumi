@@ -18,14 +18,21 @@ inc_state "tool_count"
 tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
 tool_id=$(echo "$input" | jq -r '.tool_use_id // empty' 2>/dev/null || echo "")
 tool_input_raw=$(echo "$input" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
-tool_input=$(echo "$tool_input_raw" | head -c 5000)
-tool_response=$(echo "$input" | jq -r '.tool_response // empty' 2>/dev/null | head -c 5000) || true
+raw_response=$(echo "$input" | jq -r '.tool_response // empty' 2>/dev/null || echo "")
+
+# Jumi: slice, never `head -c`. Under `set -o pipefail` head exits at its byte
+# limit and SIGPIPEs the writer, so the assignment reports 141 and `set -e`
+# kills the hook before the TOOL span is sent — for any value past the pipe
+# buffer, i.e. exactly the inputs the truncation exists to handle. Parameter
+# expansion opens no pipe, and it matches the `${#...} -gt 5000` checks below,
+# which count the same units it slices.
+tool_input="${tool_input_raw:0:5000}"
+tool_response="${raw_response:0:5000}"
 
 # Track whether content was truncated
 tool_input_truncated="false"
 tool_response_truncated="false"
 [[ ${#tool_input_raw} -gt 5000 ]] && tool_input_truncated="true"
-raw_response=$(echo "$input" | jq -r '.tool_response // empty' 2>/dev/null || echo "")
 [[ ${#raw_response} -gt 5000 ]] && tool_response_truncated="true"
 truncated="false"
 [[ "$tool_input_truncated" == "true" || "$tool_response_truncated" == "true" ]] && truncated="true"
@@ -40,29 +47,37 @@ tool_query=""
 case "$tool_name" in
   Bash)
     tool_command=$(echo "$tool_input_raw" | jq -r '.command // empty' 2>/dev/null || echo "")
-    tool_description=$(echo "$tool_command" | head -c 200)
+    tool_description="${tool_command:0:200}"
     ;;
   Read|Write|Edit|Glob)
     tool_file_path=$(echo "$tool_input_raw" | jq -r '.file_path // .pattern // empty' 2>/dev/null || echo "")
-    tool_description=$(echo "$tool_file_path" | head -c 200)
+    tool_description="${tool_file_path:0:200}"
     ;;
   WebSearch)
     tool_query=$(echo "$tool_input_raw" | jq -r '.query // empty' 2>/dev/null || echo "")
-    tool_description=$(echo "$tool_query" | head -c 200)
+    tool_description="${tool_query:0:200}"
     ;;
   WebFetch)
     tool_url=$(echo "$tool_input_raw" | jq -r '.url // empty' 2>/dev/null || echo "")
-    tool_description=$(echo "$tool_url" | head -c 200)
+    tool_description="${tool_url:0:200}"
     ;;
   Grep)
     tool_query=$(echo "$tool_input_raw" | jq -r '.pattern // empty' 2>/dev/null || echo "")
     tool_file_path=$(echo "$tool_input_raw" | jq -r '.path // empty' 2>/dev/null || echo "")
-    tool_description="grep: $(echo "$tool_query" | head -c 100)"
+    tool_description="grep: ${tool_query:0:100}"
     ;;
   *)
-    tool_description=$(echo "$tool_input" | head -c 200)
+    tool_description="${tool_input:0:200}"
     ;;
 esac
+
+# Jumi: the structured attributes restate `input.value`, which is already capped
+# at 5000. Cap them to the same bound, so letting big tool spans through does not
+# hand Phoenix an unbounded `tool.command` instead.
+tool_command="${tool_command:0:5000}"
+tool_file_path="${tool_file_path:0:5000}"
+tool_url="${tool_url:0:5000}"
+tool_query="${tool_query:0:5000}"
 
 start_time=$(get_state "tool_${tool_id}_start")
 [[ -z "$start_time" ]] && start_time=$(get_timestamp_ms)

@@ -52,7 +52,14 @@ if [[ -f "$transcript" ]]; then
   done < <(tail -n +"$((skip_lines + 1))" "$transcript")
 fi
 
-output=$(printf '%s' "$output" | head -c 5000)
+# Jumi: slice, never `head -c`. Under `set -o pipefail` head exits at its byte
+# limit and SIGPIPEs the writer, so the assignment reports 141 and `set -e`
+# kills the hook before the Turn span is sent — for any value past the pipe
+# buffer, i.e. exactly the inputs the truncation exists to handle. `output`
+# holds every assistant text block of the turn, and under `claude -p` there is
+# one turn per run, so 5000 is not the interesting size — 64 KiB is, and a Jumi
+# run clears it routinely. Parameter expansion opens no pipe.
+output="${output:0:5000}"
 [[ -z "$output" ]] && output="(No response)"
 
 # Compute total token count
