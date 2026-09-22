@@ -42,6 +42,7 @@ import {
 import { cancelLedgerWorkerJobs, type HandleWorkerWebhookDeps, handleWorkerWebhookEvent } from "./worker_webhook.ts";
 import type { GitRunner } from "./workspace.ts";
 import { createReviewWorkspace, gitAuthResolverFor, removeReviewWorkspace } from "./workspace.ts";
+import { adoptOrphanXaiSibling } from "./xai_auth.ts";
 
 function log(message: string) {
   console.log(`[server] ${message}`);
@@ -665,6 +666,9 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
   const api = deps.api ?? createForge(config);
 
   if (shouldSeedOpenCodeAuth(config.role)) {
+    await adoptOrphanXaiSibling(config.home, logger).catch((err) =>
+      logger(`xAI sibling adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+    );
     await (deps.ensureAuth ?? ensureOpenCodeWellKnownAuth)({
       home: config.home,
       url: config.opencodeWellKnownUrl,

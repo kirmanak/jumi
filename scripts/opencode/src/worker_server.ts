@@ -19,6 +19,7 @@ import {
 import type { WorkerConfig } from "./worker_config.ts";
 import { loadWorkerConfig } from "./worker_config.ts";
 import { type HandleWorkerWebhookDeps, handleWorkerWebhookEvent } from "./worker_webhook.ts";
+import { adoptOrphanXaiSibling } from "./xai_auth.ts";
 
 export {
   isFollowUpWebhookEvent,
@@ -153,6 +154,9 @@ async function main() {
   };
   process.once("SIGTERM", () => onSignal("SIGTERM"));
   process.once("SIGINT", () => onSignal("SIGINT"));
+  await adoptOrphanXaiSibling(config.home, log).catch((err) =>
+    log(`xAI sibling adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+  );
   await ensureOpenCodeWellKnownAuth({
     home: config.home,
     url: config.opencodeWellKnownUrl,

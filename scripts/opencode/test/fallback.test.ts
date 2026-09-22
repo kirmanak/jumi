@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,25 @@ import {
 } from "../src/fallback.ts";
 import { runOpenCode } from "../src/git.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
+import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
+
+// `runOpenCode` now owns the provider auth file under HOME before it spawns.
+// Point HOME at a throwaway dir so a real developer or CI home is never read,
+// refreshed, or rewritten by a test.
+const originalHome = process.env.HOME;
+let isolatedHome = "";
+
+beforeEach(async () => {
+  isolatedHome = await mkdtemp(join(tmpdir(), "jumi-fallback-home-"));
+  process.env.HOME = isolatedHome;
+});
+
+afterEach(async () => {
+  resetXaiAuthStateForTests();
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (isolatedHome) await rm(isolatedHome, { recursive: true, force: true });
+});
 
 const unavailable: EngineResult = {
   status: "exit",

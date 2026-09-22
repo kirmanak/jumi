@@ -148,6 +148,16 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+      - name: Verify the xAI child credential against the opencode binary
+        if: ${{ env.VERSION != '' }}
+        # The child gets an xAI credential with no refresh token, so a killed
+        # review cannot rotate the grant. Only the real binary can say whether
+        # it sends that shape as a bearer instead of refreshing it.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'
+
       - name: Record registry manifest digest
         if: ${{ env.VERSION != '' }}
         run: |

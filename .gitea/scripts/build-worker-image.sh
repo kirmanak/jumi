@@ -159,7 +159,15 @@ verify_worker_skills() {
     echo "claude production flags rejected by the installed claude binary" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude flags, agy, and opencode debug config"
+  # The worker holds the same xAI grant and runs the 4h jobs, so it needs the
+  # same proof: the child credential is sent as a bearer and never refreshed.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "xAI child credential is not usable by the installed opencode binary" >&2
+    exit 1
+  fi
+  echo "Verified gitea-pull-review skill, claude flags, agy, opencode debug config, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
