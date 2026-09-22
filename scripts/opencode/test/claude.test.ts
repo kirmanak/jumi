@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import {
   CLAUDE_ALLOWED_TOOLS,
@@ -12,6 +13,7 @@ import {
   inspectClaudeUsageLimit,
   runClaude,
 } from "../src/claude.ts";
+import { setClaudeTracingPluginDirForTests } from "../src/claude_tracing.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { claudeDisallowedTools, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
@@ -22,10 +24,18 @@ const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
 const originalOauth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
 const originalXdg = process.env.XDG_CONFIG_HOME;
+const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
+const originalAgent = process.env.AGENT_INSTANCE;
+const pluginDir = join(dirname(fileURLToPath(import.meta.url)), "../../../claude-plugins/claude-code-tracing");
 
 afterEach(() => {
   resetControlMetricsForTests();
   resetTokenMetricsForTests();
+  setClaudeTracingPluginDirForTests(undefined);
+  if (originalPhoenix === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
+  else process.env.PHOENIX_OTLP_ENDPOINT = originalPhoenix;
+  if (originalAgent === undefined) delete process.env.AGENT_INSTANCE;
+  else process.env.AGENT_INSTANCE = originalAgent;
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
@@ -142,6 +152,22 @@ describe("claudeArgv", () => {
     const fallback = claudeArgv({ model: "opus", workdir: "/work" });
     expect(fallback[fallback.indexOf("--disallowedTools") + 1]).toBe(claudeDisallowedTools(FORGE_DENY_DOMAIN));
   });
+
+  test("names the image-local tracing plugin instead of loading hooks from the checkout", () => {
+    // The plugin is how a Claude run reaches Phoenix at all: it has no session
+    // sqlite for the parent to export. Passing it per spawn keeps
+    // `--setting-sources user`, so the untrusted checkout still supplies no hooks.
+    setClaudeTracingPluginDirForTests(pluginDir);
+    process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
+    const traced = claudeArgv({ model: "opus", workdir: "/work" });
+    expect(traced[traced.indexOf("--plugin-dir") + 1]).toBe(pluginDir);
+    expect(traced).toContain(`--setting-sources`);
+    expect(traced).not.toContain("--bare");
+
+    // No Phoenix configured: the child runs untraced rather than failing.
+    delete process.env.PHOENIX_OTLP_ENDPOINT;
+    expect(claudeArgv({ model: "opus", workdir: "/work" })).not.toContain("--plugin-dir");
+  });
 });
 
 describe("runClaude", () => {
@@ -202,6 +228,38 @@ printf 'TOKEN=%s PEM=%s JAVA=%s\\n' "$GITEA_BOT_TOKEN" "$GITHUB_APP_PRIVATE_KEY"
         expect(result.stdout).toContain("TOKEN=");
         expect(result.stdout).toContain("PEM=");
         expect(result.stdout).not.toContain("BEGIN PRIVATE KEY");
+      }
+    );
+  });
+
+  test("the sanitized env still reaches Phoenix with the project and job id", async () => {
+    // The scrub is what this has to survive: a spawn that reaches the model but
+    // not Phoenix is an untraced job, which is the bug this exists to fix.
+    process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006/v1/traces";
+    process.env.AGENT_INSTANCE = "jumi-worker";
+    setClaudeTracingPluginDirForTests(pluginDir);
+    await withFakeClaude(
+      `#!/bin/sh
+printf 'PHX=%s PROJ=%s JOB=%s KIND=%s PROMPTS=%s TOKEN=%s\\n' "$PHOENIX_ENDPOINT" "$ARIZE_PROJECT_NAME" "$JUMI_JOB_ID" "$JUMI_TRACE_KIND" "$ARIZE_LOG_PROMPTS" "$GITEA_BOT_TOKEN"
+`,
+      async (workdir) => {
+        const result = await runClaude({
+          prompt: "prompt",
+          model: "opus",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "implement", owner: "kirmanak", repo: "jumi", jobId: "job-42" },
+          extraEnv: { GITEA_BOT_TOKEN: "should-not-pass" },
+        });
+        expect(result.status).toBe("ok");
+        // The OTLP path the OpenCode exporter stores is not the plugin's base URL.
+        expect(result.stdout).toContain("PHX=http://phoenix.internal:6006 ");
+        expect(result.stdout).toContain("PROJ=jumi-worker");
+        expect(result.stdout).toContain("JOB=job-42");
+        expect(result.stdout).toContain("KIND=implement");
+        expect(result.stdout).toContain("PROMPTS=false");
+        expect(result.stdout).toContain("TOKEN=");
+        expect(result.stdout).not.toContain("should-not-pass");
       }
     );
   });

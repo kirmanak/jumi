@@ -117,6 +117,14 @@ WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./
 COPY --from=build /app/.gitea /app/.gitea
 COPY review-skills /app/review-skills
+# Claude children have no session sqlite for the parent to export, so their
+# Phoenix spans come from this vendored hook plugin, passed per spawn with
+# `--plugin-dir`. Vendored, not installed: the child never writes to HOME and
+# never reaches a registry. It needs jq and python3, both already above.
+COPY claude-plugins /app/claude-plugins
+RUN set -eu; \
+    jq empty /app/claude-plugins/claude-code-tracing/.claude-plugin/plugin.json; \
+    for hook in /app/claude-plugins/claude-code-tracing/hooks/*.sh; do bash -n "${hook}"; done
 COPY scripts/opencode/entrypoint.sh /app/scripts/opencode/entrypoint.sh
 RUN chmod 755 /app/scripts/opencode/entrypoint.sh
 

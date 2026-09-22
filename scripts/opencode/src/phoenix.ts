@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
+import { agentInstance } from "./agent_instance.ts";
 import type { TraceContext } from "./engine.ts";
 import {
   encodeTracesRequest,
@@ -70,10 +71,6 @@ export function setTraceLimitsForTests(opts?: { maxBytes?: number; attrCeiling?:
 
 export function traceExportErrors(): number {
   return errors;
-}
-
-function agentInstance(): string {
-  return process.env.AGENT_INSTANCE?.trim() || "jumi";
 }
 
 function phoenixEndpoint(): string {

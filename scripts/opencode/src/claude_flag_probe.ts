@@ -23,7 +23,16 @@
  *     `ClaudeStreamParser` reads text and token usage from;
  *   - every name in `--allowedTools` is a tool this binary actually has;
  *   - every `--effort` level an operator may configure is still known, since a
- *     level this release dropped only warns and runs at the default.
+ *     level this release dropped only warns and runs at the default;
+ *   - `--plugin-dir` is on the argv *and the plugin behind it actually runs*: the
+ *     probe stands up a second loopback server as a throwaway Phoenix, points
+ *     `PHOENIX_OTLP_ENDPOINT` at it, and requires the run to POST a span
+ *     carrying this probe's job id. That is the one link nothing else exercises
+ *     — `claude --help` proves the flag is spelled the same, and the hook unit
+ *     tests exec `hooks/*.sh` directly, so between them a release that stopped
+ *     loading inline manifest hooks (or `--setting-sources user` starting to
+ *     suppress them) would leave every homelab Claude run untraced with nothing
+ *     anywhere saying so.
  *
  * Then each flag value the binary is able to reject is re-run with a nonsense
  * value and must draw an objection. That is what keeps the positive case
@@ -36,6 +45,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } from "./claude.ts";
+import { claudeTracingEnv } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
 
@@ -55,6 +65,8 @@ const PROBE_MODEL = "jumi-claude-flag-probe-model";
  * exit, so a level it no longer knows downgrades the run in silence.
  */
 const PROBE_EFFORT = "high";
+/** Job id the tracing plugin must stamp on the span it POSTs, if it ran at all. */
+const PROBE_JOB_ID = "jumi-claude-flag-probe-job";
 /**
  * Cap a single `claude` run. The endpoint is loopback, so a healthy run is
  * seconds; this is only a hang guard, and the whole table stays well under the
@@ -202,6 +214,66 @@ function startStubAnthropic(state: StubState) {
   });
 }
 
+/** One span POST the vendored hook plugin made, as the fake Phoenix saw it. */
+export interface CapturedSpan {
+  readonly path: string;
+  readonly name: string;
+  readonly kind: string;
+  readonly jobId: string;
+}
+
+/**
+ * Stands in for the in-cluster Phoenix. The plugin POSTs
+ * `<base>/v1/projects/<project>/spans`; everything about that path, and the
+ * attributes on the span, is what `judgeTracingPlugin` reads back.
+ */
+function startStubPhoenix(spans: CapturedSpan[]) {
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname;
+      try {
+        const body = (await req.json()) as {
+          data?: { name?: string; span_kind?: string; attributes?: Record<string, unknown> }[];
+        };
+        for (const span of body.data ?? []) {
+          spans.push({
+            path,
+            name: String(span.name ?? ""),
+            kind: String(span.span_kind ?? ""),
+            jobId: String(span.attributes?.job_id ?? ""),
+          });
+        }
+      } catch {
+        spans.push({ path, name: "<unparseable body>", kind: "", jobId: "" });
+      }
+      return Response.json({ total_received: 1, total_queued: 1 }, { status: 202 });
+    },
+  });
+}
+
+/**
+ * The plugin loaded and traced this run. Deliberately not fail-open: in
+ * production a silent non-load is the whole failure this probe exists to catch,
+ * and here the destination is a server in this process, so "no span" can only
+ * mean the hooks never ran.
+ */
+export function judgeTracingPlugin(project: string, spans: readonly CapturedSpan[]): CaseResult {
+  const name = "--plugin-dir actually loads: the run POSTs a span to Phoenix";
+  const wantPath = `/v1/projects/${project}/spans`;
+  const mine = spans.filter((span) => span.path === wantPath && span.jobId === PROBE_JOB_ID);
+  if (mine.length === 0) {
+    const seen = spans.map((span) => `${span.path} ${span.name} job_id=${span.jobId || "<none>"}`).join("; ");
+    return {
+      name,
+      ok: false,
+      observed: `no span at ${wantPath} with job_id=${PROBE_JOB_ID}; saw ${seen || "nothing"}`,
+    };
+  }
+  return { name, ok: true, observed: `${mine.length} span(s) at ${wantPath}: ${mine.map((s) => s.name).join(", ")}` };
+}
+
 export interface RunResult {
   readonly code: number;
   readonly stdout: string;
@@ -214,7 +286,13 @@ export interface RunResult {
  * throwaway `HOME`, so the probe can neither bill the operator nor read the
  * image's own Claude state.
  */
-async function runClaudeArgv(argv: readonly string[], origin: string, home: string, workdir: string) {
+async function runClaudeArgv(
+  argv: readonly string[],
+  origin: string,
+  home: string,
+  workdir: string,
+  extraEnv: Record<string, string> = {}
+) {
   const proc = Bun.spawn([...argv], {
     cwd: workdir,
     stdin: new Response(`Reply with exactly ${PROBE_MARKER} and nothing else.`),
@@ -231,6 +309,7 @@ async function runClaudeArgv(argv: readonly string[], origin: string, home: stri
       DISABLE_ERROR_REPORTING: "1",
       DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      ...extraEnv,
     },
   });
   let timedOut = false;
@@ -381,15 +460,40 @@ async function main(): Promise<number> {
   const state: StubState = { paths: [] };
   const server = startStubAnthropic(state);
   const origin = `http://127.0.0.1:${server.port}`;
+  const spans: CapturedSpan[] = [];
+  const phoenix = startStubPhoenix(spans);
   const home = await mkdtemp(join(tmpdir(), "jumi-claude-probe-home-"));
   const workdir = await mkdtemp(join(tmpdir(), "jumi-claude-probe-work-"));
   const results: CaseResult[] = [];
 
   try {
+    // Homelab always has this env (that is the whole point of tracing). Image
+    // jobs do not, so without it `claudeArgv()` omits `--plugin-dir` and the
+    // probe never sees the one new production flag. Pointing it at the stub
+    // above — never at whatever an operator exported — is also what lets the
+    // production run below be judged on a span that actually arrived.
+    process.env.PHOENIX_OTLP_ENDPOINT = `http://127.0.0.1:${phoenix.port}`;
     const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir });
     const pinned = pinnedFlagValues(argv);
+    // The same env `runClaude` merges into a production spawn, so the plugin is
+    // configured here exactly as it is in the homelab.
+    const tracing = claudeTracingEnv({
+      kind: "review",
+      owner: "kirmanak",
+      repo: "jumi",
+      sha: "0".repeat(40),
+      jobId: PROBE_JOB_ID,
+    });
     console.log(`argv under test: ${argv.join(" ")}`);
     console.log(`pinned values: ${pinned.map(({ flag, value }) => `${flag}=${value}`).join(" ")}`);
+    const traced = argv.includes("--plugin-dir");
+    if (!traced) {
+      results.push({
+        name: "production argv still carries --plugin-dir",
+        ok: false,
+        observed: "missing --plugin-dir (plugin path missing from the image, or tracing did not enable)",
+      });
+    }
     if (pinned.length !== CLAUDE_REJECTABLE_FLAGS.length) {
       results.push({
         name: "production argv still carries every rejectable flag",
@@ -398,7 +502,11 @@ async function main(): Promise<number> {
       });
     }
 
-    results.push(...judgeProductionRun(argv, await runClaudeArgv(argv, origin, home, workdir)));
+    results.push(...judgeProductionRun(argv, await runClaudeArgv(argv, origin, home, workdir, tracing)));
+    // Only the production run is traced; the effort and negative-control runs
+    // below keep the plain env, so the spans collected are unambiguously that
+    // one run's.
+    if (traced) results.push(judgeTracingPlugin(tracing.ARIZE_PROJECT_NAME ?? "", spans));
 
     // Every other level an operator may have put in `JUMI_RUNNERS_FILE`.
     for (const level of CLAUDE_EFFORT_LEVELS.filter((candidate) => candidate !== PROBE_EFFORT)) {
@@ -414,6 +522,7 @@ async function main(): Promise<number> {
     }
   } finally {
     server.stop(true);
+    phoenix.stop(true);
     await rm(home, { recursive: true, force: true });
     await rm(workdir, { recursive: true, force: true });
   }
