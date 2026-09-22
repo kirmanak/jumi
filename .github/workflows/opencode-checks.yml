@@ -160,7 +160,10 @@ jobs:
         # argv Jumi spawns: a rejected flag is a generic non-zero exit on every
         # Claude run. The probe runs the real argv against a loopback stub
         # endpoint (nothing billed, no token in the child env) and re-runs each
-        # pinned value as nonsense so the pass cannot be vacuous.
+        # pinned value as nonsense so the pass cannot be vacuous. It also gives
+        # that run a throwaway loopback Phoenix and requires a span to arrive,
+        # which is the only check anywhere that the plugin `--plugin-dir` names
+        # is actually loaded and run — `--help` only proves the flag exists.
         run: |
           set -euo pipefail
           docker run --rm jumi-reviewer:ci \
@@ -212,7 +215,8 @@ jobs:
 
       - name: Verify claude production flags against the installed binary
         # The worker is the image that actually spawns Claude runners, so the
-        # argv it ships has to parse here too. Same probe as the reviewer job.
+        # argv it ships has to parse here too, and its `AGENT_INSTANCE` puts the
+        # probe's span under `jumi-worker`. Same probe as the reviewer job.
         run: |
           set -euo pipefail
           docker run --rm jumi-worker:ci \

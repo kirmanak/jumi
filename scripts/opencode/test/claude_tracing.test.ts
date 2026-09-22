@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { appendFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,6 +16,16 @@ import { PUBLIC_PHOENIX_HOST } from "../src/phoenix.ts";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const pluginDir = join(repoRoot, "claude-plugins/claude-code-tracing");
 const hooks = join(pluginDir, "hooks");
+
+// The hook cases below are the only tests in the suite that fork real
+// processes — one hook run is a bash script that spawns jq several times and
+// python3 once — which makes them its slowest, and their cost is process-spawn
+// latency rather than anything this repo controls. Bun's 5s default left barely
+// a 1.5x margin on a fast machine, so on a shared CI runner it reports as a
+// tracing failure rather than a slow box. File-scoped (proven: a sibling file
+// still times out at 5s), generous enough to absorb a slow runner, short enough
+// that a hook which genuinely hangs still fails the job.
+setDefaultTimeout(30_000);
 
 const originalEndpoint = process.env.PHOENIX_OTLP_ENDPOINT;
 const originalAgent = process.env.AGENT_INSTANCE;
