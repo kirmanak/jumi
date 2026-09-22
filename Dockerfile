@@ -6,7 +6,7 @@ FROM public.ecr.aws/docker/library/debian:bookworm-slim@sha256:88200866dfff7ea7f
 
 ARG BUN_VERSION
 ARG OPENCODE_VERSION=1.15.5
-ARG CLAUDE_VERSION=2.1.274
+ARG CLAUDE_VERSION=2.1.280
 # Official Antigravity CLI (glibc build; the runtime is Debian, not Alpine).
 # Pinned from the installer manifests at
 # https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_{amd64,arm64}.json
