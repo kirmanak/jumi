@@ -169,6 +169,17 @@ jobs:
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
+      - name: Verify the xAI child credential against the opencode binary
+        # Jumi hands the child an xAI credential with no refresh token so a
+        # killed review cannot rotate the grant and take the new token with it.
+        # Only the real binary can say whether it sends that shape as a bearer
+        # instead of refreshing it, so an OPENCODE_VERSION bump that changes the
+        # provider loader fails here rather than in production.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'
+
   worker-image-build:
     runs-on: ubuntu-latest
     needs: checks
@@ -221,3 +232,10 @@ jobs:
           set -euo pipefail
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
+
+      - name: Verify the xAI child credential against the opencode binary
+        # The worker holds the same grant and runs the 4h jobs. Same probe.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-worker:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'

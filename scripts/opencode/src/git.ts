@@ -32,6 +32,7 @@ import {
   type QuotaHit,
 } from "./quota.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
+import { childAuthFile, ensureXaiCredentialForJob, isXaiModel, type XaiChildCredential } from "./xai_auth.ts";
 
 const OPENCODE_STDERR_MAX_BYTES = 64_000;
 
@@ -153,19 +154,52 @@ function openCodeLogDir(tempRoot: string): string {
  * dir so `XDG_DATA_HOME` isolation does not break provider auth. The file
  * holds well-known/Zen credentials seeded at server startup; `OPENCODE_API_KEY`
  * still flows via env. Never throws; missing source is fine (env-only auth).
+ *
+ * The copy is never the parent's xAI credential: `childAuthFile` swaps in one
+ * that cannot refresh, so a killed child cannot rotate the grant and take the
+ * new refresh token with it. Rewritten on every run rather than left in place,
+ * because a hop reuses this temp dir and must see the token this run refreshed.
  */
-async function seedIsolatedAuth(home: string, tempRoot: string): Promise<void> {
+async function seedIsolatedAuth(home: string, tempRoot: string, child?: XaiChildCredential): Promise<void> {
   const src = join(home, ".local", "share", "opencode", "auth.json");
   const dst = join(openCodeXdgDataHome(tempRoot), "opencode", "auth.json");
   try {
     if (!existsSync(src)) return;
-    if (existsSync(dst)) return;
-    const raw = await readFile(src);
+    const auth = JSON.parse(await readFile(src, "utf8")) as Record<string, unknown>;
     await mkdir(join(openCodeXdgDataHome(tempRoot), "opencode"), { recursive: true });
-    await writeFile(dst, raw, { mode: 0o600 });
+    await writeFile(dst, `${JSON.stringify(childAuthFile(auth, child), null, 2)}\n`, { mode: 0o600 });
     await chmod(dst, 0o600).catch(() => undefined);
   } catch {
     return;
+  }
+}
+
+/**
+ * Own the xAI refresh grant from the long-lived process: refresh on the durable
+ * auth file when the access token would not last this job, and hand the child a
+ * credential that cannot refresh. Fails the job closed rather than starting a
+ * Grok review that will 401 with no way to recover.
+ *
+ * A spawn on another provider still gets the refresh-less child credential, but
+ * a dead xAI grant must not fail it: only the model that needs Grok fails here.
+ */
+async function resolveXaiChildCredential(
+  opts: OpenCodeRunOptions,
+  home: string,
+  log: (message: string) => void
+): Promise<XaiChildCredential | undefined> {
+  if (!isXaiModel(opts.model)) return undefined;
+  try {
+    const resolved = await ensureXaiCredentialForJob({ home, timeoutMs: opts.timeoutMs, logger: log });
+    return resolved?.child;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`xAI credential unusable for a ${opts.model} run: ${message}`);
+    // Same shape as an auth death the child reports: the public message is the
+    // hostname, the reason stays in the log.
+    const authMessage = providerAuthDeathMessage();
+    observeEngineRun(opts, { status: "exit", infra: false, auth: true, message: authMessage });
+    throw new EngineFailedError(authMessage, false, { auth: true });
   }
 }
 
@@ -334,7 +368,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   const logDir = openCodeLogDir(tempRoot);
   // Isolate the OpenCode log dir (XDG_DATA_HOME) so the live quota poll sees
   // only this child. Seed auth so isolation does not break provider auth.
-  await seedIsolatedAuth(home, tempRoot);
+  await seedIsolatedAuth(home, tempRoot, await resolveXaiChildCredential(opts, home, log));
   const promptBytes = byteLength(prompt);
   const dbBefore = await pathSizeBytes(dbPath);
   const parentBefore = await sampleMemory(process.pid);

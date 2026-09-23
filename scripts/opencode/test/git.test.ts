@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { withModelHop } from "../src/fallback.ts";
@@ -17,18 +17,30 @@ import {
 } from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
+import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
 const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
 const originalApiKey = process.env.OPENCODE_API_KEY;
+const originalHome = process.env.HOME;
+// `runOpenCode` owns the provider auth file under HOME before it spawns, so
+// every test gets a throwaway one: a real developer or CI home must never be
+// read, refreshed, or rewritten by the suite.
+let isolatedHome = "";
 
-beforeEach(() => {
+beforeEach(async () => {
   delete process.env.PHOENIX_OTLP_ENDPOINT;
+  isolatedHome = await mkdtemp(join(tmpdir(), "jumi-opencode-home-"));
+  process.env.HOME = isolatedHome;
 });
 
-afterEach(() => {
+afterEach(async () => {
   resetControlMetricsForTests();
+  resetXaiAuthStateForTests();
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (isolatedHome) await rm(isolatedHome, { recursive: true, force: true });
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
@@ -67,12 +79,12 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
           model: "openai/gpt-5.5",
           workdir,
           configPath: "/config.json",
-          home: "/data",
+          home: isolatedHome,
           sanitizeEnv: true,
         });
 
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain("HOME=/data");
+        expect(result.stdout).toContain(`HOME=${isolatedHome}`);
         expect(result.stdout).toContain("MODEL=openai/gpt-5.5");
         expect(result.stdout).toContain("CONFIG=/config.json");
         expect(result.stdout).toContain("DISABLE=1");
@@ -247,6 +259,102 @@ printf 'abcdefghijklmnopqrstuvwxyz'
         expect(result.stdout).toBe("abcde\n\n[opencode output truncated at 5 bytes]");
       }
     );
+  });
+
+  test("never seeds the child with the xAI refresh token", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-xai-child-"));
+    const parentAuth = join(home, ".local", "share", "opencode", "auth.json");
+    await mkdir(dirname(parentAuth), { recursive: true });
+    await writeFile(
+      parentAuth,
+      JSON.stringify({
+        "https://kirmanak.stream": { type: "wellknown", key: "K", token: "T" },
+        xai: { type: "oauth", access: "parent-access", refresh: "parent-refresh", expires: Date.now() + 6 * 3_600_000 },
+      })
+    );
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+cat "$XDG_DATA_HOME/opencode/auth.json"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({
+            prompt: "prompt",
+            model: "xai/grok-4.6",
+            workdir,
+            home,
+            sanitizeEnv: true,
+          });
+
+          expect(result.status).toBe("ok");
+          // The child can call the model and cannot rotate the grant.
+          expect(result.stdout).toContain("parent-access");
+          expect(result.stdout).not.toContain("parent-refresh");
+          expect(JSON.parse(result.stdout ?? "{}").xai).toEqual({ type: "api", key: "parent-access" });
+          // Other providers are copied through untouched.
+          expect(JSON.parse(result.stdout ?? "{}")["https://kirmanak.stream"]).toEqual({
+            type: "wellknown",
+            key: "K",
+            token: "T",
+          });
+          // The parent's own file still holds the refresh token: removing it
+          // while the child runs would be worse than today.
+          expect(JSON.parse(await readFile(parentAuth, "utf8")).xai.refresh).toBe("parent-refresh");
+        }
+      );
+    } finally {
+      resetXaiAuthStateForTests();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("fails a Grok run closed when the xAI grant cannot cover it, and lets other models run", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-xai-dead-"));
+    const parentAuth = join(home, ".local", "share", "opencode", "auth.json");
+    await mkdir(dirname(parentAuth), { recursive: true });
+    // Expired, and no refresh token to present: nothing can rescue this run.
+    await writeFile(
+      parentAuth,
+      JSON.stringify({ xai: { type: "oauth", access: "stale-access", expires: Date.now() - 3_600_000 } })
+    );
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+cat "$XDG_DATA_HOME/opencode/auth.json"
+`,
+        async (_binDir, workdir) => {
+          const logs: string[] = [];
+          const run = runOpenCode({
+            prompt: "prompt",
+            model: "xai/grok-4.6",
+            workdir,
+            home,
+            sanitizeEnv: true,
+            logger: (message) => logs.push(message),
+          });
+
+          // Public message is the hostname; the reason stays in the log.
+          await expect(run).rejects.toMatchObject({ auth: true, message: providerAuthDeathMessage() });
+          expect(logs.some((line) => line.includes("no refresh token"))).toBe(true);
+          expect(renderRunMetrics()).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
+
+          // A spawn on another provider is not blocked by a dead xAI grant,
+          // and still cannot rotate it.
+          const other = await runOpenCode({
+            prompt: "prompt",
+            model: "openai/gpt-5.5",
+            workdir,
+            home,
+            sanitizeEnv: true,
+          });
+          expect(other.status).toBe("ok");
+          expect(JSON.parse(other.stdout ?? "{}").xai).toEqual({ type: "api", key: "stale-access" });
+        }
+      );
+    } finally {
+      resetXaiAuthStateForTests();
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   test("surfaces non-zero exits with stderr", async () => {

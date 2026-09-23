@@ -144,7 +144,17 @@ verify_reviewer_runtime() {
     echo "claude production flags rejected by the installed claude binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, claude flags, agy, gitops-apply-review skill, opencode debug config, and webfetch denies"
+  # The child gets an xAI credential that cannot refresh, so a killed review
+  # cannot burn the refresh grant. That only holds while OpenCode sends that
+  # shape as a bearer instead of refreshing it, which only the real binary can
+  # answer.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "xAI child credential is not usable by the installed opencode binary" >&2
+    exit 1
+  fi
+  echo "Verified python3, helm, claude flags, agy, gitops-apply-review skill, opencode debug config, webfetch denies, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
