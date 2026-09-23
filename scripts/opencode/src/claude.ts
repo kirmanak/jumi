@@ -374,7 +374,8 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
   } finally {
-    await rm(tmpDir, { recursive: true, force: true });
+    // Best-effort: a temp dir that will not go must not replace the engine result (#129).
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

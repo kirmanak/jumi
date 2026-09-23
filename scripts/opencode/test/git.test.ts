@@ -99,6 +99,24 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
     );
   });
 
+  test("returns the engine result when the prompt temp dir cannot be deleted", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+chmod 500 "$TMPDIR"
+echo done
+`,
+      async (_binDir, workdir) => {
+        try {
+          const result = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          expect(result.status).toBe("ok");
+          expect(result.stdout).toContain("done");
+        } finally {
+          await chmod(join(workdir, ".jumi-tmp"), 0o700);
+        }
+      }
+    );
+  });
+
   test("passes --variant when variant is set", async () => {
     await withFakeOpenCode(
       `#!/bin/sh

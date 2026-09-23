@@ -181,7 +181,8 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   let movedAgents: string[] = [];
 
   if (opts.abortSignal?.aborted) {
-    await rm(tmpDir, { recursive: true, force: true });
+    // Best-effort: a temp dir that will not go must not replace the engine result (#129).
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
     throw cancelled();
   }
 
@@ -348,7 +349,8 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     throw err;
   } finally {
     await restoreAgyProjectAgents(opts.workdir, stashRoot, movedAgents);
-    await rm(tmpDir, { recursive: true, force: true });
+    // Best-effort: a temp dir that will not go must not replace the engine result (#129).
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
