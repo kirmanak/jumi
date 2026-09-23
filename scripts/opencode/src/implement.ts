@@ -439,10 +439,14 @@ export async function implementIssue(
         await loop.runConfiguredGit(["update-ref", "-d", ref], { cwd: barePath, env: loop.env });
       };
 
-      const deletePushedIssueBranch = async () => {
+      // The branch is always deleted so no later attach resumes from yielded work.
+      // A failed tree removal is thrown last, and only when `failClosed` is set.
+      const deletePushedIssueBranch = async (failClosed = false) => {
         if (branch === opts.job.defaultBranch) return;
-        // A half-deleted tree must fail this attempt, not host the next spawn.
-        await loop.removeWorktree();
+        const removeError: unknown = await loop.removeWorktree().then(
+          () => undefined,
+          (err: unknown) => err
+        );
         await deleteRefIfPresent(`refs/heads/${branch}`);
         try {
           await loop.runConfiguredGit(["push", "origin", "--delete", branch], { cwd: barePath, env: loop.env });
@@ -458,6 +462,7 @@ export async function implementIssue(
         if (await loop.refExists(`refs/remotes/origin/${branch}`)) {
           throw new Error(`failed to delete origin/${branch}`);
         }
+        if (failClosed && removeError) throw removeError;
       };
 
       const readBlockedBy = async () => {
@@ -501,7 +506,8 @@ export async function implementIssue(
       let snapshot = snapshotFromJob(opts.job);
 
       const resetAfterRejectedYield = async () => {
-        await deletePushedIssueBranch();
+        // A half-deleted tree must fail this attempt, not host the next spawn.
+        await deletePushedIssueBranch(true);
         await addWorktreeFromDefault();
         await writeTaskFiles(liveJob);
       };
