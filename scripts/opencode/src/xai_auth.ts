@@ -128,7 +128,6 @@ export function resetXaiAuthStateForTests(): void {
 }
 
 function grantKey(refresh: string): string {
-  // codeql[js/insufficient-password-hash] fingerprint of a high-entropy refresh token, not a stored password
   return createHash("sha256").update(refresh).digest("hex");
 }
 
@@ -182,7 +181,7 @@ export function childXaiCredential(entry: XaiOAuthCredential, shape: XaiChildAut
   return { type: "api", key: entry.access };
 }
 
-function asOAuthCredential(value: unknown): XaiOAuthCredential | undefined {
+function asXaiGrantEntry(value: unknown): XaiOAuthCredential | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const entry = value as { type?: unknown; access?: unknown; refresh?: unknown; expires?: unknown };
   if (entry.type !== "oauth" || typeof entry.access !== "string" || !entry.access) return undefined;
@@ -230,7 +229,7 @@ export async function readAuthFile(path: string): Promise<AuthFile> {
 }
 
 export function readXaiCredential(auth: AuthFile): XaiOAuthCredential | undefined {
-  return asOAuthCredential(auth[XAI_PROVIDER_ID]);
+  return asXaiGrantEntry(auth[XAI_PROVIDER_ID]);
 }
 
 function tmpSiblingPath(path: string): string {
