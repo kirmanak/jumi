@@ -592,6 +592,75 @@ describe("bare cache and attach", () => {
     });
   });
 
+  test("attach clears a .git file whose gitdir is gone instead of reusing it", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "show-ref") return "";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      const dangling = async () => {
+        await mkdir(join(claimed.worktree, ".jumi-tmp"), { recursive: true });
+        await writeFile(join(claimed.worktree, ".git"), `gitdir: ${join(workdir, "bare.git", "worktrees", "12")}\n`);
+      };
+      await dangling();
+      await attachIssueWorktree(loop, { branch: "jumi/issue-12-fix-the-thing", defaultBranch: "main", log: () => {} });
+      await expect(access(join(claimed.worktree, ".jumi-tmp"))).rejects.toMatchObject({ code: "ENOENT" });
+      await dangling();
+      const attached = await attachPrWorktree(loop, {
+        branch: "jumi/issue-12-fix-the-thing",
+        defaultBranch: "main",
+        log: () => {},
+      });
+      if (isClaimedEarlyResult(attached)) throw new Error("expected attach");
+      await expect(access(join(claimed.worktree, ".jumi-tmp"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(gitCalls.filter((args) => args[0] === "worktree" && args[1] === "add")).toHaveLength(2);
+      expect(gitCalls.some((args) => args[0] === "reset")).toBe(false);
+    });
+  });
+
+  test("attach reuses a .git file whose gitdir still exists", async () => {
+    await withDirs(async (home, workdir) => {
+      const gitCalls: string[][] = [];
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "show-ref") return "";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const adminDir = join(workdir, "bare.git", "worktrees", "12");
+      await mkdir(adminDir, { recursive: true });
+      await mkdir(claimed.worktree, { recursive: true });
+      await writeFile(join(claimed.worktree, ".git"), `gitdir: ${adminDir}\n`);
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      await attachIssueWorktree(loop, { branch: "jumi/issue-12-fix-the-thing", defaultBranch: "main", log: () => {} });
+      expect(gitCalls.some((args) => args[0] === "worktree")).toBe(false);
+    });
+  });
+
   test("attach never runs worktree add into a leftover that cannot be removed", async () => {
     await withDirs(async (home, workdir) => {
       const gitCalls: string[][] = [];
