@@ -7,7 +7,9 @@ import {
   createReviewWorkspace,
   GITHUB_GIT_USERNAME,
   type GitRunner,
+  gitConfigArgs,
   redactGitSecrets,
+  runGit,
   validateCloneUrl,
   workerOpenCodeChildEnv,
 } from "../src/workspace.ts";
@@ -70,6 +72,28 @@ describe("redactGitSecrets", () => {
       "https://x-access-token:***@github.com/kirmanak/jumi.git"
     );
     expect(redactGitSecrets("token=ghs_secret in stderr", ["ghs_secret"])).toBe("token=*** in stderr");
+  });
+
+  test("redacts the credential-helper command, not only the token", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-redact-"));
+    try {
+      // GIT_DIR pins git to a repository that does not exist, so the command fails wherever tmpdir lives.
+      const failure = await runGit([...gitConfigArgs(), "fetch", "origin"], {
+        cwd: dir,
+        env: { PATH: process.env.PATH, GIT_DIR: join(dir, "missing.git"), GIT_AUTH_TOKEN: "ghs_secret" },
+      }).then(
+        () => "",
+        (err: Error) => err.message
+      );
+      expect(failure).toContain("credential.helper=***");
+      expect(failure).not.toContain("GIT_AUTH_TOKEN");
+      expect(failure).not.toContain("!f()");
+      const comment = redactGitSecrets(`Jumi failed: git -c credential.helper=${gitConfigArgs()[3]} fetch`);
+      expect(comment).not.toContain("GIT_AUTH_TOKEN");
+      expect(comment).not.toContain("printf");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

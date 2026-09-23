@@ -1109,6 +1109,50 @@ describe("implementIssue", () => {
     });
   });
 
+  test("opens the PR when the child pushed and .jumi-tmp cannot be deleted", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "?? .jumi-tmp/\n";
+        if (gitArgs[0] === "rev-list") return "1";
+        return "";
+      };
+      try {
+        const result = await implementIssue({
+          api,
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async () => {
+            await mkdir(join(worktree, ".jumi-tmp"), { recursive: true });
+            await writeFile(join(worktree, ".jumi-tmp", "opencode-session.db"), "db");
+            await chmod(worktree, 0o555);
+            return { status: "ok" };
+          },
+          logger: () => undefined,
+        });
+        expect(result).toMatchObject({ status: "pr" });
+        expect(api.pulls).toHaveLength(1);
+        expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
+        expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
+        expect(api.comments.at(-1)).toContain("Opened https://gitea.kirmanak.stream/kirmanak/demo/pulls/3");
+      } finally {
+        await chmod(worktree, 0o755).catch(() => undefined);
+      }
+    });
+  });
+
   test("does not treat .jumi-tmp leftovers as a dirty tree", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");

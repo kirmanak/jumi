@@ -1,4 +1,4 @@
-import { access, mkdir, rm } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
@@ -185,6 +185,37 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+/** Per-run engine scratch under the worktree; never committed, and a failed delete never fails the run. */
+export const ENGINE_TEMP_DIR = ".jumi-tmp";
+
+/** Stage everything except the engine temp dir, which a failed delete can leave behind. */
+export const STAGE_ALL_ARGS: readonly string[] = ["add", "-A", "--", ".", `:(exclude)${ENGINE_TEMP_DIR}`];
+
+async function makeTreeWritable(path: string): Promise<void> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isDirectory()) return;
+  await chmod(path, 0o700).catch(() => undefined);
+  for (const entry of await readdir(path).catch(() => [])) {
+    await makeTreeWritable(join(path, entry));
+  }
+}
+
+/**
+ * Delete `path` or throw the first error. A read-only subtree (a tool's module
+ * cache, say) is made writable once and retried; nothing outside `path` is touched.
+ */
+export async function removeTree(path: string): Promise<void> {
+  try {
+    await rm(path, { recursive: true, force: true });
+  } catch (first) {
+    await makeTreeWritable(path);
+    await rm(path, { recursive: true, force: true }).catch(() => {
+      throw first;
+    });
+  }
+  if (await pathExists(path)) throw new Error(`failed to remove ${path}`);
+}
+
 export interface OpenClaimedLoopOpts {
   giteaUrl: string;
   giteaToken: string;
@@ -204,6 +235,8 @@ export interface ClaimedLoop extends ClaimedWorktree {
   forgetSerialized: () => Promise<void>;
   refreshGitAuth: () => Promise<void>;
   runConfiguredGit: GitRunner;
+  /** Throws when the worktree directory is still there afterwards. */
+  removeWorktree: () => Promise<void>;
   detachWorktree: () => Promise<void>;
   refExists: (ref: string) => Promise<boolean>;
   engineOnPid: (onPid?: (pid: number) => void | Promise<void>) => (pid: number) => Promise<void>;
@@ -218,7 +251,7 @@ export function openClaimedLoop(claimed: ClaimedWorktree, opts: OpenClaimedLoopO
     auth = await resolveGitAuth(opts);
     env = gitEnv(auth);
   };
-  const detachWorktree = async () => {
+  const removeWorktree = async () => {
     try {
       await runConfiguredGit(["worktree", "remove", "--force", claimed.worktree], {
         cwd: claimed.barePath,
@@ -227,7 +260,11 @@ export function openClaimedLoop(claimed: ClaimedWorktree, opts: OpenClaimedLoopO
     } catch {
       // Already gone or never added.
     }
-    await rm(claimed.worktree, { recursive: true, force: true }).catch(() => undefined);
+    await removeTree(claimed.worktree);
+  };
+  // Best effort on the way out: the next attach refuses to add into whatever is left.
+  const detachWorktree = async () => {
+    await removeWorktree().catch(() => undefined);
   };
   const refExists = async (ref: string) => {
     try {
@@ -338,6 +375,7 @@ export function openClaimedLoop(claimed: ClaimedWorktree, opts: OpenClaimedLoopO
     forgetSerialized,
     refreshGitAuth,
     runConfiguredGit,
+    removeWorktree,
     detachWorktree,
     refExists,
     engineOnPid,
@@ -375,11 +413,28 @@ export async function ensureBareCache(
   throwIfAborted(opts.abortSignal);
 }
 
+/**
+ * A directory without `.git` is what a failed detach leaves; `worktree add` into
+ * it fails with "already exists". Clear it first, or fail before adding.
+ */
+export async function clearLeftoverWorktree(loop: ClaimedLoop): Promise<void> {
+  if (!(await pathExists(loop.worktree))) return;
+  try {
+    await removeTree(loop.worktree);
+  } catch (err) {
+    throw new Error(
+      `leftover worktree ${loop.worktree} could not be removed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  await loop.runConfiguredGit(["worktree", "prune"], { cwd: loop.barePath, env: loop.env }).catch(() => undefined);
+}
+
 export async function attachIssueWorktree(
   loop: ClaimedLoop,
   opts: { branch: string; defaultBranch: string; abortSignal?: AbortSignal; log: (message: string) => void }
 ): Promise<string> {
   if (!(await pathExists(join(loop.worktree, ".git")))) {
+    await clearLeftoverWorktree(loop);
     await mkdir(dirname(loop.worktree), { recursive: true });
     if (await loop.refExists(`refs/heads/${opts.branch}`)) {
       opts.log(`Adding worktree ${loop.worktree} from existing ${opts.branch}`);
@@ -426,6 +481,7 @@ export async function attachPrWorktree(
     return skipClaimedWork(loop, `missing branch ${opts.branch}`);
   }
   if (!(await pathExists(join(loop.worktree, ".git")))) {
+    await clearLeftoverWorktree(loop);
     await mkdir(dirname(loop.worktree), { recursive: true });
     opts.log(`Adding worktree ${loop.worktree} from origin/${opts.branch}`);
     await loop.runConfiguredGit(["worktree", "add", "-B", opts.branch, loop.worktree, `origin/${opts.branch}`], {
@@ -449,11 +505,23 @@ export async function stripSentinels(worktree: string, files: readonly string[])
   for (const file of files) {
     await rm(join(worktree, file), { recursive: true, force: true }).catch(() => undefined);
   }
-  await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
+  // The child may already have pushed; a temp dir that will not go must not
+  // cost that work. Status and staging both ignore what is left.
+  await removeTree(join(worktree, ENGINE_TEMP_DIR)).catch(() => undefined);
+}
+
+function isEngineTempStatusLine(line: string): boolean {
+  const path = line.slice(3).replace(/^"/, "");
+  return path === ENGINE_TEMP_DIR || path.startsWith(`${ENGINE_TEMP_DIR}/`);
 }
 
 export async function worktreePorcelain(loop: ClaimedLoop): Promise<string> {
-  return (await loop.runConfiguredGit(["status", "--porcelain"], { cwd: loop.worktree, env: loop.env })).trim();
+  const status = await loop.runConfiguredGit(["status", "--porcelain"], { cwd: loop.worktree, env: loop.env });
+  return status
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !isEngineTempStatusLine(line))
+    .join("\n")
+    .trim();
 }
 
 export async function commitsAheadOf(loop: ClaimedLoop, ref: string): Promise<number> {
@@ -476,7 +544,7 @@ export async function commitIfDirty(loop: ClaimedLoop, porcelain: string, messag
     GIT_COMMITTER_NAME: loop.env.GIT_COMMITTER_NAME,
     GIT_COMMITTER_EMAIL: loop.env.GIT_COMMITTER_EMAIL,
   };
-  await loop.runConfiguredGit(["add", "-A"], { cwd: loop.worktree, env: commitEnv });
+  await loop.runConfiguredGit([...STAGE_ALL_ARGS], { cwd: loop.worktree, env: commitEnv });
   await loop.runConfiguredGit(["commit", "-m", message], {
     cwd: loop.worktree,
     env: commitEnv,
@@ -569,7 +637,8 @@ export async function runClaimedLoop<T>(
         await loop.detachWorktree();
         throw next;
       }
-      throw next;
+      // A failing cleanup must not replace the error that started it.
+      throw err;
     }
     throw err;
   } finally {

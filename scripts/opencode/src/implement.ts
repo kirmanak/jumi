@@ -5,6 +5,7 @@ import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import {
   attachIssueWorktree,
   beginClaimedWorktree,
+  clearLeftoverWorktree,
   commitIfDirty,
   commitsAheadOf,
   ensureBareCache,
@@ -424,6 +425,7 @@ export async function implementIssue(
       };
 
       const addWorktreeFromDefault = async () => {
+        await clearLeftoverWorktree(loop);
         await mkdir(dirname(worktree), { recursive: true });
         await loop.runConfiguredGit(["worktree", "add", "-B", branch, worktree, `origin/${opts.job.defaultBranch}`], {
           cwd: barePath,
@@ -439,7 +441,8 @@ export async function implementIssue(
 
       const deletePushedIssueBranch = async () => {
         if (branch === opts.job.defaultBranch) return;
-        await loop.detachWorktree();
+        // A half-deleted tree must fail this attempt, not host the next spawn.
+        await loop.removeWorktree();
         await deleteRefIfPresent(`refs/heads/${branch}`);
         try {
           await loop.runConfiguredGit(["push", "origin", "--delete", branch], { cwd: barePath, env: loop.env });
