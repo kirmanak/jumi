@@ -16,6 +16,7 @@ import {
   openClaimedLoop,
   pushClaimedBranch,
   recheckAssignedAndOpen,
+  removeTree,
   runClaimedLoop,
   stripSentinels,
   throwIfAborted,
@@ -684,7 +685,7 @@ describe("bare cache and attach", () => {
       const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
       try {
         await loop.detachWorktree();
-        await expect(loop.removeWorktree()).rejects.toThrow(/EACCES|failed to remove/);
+        await expect(removeTree(claimed.worktree)).rejects.toThrow(/EACCES|failed to remove/);
         await expect(
           attachIssueWorktree(loop, { branch: "jumi/issue-12-fix-the-thing", defaultBranch: "main", log: () => {} })
         ).rejects.toThrow(/leftover worktree .* could not be removed/);

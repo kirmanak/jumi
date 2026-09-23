@@ -258,8 +258,6 @@ export interface ClaimedLoop extends ClaimedWorktree {
   forgetSerialized: () => Promise<void>;
   refreshGitAuth: () => Promise<void>;
   runConfiguredGit: GitRunner;
-  /** Throws when the worktree directory is still there afterwards. */
-  removeWorktree: () => Promise<void>;
   detachWorktree: () => Promise<void>;
   refExists: (ref: string) => Promise<boolean>;
   engineOnPid: (onPid?: (pid: number) => void | Promise<void>) => (pid: number) => Promise<void>;
@@ -274,7 +272,8 @@ export function openClaimedLoop(claimed: ClaimedWorktree, opts: OpenClaimedLoopO
     auth = await resolveGitAuth(opts);
     env = gitEnv(auth);
   };
-  const removeWorktree = async () => {
+  // Best effort on the way out: the next attach refuses to add into whatever is left.
+  const detachWorktree = async () => {
     try {
       await runConfiguredGit(["worktree", "remove", "--force", claimed.worktree], {
         cwd: claimed.barePath,
@@ -283,11 +282,7 @@ export function openClaimedLoop(claimed: ClaimedWorktree, opts: OpenClaimedLoopO
     } catch {
       // Already gone or never added.
     }
-    await removeTree(claimed.worktree);
-  };
-  // Best effort on the way out: the next attach refuses to add into whatever is left.
-  const detachWorktree = async () => {
-    await removeWorktree().catch(() => undefined);
+    await removeTree(claimed.worktree).catch(() => undefined);
   };
   const refExists = async (ref: string) => {
     try {
@@ -398,7 +393,6 @@ export function openClaimedLoop(claimed: ClaimedWorktree, opts: OpenClaimedLoopO
     forgetSerialized,
     refreshGitAuth,
     runConfiguredGit,
-    removeWorktree,
     detachWorktree,
     refExists,
     engineOnPid,
