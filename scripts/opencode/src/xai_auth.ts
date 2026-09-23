@@ -287,6 +287,27 @@ export async function writeDurableAuth(path: string, auth: AuthFile): Promise<vo
 }
 
 /**
+ * Prove `dirname(path)` takes a sibling the way {@link writeDurableAuth} makes
+ * one: open, write, fsync, close, remove. Run before a POST so a directory that
+ * cannot take the rotated pair fails closed while the grant on the file is live.
+ * Not `access(W_OK)`: that passes on a full filesystem.
+ */
+async function probeSiblingWrite(path: string): Promise<void> {
+  const tmp = tmpSiblingPath(path);
+  try {
+    const handle = await open(tmp, "w", 0o600);
+    try {
+      await handle.writeFile("\n");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    await rm(tmp, { force: true }).catch(() => undefined);
+  }
+}
+
+/**
  * A completed write whose rename did not land leaves a sibling holding a refresh
  * token that is newer than the one on the file — and xAI has already rotated
  * away from the file's. Adopt it on startup, before any refresh, so the process
@@ -430,6 +451,15 @@ async function ensureLocked(opts: EnsureXaiCredentialOptions): Promise<XaiJobCre
   const key = grantKey(entry.refresh);
   if (rejectedGrants.has(key)) {
     throw new XaiGrantError("xAI already refused this refresh token in this process; a human must run /connect");
+  }
+
+  try {
+    await probeSiblingWrite(path);
+  } catch (err) {
+    // Nothing was POSTed: the grant on the file is still live and a later job
+    // may try again once the directory takes a write.
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new XaiGrantError(`cannot write a new xAI credential beside ${path}; not refreshing: ${reason}`);
   }
 
   let response: XaiTokenResponse;

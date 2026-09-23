@@ -281,17 +281,22 @@ describe("ensureXaiCredentialForJob", () => {
     expect((await readXai(path)).access).toBe("access-2");
   });
 
-  test("retries the write of a rotated pair instead of POSTing again", async () => {
+  test("does not POST when the auth directory cannot take the rotated pair", async () => {
     const { home, path } = await seedHome(oauthEntry({ expires: NOW + 10 * 60_000 }));
     const { calls, fetchImpl } = stubToken([
       { status: 200, body: { access_token: "access-2", refresh_token: "refresh-2", expires_in: 21_600 } },
     ]);
     const opts = { home, timeoutMs: 15 * 60_000, now: () => NOW, fetchImpl };
 
-    // xAI answers, then the durable write cannot land.
+    // The write is proven before the POST, so the grant on the file stays live.
     await chmod(dirname(path), 0o500);
-    await expect(ensureXaiCredentialForJob(opts)).rejects.toThrow();
-    await chmod(dirname(path), 0o700);
+    try {
+      await expect(ensureXaiCredentialForJob(opts)).rejects.toThrow(/cannot write a new xAI credential/);
+    } finally {
+      await chmod(dirname(path), 0o700);
+    }
+    expect(calls).toHaveLength(0);
+    expect(await readXai(path)).toMatchObject({ access: "access-1", refresh: "refresh-1" });
 
     const resolved = await ensureXaiCredentialForJob(opts);
 
