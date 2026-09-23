@@ -105,8 +105,15 @@ export function gitRemoteUrl(cloneUrl: string, auth: GitAuth): string {
   return authenticatedCloneUrl(cloneUrl, auth.username, auth.token);
 }
 
+const CREDENTIAL_HELPER_RE = /(credential\.helper=)!f\(\) \{[\s\S]*?\}; f/g;
+
+/** Also drops the credential-helper shell function every configured git command carries in its argv. */
 export function redactGitSecrets(text: string, secrets: readonly (string | undefined)[] = []): string {
-  let out = text.replace(/(:\/\/[^/@\s]+:)[^/@\s]+@/g, "$1***@");
+  let out = text
+    .split(gitCredentialHelper())
+    .join("***")
+    .replace(CREDENTIAL_HELPER_RE, "$1***")
+    .replace(/(:\/\/[^/@\s]+:)[^/@\s]+@/g, "$1***@");
   for (const secret of secrets) {
     if (secret) out = out.split(secret).join("***");
   }

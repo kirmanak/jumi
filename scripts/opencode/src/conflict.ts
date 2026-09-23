@@ -6,16 +6,20 @@ import {
   attachPrWorktree,
   beginClaimedWorktree,
   commitIfDirty,
+  ENGINE_TEMP_DIR,
   ensureBareCache,
   inspectRemoteContainsDefault,
   isClaimedEarlyResult,
   openClaimedLoop,
   pushClaimedBranch,
   recheckAssignedAndOpen,
+  removeTree,
   runClaimedLoop,
+  STAGE_ALL_ARGS,
   skipClaimedWork,
   stripSentinels,
   throwIfAborted,
+  withoutEngineTempPorcelain,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
 import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
@@ -349,7 +353,7 @@ async function commitMergeIfNeeded(
 ): Promise<void> {
   const originDefault = `origin/${defaultBranch}`;
   const mergeInProgress = await gitOk(git, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: worktree, env });
-  const dirty = Boolean((await git(["status", "--porcelain"], { cwd: worktree, env })).trim());
+  const dirty = Boolean(withoutEngineTempPorcelain(await git(["status", "--porcelain"], { cwd: worktree, env })));
   if (mergeInProgress || dirty) {
     try {
       await commitMerge(git, env, worktree, defaultBranch, headRef);
@@ -477,8 +481,8 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
     await rm(join(worktree, CI_LOG_FILE), { force: true });
-    await rm(join(worktree, ".jumi-tmp"), { recursive: true, force: true });
-    await git(["add", "-A"], { cwd: worktree, env }).catch(() => undefined);
+    await removeTree(join(worktree, ENGINE_TEMP_DIR)).catch(() => undefined);
+    await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
     remaining = await markerPaths(git, worktree, env);
     if (remaining.length > 0) {
       return { status: "stuck", headSha, baseSha, openCodeRan, conflicted: true, runner };
@@ -487,7 +491,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
 
   throwIfAborted(opts.abortSignal);
   if (conflicted || openCodeRan) {
-    await git(["add", "-A"], { cwd: worktree, env }).catch(() => undefined);
+    await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
   }
   await commitMergeIfNeeded(git, env, worktree, defaultBranch, headRef);
   return { status: "merged", headSha, baseSha, openCodeRan, conflicted, ...(runner ? { runner } : {}) };

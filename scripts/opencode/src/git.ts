@@ -692,7 +692,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     throw err;
   } finally {
     tracker?.stop();
-    await rm(tmpDir, { recursive: true, force: true });
+    // Best-effort: a temp dir that will not go must not replace the engine result (#129).
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

@@ -631,7 +631,10 @@ describe("implementConflict", () => {
     });
   });
 
-  test("child already committed merge → parent does not fail / does not poison SHA skip", async () => {
+  test.each([
+    ["clean", ""],
+    ["with a .jumi-tmp leftover", "?? .jumi-tmp/\n"],
+  ])("child already committed merge (%s) → parent does not fail / does not poison SHA skip", async (_label, status) => {
     await withDirs(async (home, workdir) => {
       const api = makeApi();
       let openCodeRan = false;
@@ -652,7 +655,7 @@ describe("implementConflict", () => {
         }
         if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
         if (gitArgs[0] === "rev-parse") return "headsha";
-        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "status") return status;
         if (gitArgs[0] === "commit") throw new Error("nothing to commit, working tree clean");
         return "";
       };
@@ -681,6 +684,7 @@ describe("implementConflict", () => {
       expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
       expect(api.comments.at(-1)).toContain("Pushed merge of main.");
       expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
       expect(state.lastHeadSha).toBe("headsha");
       expect(state.lastBaseSha).toBe("basesha");

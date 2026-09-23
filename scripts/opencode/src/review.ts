@@ -1,6 +1,7 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CI_LOOKUP_FAILED_REASON, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
+import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
@@ -550,32 +551,10 @@ const DEFAULT_MAX_OUTPUT_BYTES = 80_000;
 export const MAX_INCOMPLETE_RETRIES = 2;
 export const INCOMPLETE_REVIEW_STUCK = "stuck: incomplete review";
 
-function unquotePorcelainPath(path: string): string {
-  let value = path;
-  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-    value = value.slice(1, -1).replace(/\\([n"\\])/g, (_, ch: string) => (ch === "n" ? "\n" : ch));
-  }
-  if (value.endsWith("/")) value = value.slice(0, -1);
-  return value;
-}
-
-function porcelainPaths(line: string): string[] {
-  if (line.length < 4) return [unquotePorcelainPath(line)];
-  const rest = line.slice(3);
-  const arrow = " -> ";
-  const idx = rest.indexOf(arrow);
-  const parts = idx === -1 ? [rest] : [rest.slice(0, idx), rest.slice(idx + arrow.length)];
-  return parts.map(unquotePorcelainPath);
-}
-
-function isReviewEngineTempPath(path: string): boolean {
-  return path === ".jumi-tmp" || path.startsWith(".jumi-tmp/");
-}
-
 function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
   for (const line of porcelain.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT && !isReviewEngineTempPath(path))) return false;
+    if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT && !isEngineTempPath(path))) return false;
   }
   return true;
 }
