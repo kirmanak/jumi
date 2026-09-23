@@ -549,13 +549,18 @@ export async function stripSentinels(worktree: string, files: readonly string[])
   await removeTree(join(worktree, ENGINE_TEMP_DIR)).catch(() => undefined);
 }
 
-export async function worktreePorcelain(loop: ClaimedLoop): Promise<string> {
-  const status = await loop.runConfiguredGit(["status", "--porcelain"], { cwd: loop.worktree, env: loop.env });
+/** `git status --porcelain` output without lines that only touch the engine temp dir. */
+export function withoutEngineTempPorcelain(status: string): string {
   return status
     .split(/\r?\n/)
     .filter((line) => line.trim() && !porcelainPaths(line).every(isEngineTempPath))
     .join("\n")
     .trim();
+}
+
+export async function worktreePorcelain(loop: ClaimedLoop): Promise<string> {
+  const status = await loop.runConfiguredGit(["status", "--porcelain"], { cwd: loop.worktree, env: loop.env });
+  return withoutEngineTempPorcelain(status);
 }
 
 export async function commitsAheadOf(loop: ClaimedLoop, ref: string): Promise<number> {

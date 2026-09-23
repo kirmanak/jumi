@@ -19,6 +19,7 @@ import {
   skipClaimedWork,
   stripSentinels,
   throwIfAborted,
+  withoutEngineTempPorcelain,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
 import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
@@ -352,7 +353,7 @@ async function commitMergeIfNeeded(
 ): Promise<void> {
   const originDefault = `origin/${defaultBranch}`;
   const mergeInProgress = await gitOk(git, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: worktree, env });
-  const dirty = Boolean((await git(["status", "--porcelain"], { cwd: worktree, env })).trim());
+  const dirty = Boolean(withoutEngineTempPorcelain(await git(["status", "--porcelain"], { cwd: worktree, env })));
   if (mergeInProgress || dirty) {
     try {
       await commitMerge(git, env, worktree, defaultBranch, headRef);
