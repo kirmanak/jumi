@@ -245,6 +245,42 @@ describe("ensureXaiCredentialForJob", () => {
     expect((await readXai(path)).access).toBe("access-1");
   });
 
+  for (const status of [503, 429]) {
+    test(`fails closed on a ${status} without latching the grant`, async () => {
+      const { home, path } = await seedHome(oauthEntry({ expires: NOW + HOUR_MS }));
+      const { calls, fetchImpl } = stubToken([
+        { status, body: { error: "try_later" } },
+        { status: 200, body: { access_token: "access-2", expires_in: 21_600 } },
+      ]);
+      const opts = { home, timeoutMs: 4 * HOUR_MS, now: () => NOW, fetchImpl };
+
+      await expect(ensureXaiCredentialForJob(opts)).rejects.toThrow(
+        new RegExp(`xAI token refresh failed \\(${status}\\)`)
+      );
+      const resolved = await ensureXaiCredentialForJob(opts);
+
+      expect(calls).toHaveLength(2);
+      expect(resolved?.child).toEqual({ type: "api", key: "access-2" });
+      expect((await readXai(path)).access).toBe("access-2");
+    });
+  }
+
+  test("fails closed on a 200 with no access token without latching the grant", async () => {
+    const { home, path } = await seedHome(oauthEntry({ expires: NOW + HOUR_MS }));
+    const { calls, fetchImpl } = stubToken([
+      { status: 200, body: { expires_in: 21_600 } },
+      { status: 200, body: { access_token: "access-2", expires_in: 21_600 } },
+    ]);
+    const opts = { home, timeoutMs: 4 * HOUR_MS, now: () => NOW, fetchImpl };
+
+    await expect(ensureXaiCredentialForJob(opts)).rejects.toThrow(/no access_token/);
+    const resolved = await ensureXaiCredentialForJob(opts);
+
+    expect(calls).toHaveLength(2);
+    expect(resolved?.child).toEqual({ type: "api", key: "access-2" });
+    expect((await readXai(path)).access).toBe("access-2");
+  });
+
   test("retries the write of a rotated pair instead of POSTing again", async () => {
     const { home, path } = await seedHome(oauthEntry({ expires: NOW + 10 * 60_000 }));
     const { calls, fetchImpl } = stubToken([

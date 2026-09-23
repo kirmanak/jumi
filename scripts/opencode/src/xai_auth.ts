@@ -98,7 +98,10 @@ export class XaiGrantError extends Error {
   }
 }
 
-/** The token endpoint answered with a non-success status. That grant is spent. */
+/**
+ * The token endpoint answered with a non-success status, or a 2xx with no
+ * access token. Only a 400 or 401 means the grant is spent.
+ */
 export class XaiRefreshRejected extends Error {
   readonly status: number;
 
@@ -389,6 +392,10 @@ function assertCoversJob(pair: XaiOAuthCredential, budgetMs: number, now: number
   );
 }
 
+function isSpentGrantStatus(status: number): boolean {
+  return status === 400 || status === 401;
+}
+
 async function ensureLocked(opts: EnsureXaiCredentialOptions): Promise<XaiJobCredential | undefined> {
   const now = opts.now ?? (() => Date.now());
   const path = await durableAuthPath(opts.home);
@@ -429,10 +436,11 @@ async function ensureLocked(opts: EnsureXaiCredentialOptions): Promise<XaiJobCre
   try {
     response = await postXaiRefresh(entry.refresh, { fetchImpl: opts.fetchImpl, tokenUrl: opts.tokenUrl });
   } catch (err) {
-    // A non-success answer means the grant is spent; latch it so no later job
-    // POSTs it again. A transport error proves nothing about the grant, so the
-    // job fails closed without latching.
-    if (err instanceof XaiRefreshRejected) rejectedGrants.add(key);
+    // A 400 or 401 means the grant is spent; latch it so no later job POSTs it
+    // again. Any other status (429, 5xx, a 2xx with no access token) or a
+    // transport error proves nothing about the grant, so the job fails closed
+    // without latching and a later job may POST again.
+    if (err instanceof XaiRefreshRejected && isSpentGrantStatus(err.status)) rejectedGrants.add(key);
     throw new XaiGrantError(err instanceof Error ? err.message : String(err));
   }
 

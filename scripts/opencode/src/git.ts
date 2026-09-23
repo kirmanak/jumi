@@ -188,13 +188,13 @@ async function resolveXaiChildCredential(
   home: string,
   log: (message: string) => void
 ): Promise<XaiChildCredential | undefined> {
+  if (!isXaiModel(opts.model)) return undefined;
   try {
     const resolved = await ensureXaiCredentialForJob({ home, timeoutMs: opts.timeoutMs, logger: log });
     return resolved?.child;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`xAI credential unusable for a ${opts.model} run: ${message}`);
-    if (!isXaiModel(opts.model)) return undefined;
     // Same shape as an auth death the child reports: the public message is the
     // hostname, the reason stays in the log.
     const authMessage = providerAuthDeathMessage();
