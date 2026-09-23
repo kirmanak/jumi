@@ -128,6 +128,7 @@ export function resetXaiAuthStateForTests(): void {
 }
 
 function grantKey(refresh: string): string {
+  // codeql[js/insufficient-password-hash] fingerprint of a high-entropy refresh token, not a stored password
   return createHash("sha256").update(refresh).digest("hex");
 }
 
