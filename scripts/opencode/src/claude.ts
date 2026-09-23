@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import { claudeTracingEnv, claudeTracingPluginDir } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
 import {
@@ -144,8 +145,9 @@ export function scrubbedKey(key: string): boolean {
 }
 
 function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string> {
+  const tracing = claudeTracingEnv(opts.trace);
   if (!opts.sanitizeEnv) {
-    const env = { ...process.env, TMPDIR: tempRoot } as Record<string, string>;
+    const env = { ...process.env, TMPDIR: tempRoot, ...tracing } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
     return env;
   }
@@ -163,6 +165,9 @@ function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string): Record<string
       env[key] = value;
     }
   }
+  // After extraEnv, because the scrub is what this has to survive: a sanitized
+  // spawn that reaches the model but not Phoenix is an untraced job.
+  Object.assign(env, tracing);
   return env;
 }
 
@@ -189,6 +194,10 @@ export function claudeArgv(opts: EngineRunOptions): string[] {
     opts.model,
   ];
   if (opts.effort) args.push("--effort", opts.effort);
+  // Phoenix tracing is an image-local plugin the parent names per spawn, so
+  // `--setting-sources user` still keeps the untrusted checkout's hooks out.
+  const tracingPlugin = claudeTracingPluginDir();
+  if (tracingPlugin) args.push("--plugin-dir", tracingPlugin);
   if (opts.continueSession) args.push("--continue");
   return args;
 }

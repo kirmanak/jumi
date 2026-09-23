@@ -124,6 +124,23 @@ jobs:
           docker run --rm jumi-reviewer:ci claude --version
           docker run --rm jumi-reviewer:ci agy --version
           docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
+          # Claude tracing is vendored, never installed at run time, and its
+          # hooks are pure shell over jq + python3 — both must be in the image.
+          docker run --rm jumi-reviewer:ci test -f /app/claude-plugins/claude-code-tracing/hooks/common.sh
+          docker run --rm jumi-reviewer:ci sh -c 'command -v jq >/dev/null && command -v python3 >/dev/null && command -v bash >/dev/null'
+          # The parent passes the plugin with --plugin-dir. A CLAUDE_VERSION bump
+          # that drops the flag must fail here, not silently stop tracing.
+          docker run --rm jumi-reviewer:ci claude --help | grep -F -- '--plugin-dir' >/dev/null
+          # Plugin root may also carry bin/, agents/, skills/, .mcp.json,
+          # monitors/ and settings.json — any of those reach the untrusted-checkout
+          # child. A re-sync that adds one must fail the build, not ship.
+          plugin_top="$(docker run --rm jumi-reviewer:ci sh -c 'ls -1A /app/claude-plugins/claude-code-tracing' | sort)"
+          plugin_want="$(printf '%s\n' '.claude-plugin' 'LICENSE' 'UPSTREAM.md' 'hooks' | sort)"
+          if [ "$plugin_top" != "$plugin_want" ]; then
+            echo "tracing plugin top level must be only .claude-plugin, hooks, LICENSE, UPSTREAM.md; got:" >&2
+            printf '%s\n' "$plugin_top" >&2
+            exit 1
+          fi
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-reviewer:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
 
@@ -143,7 +160,10 @@ jobs:
         # argv Jumi spawns: a rejected flag is a generic non-zero exit on every
         # Claude run. The probe runs the real argv against a loopback stub
         # endpoint (nothing billed, no token in the child env) and re-runs each
-        # pinned value as nonsense so the pass cannot be vacuous.
+        # pinned value as nonsense so the pass cannot be vacuous. It also gives
+        # that run a throwaway loopback Phoenix and requires a span to arrive,
+        # which is the only check anywhere that the plugin `--plugin-dir` names
+        # is actually loaded and run — `--help` only proves the flag exists.
         run: |
           set -euo pipefail
           docker run --rm jumi-reviewer:ci \
@@ -200,12 +220,14 @@ jobs:
           docker run --rm jumi-worker:ci claude --version
           docker run --rm jumi-worker:ci agy --version
           docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md
+          docker run --rm jumi-worker:ci test -f /app/claude-plugins/claude-code-tracing/hooks/common.sh
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-worker:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           printf '%s\n' "$config_json" | grep -F '/app/review-skills' >/dev/null
 
       - name: Verify claude production flags against the installed binary
         # The worker is the image that actually spawns Claude runners, so the
-        # argv it ships has to parse here too. Same probe as the reviewer job.
+        # argv it ships has to parse here too, and its `AGENT_INSTANCE` puts the
+        # probe's span under `jumi-worker`. Same probe as the reviewer job.
         run: |
           set -euo pipefail
           docker run --rm jumi-worker:ci \

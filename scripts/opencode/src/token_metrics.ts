@@ -2,6 +2,7 @@
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
+import { agentInstance } from "./agent_instance.ts";
 import { resetTraceExportForTests, traceExportErrors } from "./phoenix.ts";
 
 export const TOKEN_TYPES = ["input", "cached_input", "output", "cache_write", "reasoning"] as const;
@@ -26,10 +27,6 @@ const COLUMN_BY_TYPE: Record<TokenType, string> = {
   cache_write: "tokens_cache_write",
   reasoning: "tokens_reasoning",
 };
-
-function agentInstance(): string {
-  return process.env.AGENT_INSTANCE?.trim() || "jumi";
-}
 
 function escapeLabel(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"');

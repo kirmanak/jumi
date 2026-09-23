@@ -55,7 +55,7 @@ export function forgeOpenCodePermission(host: string): string {
  * wildcard are both needed: `domain:*.host` does not cover `host` itself
  * (and `domain:host` does not cover `api.host`).
  * A deny at any level beats every allow, including `--allowedTools` and the
- * `user` settings source. Wildcards need Claude Code >= 2.1.172 (image: 2.1.274).
+ * `user` settings source. Wildcards need Claude Code >= 2.1.172 (image: 2.1.280).
  */
 export function claudeDisallowedTools(host: string): string {
   return [`WebFetch(domain:${host})`, `WebFetch(domain:*.${host})`].join(",");

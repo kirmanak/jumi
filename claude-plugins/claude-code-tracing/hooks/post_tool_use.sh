@@ -1,0 +1,110 @@
+#!/bin/bash
+# PostToolUse - Create tool span
+source "$(dirname "$0")/common.sh"
+check_requirements
+
+input=$(cat 2>/dev/null || echo '{}')
+[[ -z "$input" ]] && input='{}'
+
+resolve_session "$input"
+
+tool_name="unknown"
+tool_id=""
+tool_input_raw="{}"
+raw_response=""
+eval "$(echo "$input" | jq -r '
+  @sh "tool_name=\(.tool_name // "unknown") tool_id=\(.tool_use_id // "") tool_input_raw=\((.tool_input // {}) | tojson) raw_response=\((.tool_response // "") | if type=="string" then . else tojson end)"
+' 2>/dev/null || true)"
+
+session_id=""
+trace_id=""
+parent_span_id=""
+user_id=""
+start_time=""
+eval "$(jq -r --arg k "tool_${tool_id}_start" '
+  @sh "session_id=\(.session_id // "") trace_id=\(.current_trace_id // "") parent_span_id=\(.current_trace_span_id // "") user_id=\(.user_id // "") start_time=\(.[$k] // "")"
+' "$STATE_FILE" 2>/dev/null || true)"
+
+[[ -z "$session_id" || -z "$trace_id" ]] && exit 0
+inc_state "tool_count"
+
+# Jumi: slice, never `head -c`. Under `set -o pipefail` head exits at its byte
+# limit and SIGPIPEs the writer, so the assignment reports 141 and `set -e`
+# kills the hook before the TOOL span is sent — for any value past the pipe
+# buffer, i.e. exactly the inputs the truncation exists to handle. Parameter
+# expansion opens no pipe, and it matches the `${#...} -gt 5000` checks below,
+# which count the same units it slices.
+tool_input="${tool_input_raw:0:5000}"
+tool_response="${raw_response:0:5000}"
+
+# Track whether content was truncated
+tool_input_truncated="false"
+tool_response_truncated="false"
+[[ ${#tool_input_raw} -gt 5000 ]] && tool_input_truncated="true"
+[[ ${#raw_response} -gt 5000 ]] && tool_response_truncated="true"
+truncated="false"
+[[ "$tool_input_truncated" == "true" || "$tool_response_truncated" == "true" ]] && truncated="true"
+
+# Extract tool-specific metadata for structured attributes
+tool_description=""
+tool_command=""
+tool_file_path=""
+tool_url=""
+tool_query=""
+
+case "$tool_name" in
+  Bash)
+    tool_command=$(echo "$tool_input_raw" | jq -r '.command // empty' 2>/dev/null || echo "")
+    tool_description="${tool_command:0:200}"
+    ;;
+  Read|Write|Edit|Glob)
+    tool_file_path=$(echo "$tool_input_raw" | jq -r '.file_path // .pattern // empty' 2>/dev/null || echo "")
+    tool_description="${tool_file_path:0:200}"
+    ;;
+  WebSearch)
+    tool_query=$(echo "$tool_input_raw" | jq -r '.query // empty' 2>/dev/null || echo "")
+    tool_description="${tool_query:0:200}"
+    ;;
+  WebFetch)
+    tool_url=$(echo "$tool_input_raw" | jq -r '.url // empty' 2>/dev/null || echo "")
+    tool_description="${tool_url:0:200}"
+    ;;
+  Grep)
+    tool_query=$(echo "$tool_input_raw" | jq -r '.pattern // empty' 2>/dev/null || echo "")
+    tool_file_path=$(echo "$tool_input_raw" | jq -r '.path // empty' 2>/dev/null || echo "")
+    tool_description="grep: ${tool_query:0:100}"
+    ;;
+  *)
+    tool_description="${tool_input:0:200}"
+    ;;
+esac
+
+# Jumi: the structured attributes restate `input.value`, which is already capped
+# at 5000. Cap them to the same bound, so letting big tool spans through does not
+# hand Phoenix an unbounded `tool.command` instead.
+tool_command="${tool_command:0:5000}"
+tool_file_path="${tool_file_path:0:5000}"
+tool_url="${tool_url:0:5000}"
+tool_query="${tool_query:0:5000}"
+
+[[ -z "$start_time" ]] && start_time=$(get_timestamp_ms)
+end_time=$(get_timestamp_ms)
+del_state "tool_${tool_id}_start"
+
+span_id=$(generate_uuid | tr -d '-' | cut -c1-16)
+
+attrs=$(jq -n \
+  --arg sid "$session_id" --arg tool "$tool_name" \
+  --arg in "$tool_input" --arg out "$tool_response" \
+  --arg desc "$tool_description" --arg trunc "$truncated" \
+  --arg uid "$user_id" \
+  '{"session.id":$sid,"openinference.span.kind":"tool","tool.name":$tool,"input.value":$in,"output.value":$out,"tool.description":$desc,"tool.truncated":$trunc} + (if $uid != "" then {"user.id":$uid} else {} end)')
+
+# Add tool-specific structured attributes
+[[ -n "$tool_command" ]] && attrs=$(echo "$attrs" | jq --arg v "$tool_command" '. + {"tool.command":$v}')
+[[ -n "$tool_file_path" ]] && attrs=$(echo "$attrs" | jq --arg v "$tool_file_path" '. + {"tool.file_path":$v}')
+[[ -n "$tool_url" ]] && attrs=$(echo "$attrs" | jq --arg v "$tool_url" '. + {"tool.url":$v}')
+[[ -n "$tool_query" ]] && attrs=$(echo "$attrs" | jq --arg v "$tool_query" '. + {"tool.query":$v}')
+
+span=$(build_span "$tool_name" "TOOL" "$span_id" "$trace_id" "$parent_span_id" "$start_time" "$end_time" "$attrs")
+send_span "$span" || true
