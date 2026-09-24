@@ -4,6 +4,7 @@ import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
 import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim, writeClaim } from "./claim.ts";
 import { type Engine, resolveEngine } from "./engine.ts";
+import { ENGINE_TEMP_DIR, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { withEngineChain } from "./fallback.ts";
 import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
@@ -20,6 +21,8 @@ import {
   runGit,
   validateCloneUrl,
 } from "./workspace.ts";
+
+export { ENGINE_TEMP_DIR } from "./engine_scratch.ts";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -184,9 +187,6 @@ async function pathExists(path: string): Promise<boolean> {
     return false;
   }
 }
-
-/** Per-run engine scratch under the worktree; never committed, and a failed delete never fails the run. */
-export const ENGINE_TEMP_DIR = ".jumi-tmp";
 
 /** Stage everything except the engine temp dir, which a failed delete can leave behind. */
 export const STAGE_ALL_ARGS: readonly string[] = ["add", "-A", "--", ".", `:(exclude)${ENGINE_TEMP_DIR}`];
@@ -495,6 +495,7 @@ export async function attachIssueWorktree(
   await mkdir(loop.worktree, { recursive: true });
   await loop.runConfiguredGit(["checkout", "-B", opts.branch], { cwd: loop.worktree, env: loop.env });
   throwIfAborted(opts.abortSignal);
+  await ensureEngineScratchIgnored(loop.worktree);
   return (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: loop.worktree, env: loop.env })).trim();
 }
 
@@ -527,6 +528,7 @@ export async function attachPrWorktree(
   }
   await mkdir(loop.worktree, { recursive: true });
   throwIfAborted(opts.abortSignal);
+  await ensureEngineScratchIgnored(loop.worktree);
   const headSha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: loop.worktree, env: loop.env })).trim();
   const baseSha = (
     await loop.runConfiguredGit(["rev-parse", `origin/${opts.defaultBranch}`], { cwd: loop.worktree, env: loop.env })

@@ -5,6 +5,7 @@ import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
+import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { hasResumableSession, withEngineChain } from "./fallback.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
 import { isInfraFailure } from "./infra.ts";
@@ -1170,6 +1171,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       throwIfAborted(opts.abortSignal);
       await writeFile(join(opts.workspace, "JUMI_TASK.md"), extra?.prompt ?? prompt);
       log(`Running OpenCode for ${repoFullName}#${pr.number}`);
+      await ensureEngineScratchIgnored(opts.workspace);
       const runOpts: EngineRunOptions = {
         model: opts.model,
         variant: opts.variant,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { claimFilePath, readClaim, writeClaim } from "../src/claim.ts";
@@ -659,6 +659,36 @@ describe("bare cache and attach", () => {
       const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
       await attachIssueWorktree(loop, { branch: "jumi/issue-12-fix-the-thing", defaultBranch: "main", log: () => {} });
       expect(gitCalls.some((args) => args[0] === "worktree")).toBe(false);
+    });
+  });
+
+  test("attach ignores .jumi-tmp in the common exclude before a child starts", async () => {
+    await withDirs(async (home, workdir) => {
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "show-ref") return "";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const adminDir = join(workdir, "bare.git", "worktrees", "12");
+      await mkdir(adminDir, { recursive: true });
+      await writeFile(join(adminDir, "commondir"), "../..\n");
+      await mkdir(claimed.worktree, { recursive: true });
+      await writeFile(join(claimed.worktree, ".git"), `gitdir: ${adminDir}\n`);
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      await attachIssueWorktree(loop, { branch: "jumi/issue-12-fix-the-thing", defaultBranch: "main", log: () => {} });
+      await attachPrWorktree(loop, { branch: "jumi/issue-12-fix-the-thing", defaultBranch: "main", log: () => {} });
+      const exclude = await readFile(join(workdir, "bare.git", "info", "exclude"), "utf8");
+      expect(exclude.split("\n").filter((line) => line.trim() === ".jumi-tmp/")).toEqual([".jumi-tmp/"]);
     });
   });
 
