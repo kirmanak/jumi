@@ -1,4 +1,4 @@
-import { CI_LOOKUP_FAILED_REASON, CI_LOOKUP_RETRY_MS, isCiWaitSkipReason } from "./ci.ts";
+import { isCiLookupRetryMarker, isCiWaitSkipReason } from "./ci.ts";
 import { isInfraRetryMarker } from "./infra.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
@@ -195,8 +195,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
   WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
 `;
 
+const BACKOFF_ERROR_PREDICATE =
+  "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%')";
+
 function isBackoffMarker(error: string | null | undefined): boolean {
-  return isInfraRetryMarker(error) || isQuotaWaitMarker(error);
+  return isInfraRetryMarker(error) || isQuotaWaitMarker(error) || isCiLookupRetryMarker(error);
 }
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
@@ -212,10 +215,6 @@ function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefi
 // row is leased (and is deduped against it) must not be lost when the lease ends in a CI wait.
 function isCiRewakeOutcome(outcome: { state: string; reason?: string }): boolean {
   return outcome.state === "skipped" && isCiWaitSkipReason(outcome.reason);
-}
-
-function isCiLookupFailedOutcome(outcome: { state: string; reason?: string }): boolean {
-  return outcome.state === "skipped" && outcome.reason === CI_LOOKUP_FAILED_REASON;
 }
 
 function jobPrUpdatedAtMs(job: ReviewJob): number | null {
@@ -646,15 +645,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark published for job ${id}`);
       const ts = Date.now();
-      const lookupFailed = isCiLookupFailedOutcome(outcome);
-      const rewake = lookupFailed || (Boolean(row.rewakeRequested) && isCiRewakeOutcome(outcome));
-      const backoffMs = lookupFailed && !row.rewakeRequested ? CI_LOOKUP_RETRY_MS : 0;
+      const rewake = Boolean(row.rewakeRequested) && isCiRewakeOutcome(outcome);
       row.rewakeRequested = false;
       if (rewake) {
         row.state = "queued";
         row.resultReason = null;
         row.leasedBy = null;
-        row.leasedUntil = backoffMs > 0 ? ts + backoffMs : null;
+        row.leasedUntil = null;
         row.updatedAt = ts;
         return;
       }
@@ -1199,9 +1196,9 @@ export class PgReviewJobStore implements ReviewJobStore {
              error = $4,
              updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
-           AND result_markdown IS NULL AND result_reason IS NULL
-            AND (error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%')
-          RETURNING id`,
+            AND result_markdown IS NULL AND result_reason IS NULL
+            AND ${BACKOFF_ERROR_PREDICATE}
+           RETURNING id`,
         [id, leasedBy, new Date(now.getTime() + backoffMs).toISOString(), marker]
       )
     );
@@ -1214,9 +1211,9 @@ export class PgReviewJobStore implements ReviewJobStore {
         `UPDATE review_jobs
          SET state = 'queued', leased_by = NULL, leased_until = NULL, updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
-           AND result_markdown IS NULL AND result_reason IS NULL
-            AND (error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%')
-          RETURNING id`,
+            AND result_markdown IS NULL AND result_reason IS NULL
+            AND ${BACKOFF_ERROR_PREDICATE}
+           RETURNING id`,
         [id, leasedBy]
       )
     );
@@ -1267,27 +1264,16 @@ export class PgReviewJobStore implements ReviewJobStore {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
-         SET state = CASE WHEN $6::boolean OR ($5::boolean AND rewake_requested) THEN 'queued' ELSE $3 END,
-             result_reason = CASE WHEN $6::boolean OR ($5::boolean AND rewake_requested) THEN NULL ELSE COALESCE($4, result_reason) END,
-             published_at = CASE WHEN $6::boolean OR ($5::boolean AND rewake_requested) THEN published_at ELSE NOW() END,
+         SET state = CASE WHEN $5::boolean AND rewake_requested THEN 'queued' ELSE $3 END,
+             result_reason = CASE WHEN $5::boolean AND rewake_requested THEN NULL ELSE COALESCE($4, result_reason) END,
+             published_at = CASE WHEN $5::boolean AND rewake_requested THEN published_at ELSE NOW() END,
              rewake_requested = FALSE,
              leased_by = NULL,
-             leased_until = CASE
-               WHEN $6::boolean AND NOT rewake_requested THEN NOW() + ($7::bigint * interval '1 millisecond')
-               ELSE NULL
-             END,
+             leased_until = NULL,
              updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
          RETURNING id`,
-        [
-          id,
-          leasedBy,
-          outcome.state,
-          outcome.reason ?? null,
-          isCiRewakeOutcome(outcome),
-          isCiLookupFailedOutcome(outcome),
-          CI_LOOKUP_RETRY_MS,
-        ]
+        [id, leasedBy, outcome.state, outcome.reason ?? null, isCiRewakeOutcome(outcome)]
       )
     );
     if (rows.length === 0) throw new Error(`cannot mark published for job ${id}`);

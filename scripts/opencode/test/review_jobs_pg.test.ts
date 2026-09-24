@@ -1,4 +1,9 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CI_LOOKUP_BACKOFF_MS, CI_LOOKUP_BUDGET_MS, CI_LOOKUP_FAILED_REASON } from "../src/ci.ts";
+import type { ReviewApi } from "../src/review.ts";
 import {
   createBunSqlClient,
   isUniqueViolation,
@@ -7,8 +12,9 @@ import {
   RECLAIM_LEASED_BY,
   WORKER_JOB_KINDS,
 } from "../src/review_jobs.ts";
+import { processEngineTick } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
-import { makeIssueJob, makeJob } from "./fixtures.ts";
+import { makeComment, makeConfig, makeIssueJob, makeJob, makePR, makeRepo } from "./fixtures.ts";
 
 // The ledger invariants below live in Postgres, not in TypeScript: partial unique
 // indexes, `FOR UPDATE SKIP LOCKED`, `ON CONFLICT ... WHERE`, and the migration that
@@ -26,6 +32,48 @@ test("postgres queue suite is not silently skipped where CI requires it", () => 
 });
 
 const describePg = databaseUrl ? describe : describe.skip;
+
+function failingLookupApi(pr = makePR()): {
+  api: ReviewApi;
+  lists: () => number;
+  statuses: Array<{ state: string; description?: string }>;
+} {
+  const statuses: Array<{ state: string; description?: string }> = [];
+  let lists = 0;
+  const boom = async () => {
+    lists++;
+    throw new Error("rate limited");
+  };
+  const api: ReviewApi = {
+    getRepo: async () => makeRepo(),
+    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+    getPR: async () => pr,
+    getPRFiles: async () => [],
+    getIssue: async () => {
+      throw new Error("unused");
+    },
+    listIssueComments: async () => [],
+    findStickyIssueComment: async () => undefined,
+    createIssueComment: async () => makeComment(),
+    updateIssueComment: async () => makeComment(),
+    listPullReviewComments: async () => [],
+    listPullReviews: async () => [],
+    createPullReview: async () => ({ id: 1 }),
+    submitPullReview: async () => ({ id: 1 }),
+    resolvePullComment: async () => undefined,
+    unresolvePullComment: async () => undefined,
+    dismissPullReview: async () => ({ id: 1 }),
+    createCommitStatus: async (_owner, _repo, _sha, status) => {
+      statuses.push({ state: status.state, description: status.description });
+      return status;
+    },
+    listCommitStatuses: boom,
+    listCheckRuns: boom,
+    listActionJobs: boom,
+    getActionJobLogs: async () => "",
+  };
+  return { api, lists: () => lists, statuses };
+}
 
 describePg("PgReviewJobStore against real postgres", () => {
   let sql!: SqlClient;
@@ -288,5 +336,70 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(await countJobs(`state = 'leased'`)).toBe(1);
     expect(await indexExists("review_jobs_leased_worker_issue")).toBe(true);
     expect(await indexExists("review_jobs_inflight_job_key")).toBe(true);
+  });
+
+  test("always-failing CI lookup becomes terminal after the budget and is not leasable", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-ci-lookup-"));
+    const blocker = join(workspace, "not-a-dir");
+    await writeFile(blocker, "x");
+    try {
+      await store.enqueue(makeJob());
+      const { api, lists, statuses } = failingLookupApi();
+      let now = Date.UTC(2026, 0, 1);
+      const config = makeConfig({ workdir: blocker, home: workspace });
+      const extras = {
+        now: () => now,
+        openCodeRunner: async () => {
+          throw new Error("runner should not be called");
+        },
+      };
+      await processEngineTick(store, config, api, "engine-1", extras);
+      const ids = asRows<{ id: unknown }>(await sql.unsafe(`SELECT id FROM review_jobs ORDER BY id`));
+      const id = Number(ids[0]?.id);
+      const cooling = await store.get(id);
+      expect(cooling?.state).toBe("queued");
+      expect(cooling?.leasedUntil).toBe(now + CI_LOOKUP_BACKOFF_MS[0]);
+      expect(statuses).toEqual([]);
+      expect(await store.lease("engine-2", 60_000, new Date(now))).toBeUndefined();
+      now += CI_LOOKUP_BUDGET_MS;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      const done = await store.get(id);
+      expect(done?.state).toBe("failed");
+      expect(done?.resultReason).toBe(CI_LOOKUP_FAILED_REASON);
+      expect(done?.publishedAt).not.toBeNull();
+      expect(statuses).toEqual([{ state: "failure", description: CI_LOOKUP_FAILED_REASON }]);
+      expect(lists()).toBe(12);
+      expect(await store.lease("engine-2", 60_000, new Date(now))).toBeUndefined();
+      expect(await processEngineTick(store, config, api, "engine-1", extras)).toBe("idle");
+      expect(lists()).toBe(12);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("closed pull with failing CI lookups finishes in one lease", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-ci-closed-"));
+    const blocker = join(workspace, "not-a-dir");
+    await writeFile(blocker, "x");
+    try {
+      await store.enqueue(makeJob());
+      const { api, lists } = failingLookupApi(makePR({ state: "closed" }));
+      const config = makeConfig({ workdir: blocker, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", {
+        openCodeRunner: async () => {
+          throw new Error("runner should not be called");
+        },
+      });
+      expect(lists()).toBe(0);
+      const ids = asRows<{ id: unknown }>(await sql.unsafe(`SELECT id FROM review_jobs ORDER BY id`));
+      const row = await store.get(Number(ids[0]?.id));
+      expect(row?.state).toBe("skipped");
+      expect(row?.resultReason).toBe("PR is closed");
+      expect(await processEngineTick(store, config, api, "engine-1")).toBe("idle");
+      expect(lists()).toBe(0);
+      expect(await store.lease("engine-2", 60_000)).toBeUndefined();
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 });

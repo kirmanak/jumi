@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { meterWebhook, recordJobCompleted, renderProcessMetrics, renderWebhookMetrics } from "./control_metrics.ts";
@@ -17,7 +18,9 @@ import {
   publishReviewResult,
   reviewJobKey,
   reviewPullRequest,
+  skipReasonForHeadChange,
   skipReasonForOtherChecks,
+  skipReasonForPR,
 } from "./review.ts";
 import {
   createPgReviewJobStore,
@@ -90,6 +93,7 @@ export interface RunReviewJobExtras {
   ciRelistDelayMs?: number;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
+  now?: () => number;
 }
 
 export async function runReviewJob(
@@ -99,6 +103,12 @@ export async function runReviewJob(
   logger: (message: string) => void = log,
   extras: RunReviewJobExtras = {}
 ): Promise<ReviewResult> {
+  const pr = await api.getPR(job.owner, job.repo, job.prNumber);
+  const early = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, job.headSha);
+  if (early) {
+    logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${early}`);
+    return { status: "skipped", reason: early };
+  }
   const ciSkip = await skipReasonForOtherChecks(
     {
       api,
@@ -421,6 +431,41 @@ function publishedJobResult(row: ReviewJobRecord, result: ReviewResult): "succee
   return publishedState(result);
 }
 
+async function settleCiLookupFailure(
+  store: ReviewJobStore,
+  api: ReviewApi,
+  config: ServiceConfig,
+  row: ReviewJobRecord,
+  leasedBy: string,
+  nowMs: number,
+  logger: (message: string) => void
+): Promise<void> {
+  if (row.rewakeRequested) {
+    await store.markPublished(row.id, leasedBy, { state: "skipped", reason: CI_LOOKUP_FAILED_REASON });
+    logger(`ci-lookup-rewake ${row.jobKey}`);
+    return;
+  }
+  const decision = decideCiLookupRetry(row.error, nowMs);
+  if (decision.action === "requeue") {
+    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs));
+    if (!ok) {
+      logger(`ci-lookup requeue failed ${row.jobKey}`);
+      return;
+    }
+    logger(`ci-lookup-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
+    return;
+  }
+  await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
+  const saved = await store.get(row.id);
+  if (!saved || saved.leasedBy !== leasedBy) {
+    logger(`ci-lookup exhaust lost lease ${row.jobKey}`);
+    return;
+  }
+  const published = await publishAndCompleteJob(store, api, config, saved, logger);
+  recordJobCompleted(row.kind, publishedJobResult(saved, published));
+  logger(`ci-lookup-exhausted ${row.jobKey}: ${decision.reason}`);
+}
+
 export async function processEngineTick(
   store: ReviewJobStore,
   config: ServiceConfig,
@@ -435,7 +480,8 @@ export async function processEngineTick(
     logger("breaker open");
     return "idle";
   }
-  const row = await store.lease(leasedBy, config.leaseMs, undefined, [REVIEW_KIND]);
+  const nowMs = extras.now?.() ?? Date.now();
+  const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), [REVIEW_KIND]);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
@@ -492,6 +538,10 @@ export async function processEngineTick(
     const current = await store.get(row.id);
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
       logger(`engine job ${row.jobKey} cancelled`);
+      return "processed";
+    }
+    if (result.status === "skipped" && result.reason === CI_LOOKUP_FAILED_REASON) {
+      await settleCiLookupFailure(store, api, config, current, leasedBy, nowMs, logger);
       return "processed";
     }
     const state = publishedState(result);
