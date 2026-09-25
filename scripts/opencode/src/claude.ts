@@ -11,6 +11,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
+import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { claudeDisallowedTools, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
@@ -213,6 +214,7 @@ export function inspectClaudeUsageLimit(text: string | null | undefined): QuotaC
 
 export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
+  await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });

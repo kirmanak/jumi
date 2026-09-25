@@ -34,6 +34,7 @@ import {
 } from "./dependencies.ts";
 import { type Engine, type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
+import { engineScratchTrackedReason, tipTracksEngineScratch } from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
@@ -621,6 +622,14 @@ export async function implementIssue(
 
       await commitIfDirty(loop, porcelain, `Implement #${issueNumber}: ${liveJob.title}`);
       throwIfAborted(opts.abortSignal);
+      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = engineScratchTrackedReason(branch);
+        await diary(reason);
+        await loop.stopHeartbeat();
+        await loop.stampTerminalClaim(opts.api);
+        await loop.detachWorktree();
+        return { status: "skipped", reason };
+      }
       await pushClaimedBranch(loop, branch);
       throwIfAborted(opts.abortSignal);
 

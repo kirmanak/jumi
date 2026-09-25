@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import type { Pull, Repo } from "./ports.ts";
 import type { ReviewJob } from "./types.ts";
@@ -367,6 +368,7 @@ export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWork
   const checkedOutBase = await runConfiguredGit(["rev-parse", targetBranch], { cwd: opts.workdir, env });
   if (checkedOutBase !== baseSha)
     throw new Error(`Target ref ${targetBranch} is ${checkedOutBase}, expected ${baseSha}`);
+  await ensureEngineScratchIgnored(opts.workdir);
 }
 
 export async function removeReviewWorkspace(path: string): Promise<void> {

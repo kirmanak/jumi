@@ -12,6 +12,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
+import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { agyConversationPath } from "./fallback.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
@@ -171,6 +172,7 @@ function cancelled(): Error {
 
 export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
+  await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });

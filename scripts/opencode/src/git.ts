@@ -21,6 +21,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
+import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { forgeDenyHost, forgeOpenCodePermission } from "./forge_webfetch.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
@@ -354,6 +355,7 @@ function engineExitMessage(exitCode: number | null, stderr: string): string {
 
 export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
+  await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });

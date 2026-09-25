@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, readClaim, stuckStatePath } from "../src/claim.ts";
 import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
+import { engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
@@ -1242,6 +1243,46 @@ describe("implementIssue", () => {
       expect(api.pulls).toHaveLength(1);
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
+    });
+  });
+
+  test.each([
+    ["gitea", "https://gitea.kirmanak.stream", "https://gitea.kirmanak.stream/kirmanak/demo.git"],
+    ["github", "https://github.com", "https://github.com/kirmanak/jumi.git"],
+  ])("does not open a pull when the tip tracks .jumi-tmp (%s)", async (_forge, giteaUrl, cloneUrl) => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "1";
+        if (gitArgs[0] === "ls-tree") return ".jumi-tmp/auth.json\0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob({ cloneUrl, htmlUrl: `${giteaUrl}/kirmanak/demo/issues/12` }),
+        giteaUrl,
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      const reason = engineScratchTrackedReason("jumi/issue-12-fix-the-thing");
+      expect(result).toEqual({ status: "skipped", reason });
+      expect(api.pulls).toHaveLength(0);
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "ls-tree" && args.includes(".jumi-tmp"))).toBe(true);
+      expect(api.comments.at(-1)).toContain(reason);
+      expect(api.comments.at(-1)).toContain("provider auth and session transcripts");
     });
   });
 
