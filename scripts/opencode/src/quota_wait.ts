@@ -1,5 +1,5 @@
 import type { EngineResult } from "./engine.ts";
-import { EngineFailedError, thrownRunner } from "./engine.ts";
+import { EngineFailedError, thrownChainIndex, thrownRunner } from "./engine.ts";
 import { shouldHopInsteadOfQuotaStuck } from "./fallback.ts";
 import {
   decideQuotaRetry,
@@ -43,12 +43,20 @@ function stampedProducerModel(input: {
 
 export function laterModelsAfter(
   chain: readonly { model: string }[] | undefined,
-  producerModel: string | undefined
+  producerModel: string | undefined,
+  chainIndex?: number
 ): string[] {
-  if (!chain?.length || !producerModel) return [];
+  if (!chain?.length) return [];
+  if (chainIndex != null && chainIndex >= 0) return chain.slice(chainIndex + 1).map((runner) => runner.model);
+  if (!producerModel) return [];
   const idx = chain.findIndex((runner) => runner.model === producerModel);
   if (idx < 0) return [];
   return chain.slice(idx + 1).map((runner) => runner.model);
+}
+
+function stampedChainIndex(input: { result?: EngineResult; err?: unknown }): number | undefined {
+  if (input.result?.chainIndex != null) return input.result.chainIndex;
+  return thrownChainIndex(input.err);
 }
 
 function hopWasRefused(input: { result?: EngineResult; err?: unknown; hopRefused?: boolean }): boolean {
@@ -83,7 +91,7 @@ export function throwIfQuotaWait(input: {
   random?: () => number;
 }): void {
   const producer = stampedProducerModel(input);
-  const later = input.laterModels ?? laterModelsAfter(input.chain, producer);
+  const later = input.laterModels ?? laterModelsAfter(input.chain, producer, stampedChainIndex(input));
   if (laterRunnerCanTakeQuota(producer, later, hopWasRefused(input))) return;
   let kind: QuotaClass | undefined;
   let retryAfterMs: number | undefined;

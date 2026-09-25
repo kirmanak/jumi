@@ -121,6 +121,88 @@ describe("throwIfQuotaWait", () => {
     ).toThrow(QuotaWaitError);
   });
 
+  test("a repeated model on the last runner waits when its chain index is stamped", () => {
+    const spark = "opencode/muse-spark";
+    const grok = "xai/grok-4.6";
+    expect(() =>
+      throwIfQuotaWait({
+        result: {
+          status: "stuck",
+          message: QUOTA_MESSAGE,
+          quota: "resetting",
+          runner: { type: "opencode", model: spark },
+          chainIndex: 2,
+        },
+        model: spark,
+        chain: [{ model: spark }, { model: grok }, { model: spark }],
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
+  });
+
+  test("chain index survives throwIfEngineFailed so a later copy of the model still waits", () => {
+    const spark = "opencode/muse-spark";
+    const grok = "xai/grok-4.6";
+    let thrown: unknown;
+    try {
+      throwIfEngineFailed({
+        status: "stuck",
+        message: QUOTA_MESSAGE,
+        quota: "resetting",
+        runner: { type: "opencode", model: spark },
+        chainIndex: 2,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(() =>
+      throwIfQuotaWait({
+        err: thrown,
+        model: spark,
+        chain: [{ model: spark }, { model: grok }, { model: spark }],
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
+  });
+
+  test("quota on the first of two same-provider runners waits even when a later copy can hop", () => {
+    const spark = "opencode/muse-spark";
+    const grok = "xai/grok-4.6";
+    expect(() =>
+      throwIfQuotaWait({
+        result: {
+          status: "stuck",
+          message: QUOTA_MESSAGE,
+          quota: "resetting",
+          runner: { type: "opencode", model: spark },
+          chainIndex: 0,
+        },
+        model: spark,
+        chain: [{ model: spark }, { model: spark }, { model: grok }],
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
+  });
+
+  test("stamped chain index still hops when the next runner is a different provider", () => {
+    const spark = "opencode/muse-spark";
+    const grok = "xai/grok-4.6";
+    expect(() =>
+      throwIfQuotaWait({
+        result: {
+          status: "stuck",
+          message: QUOTA_MESSAGE,
+          quota: "resetting",
+          runner: { type: "opencode", model: spark },
+          chainIndex: 0,
+        },
+        model: spark,
+        chain: [{ model: spark }, { model: grok }, { model: spark }],
+        random: () => 0,
+      })
+    ).not.toThrow();
+  });
+
   test("same-provider fallback is treated as no hop", () => {
     expect(() =>
       throwIfQuotaWait({

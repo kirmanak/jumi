@@ -53,6 +53,8 @@ export interface EngineResult {
   retryAfterMs?: number;
   /** The runner that actually produced this result (after any hop). */
   runner?: RunnerStamp;
+  /** Position of `runner` in the engine chain. Model text is not unique. */
+  chainIndex?: number;
   /** Set when a `hopFromIncomplete` run was refused: no runner was spawned, so there is no result. */
   hopDeclined?: boolean;
   /** A later runner remained, but this quota hop was refused (lease, session, or abort). */
@@ -68,6 +70,8 @@ export class EngineFailedError extends Error {
   readonly retryAfterMs?: number;
   /** The runner whose spawn failed; set by the engine chain or `throwIfEngineFailed`. */
   runner?: RunnerStamp;
+  /** Position of `runner` in the engine chain. Model text is not unique. */
+  chainIndex?: number;
   /** A later runner remained, but this quota hop was refused (lease, session, or abort). */
   hopRefused?: boolean;
 
@@ -97,15 +101,17 @@ export function throwIfEngineFailed(result: EngineResult): void {
     auth: result.auth === true,
   });
   if (result.runner) err.runner = result.runner;
+  if (result.chainIndex != null) err.chainIndex = result.chainIndex;
   if (result.hopRefused) err.hopRefused = true;
   throw err;
 }
 
 /** Record on a thrown spawn error which runner failed, unless an inner layer already did. */
-export function attachRunner(err: unknown, runner: RunnerStamp): void {
+export function attachRunner(err: unknown, runner: RunnerStamp, chainIndex?: number): void {
   if (err === null || typeof err !== "object") return;
-  const carrier = err as { runner?: RunnerStamp };
+  const carrier = err as { runner?: RunnerStamp; chainIndex?: number };
   if (!carrier.runner) carrier.runner = runner;
+  if (carrier.chainIndex == null && chainIndex != null) carrier.chainIndex = chainIndex;
 }
 
 /** Runner that produced `result`, falling back to the options the caller spawned with. */
@@ -120,6 +126,13 @@ export function resultRunner(
 export function thrownRunner(err: unknown): RunnerStamp | undefined {
   if (err === null || typeof err !== "object") return undefined;
   return (err as { runner?: RunnerStamp }).runner;
+}
+
+/** Chain position attached to a thrown spawn error, if any. */
+export function thrownChainIndex(err: unknown): number | undefined {
+  if (err === null || typeof err !== "object") return undefined;
+  const index = (err as { chainIndex?: number }).chainIndex;
+  return typeof index === "number" ? index : undefined;
 }
 
 /**

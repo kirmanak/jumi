@@ -220,6 +220,21 @@ describe("Engine, Tracker, and Forge ports", () => {
     }
   });
 
+  test("throwIfEngineFailed copies result.chainIndex onto the error", () => {
+    try {
+      throwIfEngineFailed({
+        status: "stuck",
+        message: "stuck",
+        runner: { type: "opencode", model: "opencode/muse-spark" },
+        chainIndex: 0,
+      });
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineFailedError);
+      expect((err as EngineFailedError).chainIndex).toBe(0);
+    }
+  });
+
   test("throwIfEngineFailed copies result.hopRefused onto the error", () => {
     try {
       throwIfEngineFailed({ status: "stuck", message: "stuck: usage limit exceeded", hopRefused: true });

@@ -199,8 +199,8 @@ function lazyChain(opts: EngineRunOptions, hop: EngineChainOptions): NamedRunner
   ];
 }
 
-function stampRunner(result: EngineResult, runner: NamedRunner): EngineResult {
-  return { ...result, runner: runnerStamp(runner) };
+function stampRunner(result: EngineResult, runner: NamedRunner, chainIndex: number): EngineResult {
+  return { ...result, runner: runnerStamp(runner), chainIndex };
 }
 
 export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
@@ -245,9 +245,9 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       const next = runners[index + 1];
       let result: EngineResult | undefined;
       try {
-        result = stampRunner(await engine(engineOptsForRunner(opts, current)), current);
+        result = stampRunner(await engine(engineOptsForRunner(opts, current)), current, index);
       } catch (err) {
-        attachRunner(err, runnerStamp(current));
+        attachRunner(err, runnerStamp(current), index);
         if (!next || !shouldHopQuotaError(err, opts, current.model, next.model)) {
           if (next) refuseQuotaHopError(err, current.model, next.model);
           throw err;
@@ -279,9 +279,9 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
 
       let result: EngineResult;
       try {
-        result = stampRunner(await engine(runOpts), runner);
+        result = stampRunner(await engine(runOpts), runner, index);
       } catch (err) {
-        attachRunner(err, runnerStamp(runner));
+        attachRunner(err, runnerStamp(runner), index);
         const next = runners[index + 1];
         if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) {
           if (next) refuseQuotaHopError(err, runner.model, next.model);
