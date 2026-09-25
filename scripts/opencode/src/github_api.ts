@@ -198,6 +198,12 @@ function isNotFoundError(err: unknown): boolean {
   return err instanceof Error && /→ 404\b/.test(err.message);
 }
 
+function isActionsDisabledError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (/rate limit/i.test(err.message)) return false;
+  return /→ (403|404)\b/.test(err.message);
+}
+
 function ownerRepoFromUrl(url: string | undefined): { owner: string; repo: string } | undefined {
   if (typeof url !== "string") return undefined;
   const repos = url.match(/\/repos\/([^/?#]+)\/([^/?#]+)/);
@@ -1020,9 +1026,15 @@ export class GithubAPI {
   ): Promise<ActionJob[]> {
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
     const shaQ = opts?.headSha ? `&head_sha=${encodeURIComponent(opts.headSha)}` : "";
-    const body = await this.get<{ workflow_runs?: GithubWorkflowRun[] }>(
-      `/repos/${this.repoPath(owner, repo)}/actions/runs?per_page=${PAGE_SIZE}&page=1${statusQ}${shaQ}`
-    );
+    let body: { workflow_runs?: GithubWorkflowRun[] };
+    try {
+      body = await this.get<{ workflow_runs?: GithubWorkflowRun[] }>(
+        `/repos/${this.repoPath(owner, repo)}/actions/runs?per_page=${PAGE_SIZE}&page=1${statusQ}${shaQ}`
+      );
+    } catch (err) {
+      if (isActionsDisabledError(err)) return [];
+      throw err;
+    }
     const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
     const jobs: ActionJob[] = [];
     for (const run of runs) {

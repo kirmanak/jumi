@@ -111,6 +111,7 @@ export async function runReviewJob(
     logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${early}`);
     return { status: "skipped", reason: early };
   }
+  let noCiNote: string | undefined;
   if (!extras.assumeNoCi) {
     const ciSkip = await skipReasonForOtherChecks(
       {
@@ -129,6 +130,25 @@ export async function runReviewJob(
       logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${ciSkip}`);
       return { status: "skipped", reason: ciSkip };
     }
+  } else {
+    const ciSkip = await skipReasonForOtherChecks(
+      {
+        api,
+        owner: job.owner,
+        repo: job.repo,
+        prNumber: job.prNumber,
+        home: config.home,
+        abortSignal: extras.abortSignal,
+        relist: false,
+      },
+      job.headSha,
+      logger
+    );
+    if (ciSkip && ciSkip !== CI_ABSENT_REASON) {
+      logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${ciSkip}`);
+      return { status: "skipped", reason: ciSkip };
+    }
+    if (ciSkip === CI_ABSENT_REASON) noCiNote = CI_ABSENT_NOTE;
   }
   const workspace = await createReviewWorkspace(config.workdir, job);
   try {
@@ -166,7 +186,7 @@ export async function runReviewJob(
       jobId: extras.jobId ?? job.delivery,
       ciRelistDelayMs: extras.ciRelistDelayMs,
       inspectOtherChecks: false,
-      noCiNote: extras.assumeNoCi ? CI_ABSENT_NOTE : undefined,
+      noCiNote,
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;

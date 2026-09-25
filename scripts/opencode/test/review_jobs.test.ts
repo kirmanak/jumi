@@ -485,7 +485,10 @@ describe("PgReviewJobStore.enqueue", () => {
       key: "kirmanak/demo#7:headsha",
       queued: false,
     });
-    expect(queries.some((query) => query.includes("rewake_requested = TRUE"))).toBe(true);
+    const wake = queries.find((query) => query.includes("rewake_requested"));
+    expect(wake).toContain("state = 'leased' THEN TRUE");
+    expect(wake).toContain("ci-lookup-retry:%");
+    expect(wake).toContain("leased_until");
     expect(queries.some((query) => query.includes("INSERT"))).toBe(false);
   });
 

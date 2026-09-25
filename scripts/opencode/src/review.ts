@@ -674,7 +674,9 @@ export function skipReasonForPR(pr: Pull): string | undefined {
 export const CI_RELIST_DELAY_MS = 5_000;
 
 export async function skipReasonForOtherChecks(
-  opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs">,
+  opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
+    relist?: boolean;
+  },
   sha: string,
   log: (message: string) => void
 ): Promise<string | undefined> {
@@ -688,7 +690,7 @@ export async function skipReasonForOtherChecks(
   };
   try {
     let ci = await inspectCi(inspectOpts);
-    if (ci.empty || ci.lookupFailed) {
+    if ((ci.empty || ci.lookupFailed) && opts.relist !== false) {
       // Actions may not have created the push's jobs yet, or a list call blipped;
       // give it one short beat, then re-list once. Still no checks is not green:
       // the engine waits on the CI lookup budget, then reviews and says so.

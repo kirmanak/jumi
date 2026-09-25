@@ -607,6 +607,82 @@ describe("processEngineTick", () => {
     });
   });
 
+  test("absent-budget exhaust re-lists once and does not claim no CI if a check appeared", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let looks = 0;
+      const api = makeApi({
+        listCommitStatuses: async () => {
+          looks++;
+          if (looks < 5) return [];
+          return [{ id: 1, context: "external/ci", status: "pending" }];
+        },
+        listCheckRuns: async () => [],
+        listActionJobs: async () => [],
+      });
+      let ran = 0;
+      let now = Date.UTC(2026, 0, 1);
+      const extras = {
+        now: () => now,
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async () => {
+          ran++;
+          return { status: "ok" as const };
+        },
+      };
+      const config = makeConfig({ workdir: workspace, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(0);
+      expect(store.rows[0]?.state).toBe("queued");
+      now += CI_LOOKUP_BUDGET_MS;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(0);
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe(CI_PENDING_REASON);
+      expect(api.reviews).toEqual([]);
+      expect(looks).toBe(5);
+    });
+  });
+
+  test("absent-budget exhaust reviews a check that finished green without the no-CI note", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let looks = 0;
+      const api = makeApi({
+        listCommitStatuses: async () => {
+          looks++;
+          if (looks < 5) return [];
+          return [{ id: 1, context: "external/ci", status: "success" }];
+        },
+        listCheckRuns: async () => [],
+        listActionJobs: async () => [],
+      });
+      let ran = 0;
+      let now = Date.UTC(2026, 0, 1);
+      const extras = {
+        now: () => now,
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (opts: { workdir: string }) => {
+          ran++;
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" as const };
+        },
+      };
+      const config = makeConfig({ workdir: workspace, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      now += CI_LOOKUP_BUDGET_MS;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(1);
+      expect(store.rows[0]?.state).toBe("succeeded");
+      expect((api.reviews[0] as { body: string }).body).not.toContain(CI_ABSENT_NOTE);
+      expect(looks).toBe(5);
+    });
+  });
+
   test("Actions that appear after the first list are not reviewed before they finish", async () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();

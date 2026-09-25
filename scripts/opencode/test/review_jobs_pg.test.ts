@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CI_LOOKUP_BACKOFF_MS, CI_LOOKUP_BUDGET_MS, CI_LOOKUP_FAILED_REASON } from "../src/ci.ts";
+import { CI_LOOKUP_BACKOFF_MS, CI_LOOKUP_BUDGET_MS, CI_LOOKUP_FAILED_REASON, encodeCiLookupMarker } from "../src/ci.ts";
 import type { ReviewApi } from "../src/review.ts";
 import {
   createBunSqlClient,
@@ -284,6 +284,22 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(stored?.state).toBe("leased");
     expect(stored?.leasedBy).toBe(RECLAIM_LEASED_BY);
     expect(stored?.leasedUntil ?? 0).toBeGreaterThan(Date.now());
+  });
+
+  test("same-key enqueue clears a queued ci-lookup backoff", async () => {
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000);
+    const now = Date.now();
+    expect(await store.requeueInfra(leased!.id, "engine-1", 60_000, encodeCiLookupMarker(1, now), new Date(now))).toBe(
+      true
+    );
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
+    const row = await store.get(leased!.id);
+    expect(row?.state).toBe("queued");
+    expect(row?.leasedUntil).toBeNull();
+    expect(row?.error).toBeNull();
+    expect(await store.lease("engine-1", 60_000, new Date(now))).toBeDefined();
   });
 
   test("concurrent enqueue of one job_key inserts exactly one in-flight row", async () => {
