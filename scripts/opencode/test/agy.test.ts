@@ -10,13 +10,17 @@ import {
   agyArgv,
   agyPrintTimeout,
   agyPromptArg,
+  ensureAgyForgeDeny,
+  mergeAgyForgeDeny,
   runAgy,
 } from "../src/agy.ts";
 import { AgyStreamParser } from "../src/agy_usage.ts";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { resetControlMetricsForTests } from "../src/control_metrics.ts";
+import { EngineFailedError } from "../src/engine.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { agyConversationPath, withEngineChain } from "../src/fallback.ts";
+import { agyReadUrlDeny, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
 import { formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
@@ -93,6 +97,35 @@ const SUCCESS_RESULT = resultEvent({
     cache_read_tokens: 9000,
     total_tokens: 21340,
   },
+});
+
+describe("mergeAgyForgeDeny", () => {
+  test("adds the apex rule and keeps an allow of the same host", () => {
+    const next = mergeAgyForgeDeny(
+      { account: "logged-in", permissions: { allow: ["read_url(github.com)"], deny: ["command(sudo)"] } },
+      "github.com"
+    );
+    expect(next).toEqual({
+      account: "logged-in",
+      permissions: { allow: ["read_url(github.com)"], deny: ["command(sudo)", agyReadUrlDeny("github.com")] },
+    });
+  });
+
+  test("refuses a host that would break the rule", () => {
+    expect(() => mergeAgyForgeDeny({}, "github.com)")).toThrow(/refusing/);
+  });
+
+  test("refuses a deny list it cannot merge", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agy-deny-"));
+    try {
+      const dir = join(home, AGY_SETTINGS_DIR);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "settings.json"), JSON.stringify({ permissions: { deny: "read_url(*)" } }));
+      await expect(ensureAgyForgeDeny(home, FORGE_DENY_DOMAIN)).rejects.toBeInstanceOf(EngineFailedError);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("agyArgv", () => {
@@ -307,20 +340,55 @@ describe("runAgy", () => {
         expect(line).toContain(`agy -p Read JUMI_TASK.md --output-format stream-json ${AGY_SKIP_PERMISSIONS}`);
         expect(line).toContain("--model gemini-3-pro --effort high");
         const settings = JSON.parse(await readFile(join(home, AGY_SETTINGS_DIR, "settings.json"), "utf8"));
-        expect(settings).toEqual(AGY_SEED_SETTINGS);
+        expect(settings).toEqual({
+          ...AGY_SEED_SETTINGS,
+          permissions: { deny: [agyReadUrlDeny(FORGE_DENY_DOMAIN)] },
+        });
       }
     );
   });
 
-  test("does not overwrite an existing settings file", async () => {
+  test("preserves a logged-in settings file and still denies the forge host", async () => {
     await withFakeBins(
       { agy: fakeBin("agy", `printf '%s\\n' '${SUCCESS_RESULT}'`) },
       async ({ workdir, home, argsLog }) => {
         const dir = join(home, AGY_SETTINGS_DIR);
         await mkdir(dir, { recursive: true });
-        await writeFile(join(dir, "settings.json"), '{"account":"logged-in"}');
-        await runAgy({ prompt: "p", model: "m", workdir, home, sanitizeEnv: true, extraEnv: { ARGS_LOG: argsLog } });
-        expect(await readFile(join(dir, "settings.json"), "utf8")).toBe('{"account":"logged-in"}');
+        await writeFile(
+          join(dir, "settings.json"),
+          JSON.stringify({
+            account: "logged-in",
+            permissions: { allow: [agyReadUrlDeny("github.com"), "read_url(*)"] },
+          })
+        );
+        await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog, GIT_AUTH_HOST: "github.com" },
+        });
+        const settings = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
+        expect(settings.account).toBe("logged-in");
+        expect(settings.permissions.allow).toEqual([agyReadUrlDeny("github.com"), "read_url(*)"]);
+        expect(settings.permissions.deny).toEqual([agyReadUrlDeny("github.com")]);
+        expect(await argLines(argsLog)).toHaveLength(1);
+      }
+    );
+  });
+
+  test("does not spawn when the forge read_url deny cannot be installed", async () => {
+    await withFakeBins(
+      { agy: fakeBin("agy", `printf '%s\\n' '${SUCCESS_RESULT}'`) },
+      async ({ workdir, home, argsLog }) => {
+        const dir = join(home, AGY_SETTINGS_DIR);
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, "settings.json"), "{not json");
+        await expect(
+          runAgy({ prompt: "p", model: "m", workdir, home, sanitizeEnv: true, extraEnv: { ARGS_LOG: argsLog } })
+        ).rejects.toBeInstanceOf(EngineFailedError);
+        expect(await argLines(argsLog)).toEqual([]);
       }
     );
   });

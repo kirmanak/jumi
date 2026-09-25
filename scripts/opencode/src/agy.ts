@@ -14,6 +14,7 @@ import {
 } from "./engine.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { agyConversationPath } from "./fallback.ts";
+import { agyReadUrlDeny, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
@@ -78,10 +79,75 @@ function agyEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string
   return env;
 }
 
+/** Hostname safe to embed in `read_url(host)`. Anything else fails the spawn closed. */
+export function agyForgeDenyHostOk(host: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(host) && !host.includes("..");
+}
+
+/**
+ * Add the forge `read_url` deny without dropping other settings. An allow of
+ * the same host does not win: the CLI evaluates deny before allow, including
+ * under `--dangerously-skip-permissions`.
+ */
+export function mergeAgyForgeDeny(settings: unknown, host: string): Record<string, unknown> {
+  if (!agyForgeDenyHostOk(host)) {
+    throw new Error(`refusing forge read_url deny for host ${JSON.stringify(host)}`);
+  }
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    throw new Error("agy settings.json is not an object");
+  }
+  const next = { ...(settings as Record<string, unknown>) };
+  const raw = next.permissions;
+  if (raw != null && (typeof raw !== "object" || Array.isArray(raw))) {
+    throw new Error("agy settings.json permissions is not an object");
+  }
+  const permissions = { ...((raw as Record<string, unknown> | undefined) ?? {}) };
+  if (permissions.deny != null && !Array.isArray(permissions.deny)) {
+    throw new Error("agy settings.json permissions.deny is not a list");
+  }
+  const deny = Array.isArray(permissions.deny) ? permissions.deny.filter((entry) => typeof entry === "string") : [];
+  const rule = agyReadUrlDeny(host);
+  if (!deny.includes(rule)) deny.push(rule);
+  permissions.deny = deny;
+  next.permissions = permissions;
+  return next;
+}
+
+/**
+ * Install the forge read_url deny in the settings file this spawn's HOME will
+ * load. Existing keys stay (a logged-in settings file is not replaced). Throws
+ * instead of returning when the rule cannot be installed: the caller must not
+ * spawn.
+ */
+export async function ensureAgyForgeDeny(home: string, host: string): Promise<void> {
+  if (!home) throw new EngineFailedError("agy spawn refused: no HOME for the forge read_url deny", false);
+  const dir = join(home, AGY_SETTINGS_DIR);
+  const path = join(dir, "settings.json");
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    let raw: string | undefined;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    const settings = raw == null ? { ...AGY_SEED_SETTINGS } : JSON.parse(raw);
+    const next = mergeAgyForgeDeny(settings, host);
+    const tmp = join(dir, `.settings.json.${process.pid}.tmp`);
+    await writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    await rename(tmp, path);
+  } catch (err) {
+    if (err instanceof EngineFailedError) throw err;
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new EngineFailedError(`agy spawn refused: cannot install forge read_url deny: ${reason}`, false);
+  }
+}
+
 /**
  * Best-effort: write telemetry-off / credit-overages-off settings only when the
  * CLI has no settings file yet. `agy models` may rewrite it, so this is not a
- * runtime assert.
+ * runtime assert. The forge read_url deny is installed separately and is not
+ * best-effort.
  */
 export async function seedAgySettings(home: string | undefined): Promise<void> {
   if (!home) return;
@@ -196,7 +262,12 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       promptArg = `Read ${promptPath} and follow the instructions in it exactly.`;
     }
     const env = agyEnv(opts, tempRoot);
-    await seedAgySettings(env.HOME);
+    const home = env.HOME;
+    if (!home) throw new EngineFailedError("agy spawn refused: no HOME for the forge read_url deny", false);
+    await seedAgySettings(home);
+    // After extraEnv, so a job-supplied HOME is the file the child will load,
+    // and a settings file that cannot take the deny fails the spawn closed.
+    await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv));
     const conversationId = opts.continueSession ? await readConversationId(opts.workdir) : undefined;
     const args = agyArgv(opts, promptArg, conversationId);
     if (opts.trace?.kind === "review") {
