@@ -812,6 +812,59 @@ describe("withEngineChain", () => {
     expect(models).toEqual([spark.model, grok.model]);
   });
 
+  test("quota on the last runner of a mixed chain is returned for the caller to wait", async () => {
+    const quotaStuck: EngineResult = { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      return quotaStuck;
+    };
+    const result = await withEngineChain(engine, { chain: [spark, grok] })({
+      model: spark.model,
+      workdir: "/tmp",
+    });
+    expect(models).toEqual([spark.model, grok.model]);
+    expect(result.runner?.model).toBe(grok.model);
+    expect(result.quota).toBe("resetting");
+    expect(result.hopRefused).toBeUndefined();
+  });
+
+  test("refused quota hop is marked so the caller can wait", async () => {
+    const quotaStuck: EngineResult = { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      return quotaStuck;
+    };
+    const result = await withEngineChain(engine, {
+      chain: [spark, grok],
+      remainingLeaseMs: () => 1_500_000,
+      extendLease: async () => false,
+    })({ model: spark.model, workdir: "/tmp", timeoutMs: 900_000 });
+    expect(models).toEqual([spark.model]);
+    expect(result.runner?.model).toBe(spark.model);
+    expect(result.hopRefused).toBe(true);
+  });
+
+  test("later call still hops a quota when a runner remains", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    let second = false;
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === spark.model) return unavailable;
+      if (!second) return ok(opts.model);
+      if (opts.model === grok.model) return { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+      return ok(opts.model);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok, claude] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    second = true;
+    const hopped = await run({ model: spark.model, workdir: "/tmp" });
+    expect(hopped).toMatchObject(ok(claude.model));
+    expect(models).toEqual([spark.model, grok.model, grok.model, claude.model]);
+  });
+
   test("exhausting the chain fails closed", async () => {
     const models: string[] = [];
     const engine: Engine = async (opts) => {

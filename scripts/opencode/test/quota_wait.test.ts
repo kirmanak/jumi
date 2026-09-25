@@ -14,7 +14,7 @@ describe("throwIfQuotaWait", () => {
     ).toThrow(QuotaWaitError);
   });
 
-  test("does not wait when fallback is a different provider", () => {
+  test("configured pair alone does not skip the wait", () => {
     expect(() =>
       throwIfQuotaWait({
         result: { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" },
@@ -22,7 +22,58 @@ describe("throwIfQuotaWait", () => {
         fallbackModel: "anthropic/claude-sonnet-4-6",
         random: () => 0,
       })
+    ).toThrow(QuotaWaitError);
+  });
+
+  test("waits when the producing runner is last in a mixed chain", () => {
+    expect(() =>
+      throwIfQuotaWait({
+        result: {
+          status: "stuck",
+          message: QUOTA_MESSAGE,
+          quota: "resetting",
+          runner: { type: "opencode", model: "anthropic/claude-sonnet-4-6" },
+        },
+        model: "opencode/big-pickle",
+        fallbackModel: "anthropic/claude-sonnet-4-6",
+        chain: [{ model: "opencode/big-pickle" }, { model: "anthropic/claude-sonnet-4-6" }],
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
+  });
+
+  test("does not wait when a later runner can still take the quota", () => {
+    expect(() =>
+      throwIfQuotaWait({
+        result: {
+          status: "stuck",
+          message: QUOTA_MESSAGE,
+          quota: "resetting",
+          runner: { type: "opencode", model: "opencode/big-pickle" },
+        },
+        model: "opencode/big-pickle",
+        chain: [{ model: "opencode/big-pickle" }, { model: "anthropic/claude-sonnet-4-6" }],
+        random: () => 0,
+      })
     ).not.toThrow();
+  });
+
+  test("refused hop waits even when a later runner remains", () => {
+    expect(() =>
+      throwIfQuotaWait({
+        result: {
+          status: "stuck",
+          message: QUOTA_MESSAGE,
+          quota: "resetting",
+          runner: { type: "opencode", model: "opencode/big-pickle" },
+          hopRefused: true,
+        },
+        model: "opencode/big-pickle",
+        fallbackModel: "anthropic/claude-sonnet-4-6",
+        chain: [{ model: "opencode/big-pickle" }, { model: "anthropic/claude-sonnet-4-6" }],
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
   });
 
   test("does not wait for hard quota", () => {

@@ -55,6 +55,8 @@ export interface EngineResult {
   runner?: RunnerStamp;
   /** Set when a `hopFromIncomplete` run was refused: no runner was spawned, so there is no result. */
   hopDeclined?: boolean;
+  /** A later runner remained, but this quota hop was refused (lease, session, or abort). */
+  hopRefused?: boolean;
 }
 
 export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;
@@ -66,6 +68,8 @@ export class EngineFailedError extends Error {
   readonly retryAfterMs?: number;
   /** The runner whose spawn failed; set by the engine chain or `throwIfEngineFailed`. */
   runner?: RunnerStamp;
+  /** A later runner remained, but this quota hop was refused (lease, session, or abort). */
+  hopRefused?: boolean;
 
   constructor(message: string, infra = false, extras?: { quota?: QuotaClass; retryAfterMs?: number; auth?: boolean }) {
     super(message);

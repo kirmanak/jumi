@@ -1,5 +1,5 @@
 import type { EngineResult } from "./engine.ts";
-import { EngineFailedError } from "./engine.ts";
+import { EngineFailedError, thrownRunner } from "./engine.ts";
 import { shouldHopInsteadOfQuotaStuck } from "./fallback.ts";
 import {
   decideQuotaRetry,
@@ -33,16 +33,58 @@ export function isResettingQuotaError(err: unknown): boolean {
   return isResettingQuotaText(text);
 }
 
+function stampedProducerModel(input: {
+  result?: EngineResult;
+  err?: unknown;
+  runnerModel?: string;
+}): string | undefined {
+  return input.runnerModel ?? input.result?.runner?.model ?? thrownRunner(input.err)?.model;
+}
+
+export function laterModelsAfter(
+  chain: readonly { model: string }[] | undefined,
+  producerModel: string | undefined
+): string[] {
+  if (!chain?.length || !producerModel) return [];
+  const idx = chain.findIndex((runner) => runner.model === producerModel);
+  if (idx < 0) return [];
+  return chain.slice(idx + 1).map((runner) => runner.model);
+}
+
+function hopWasRefused(input: { result?: EngineResult; err?: unknown; hopRefused?: boolean }): boolean {
+  if (input.hopRefused === true || input.result?.hopRefused === true) return true;
+  return (
+    input.err !== null && typeof input.err === "object" && (input.err as { hopRefused?: boolean }).hopRefused === true
+  );
+}
+
+export function laterRunnerCanTakeQuota(
+  producerModel: string | undefined,
+  laterModels: readonly string[] | undefined,
+  hopRefused: boolean
+): boolean {
+  if (hopRefused || !producerModel) return false;
+  const next = laterModels?.[0];
+  if (!next) return false;
+  return shouldHopInsteadOfQuotaStuck(producerModel, next);
+}
+
 export function throwIfQuotaWait(input: {
   result?: EngineResult;
   err?: unknown;
   model: string;
   fallbackModel?: string;
+  chain?: readonly { model: string }[];
+  laterModels?: readonly string[];
+  runnerModel?: string;
+  hopRefused?: boolean;
   previousError?: string | null;
   nowMs?: number;
   random?: () => number;
 }): void {
-  if (shouldHopInsteadOfQuotaStuck(input.model, input.fallbackModel)) return;
+  const producer = stampedProducerModel(input);
+  const later = input.laterModels ?? laterModelsAfter(input.chain, producer);
+  if (laterRunnerCanTakeQuota(producer, later, hopWasRefused(input))) return;
   let kind: QuotaClass | undefined;
   let retryAfterMs: number | undefined;
   if (input.result) {

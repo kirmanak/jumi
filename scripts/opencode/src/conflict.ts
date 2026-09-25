@@ -659,6 +659,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             err,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
+            chain: opts.chain,
             previousError: opts.previousError,
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
@@ -736,6 +737,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
                 result: continued,
                 model: opts.model,
                 fallbackModel: opts.fallbackModel,
+                chain: opts.chain,
                 previousError: opts.previousError,
               });
               await sticky(QUOTA_STUCK_TEXT, pr.number);
@@ -752,6 +754,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             err,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
+            chain: opts.chain,
             previousError: opts.previousError,
           });
           await loop.stopHeartbeat();
@@ -793,6 +796,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           err,
           model: opts.model,
           fallbackModel: opts.fallbackModel,
+          chain: opts.chain,
           previousError: opts.previousError,
         });
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);

@@ -120,6 +120,34 @@ function shouldHopFromError(err: unknown, opts: EngineRunOptions, currentModel: 
   return looksLikeProviderUnavailable(err.message);
 }
 
+function shouldHopQuotaResult(
+  result: EngineResult,
+  opts: EngineRunOptions,
+  currentModel: string,
+  nextModel: string
+): boolean {
+  if (opts.continueSession || opts.abortSignal?.aborted) return false;
+  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
+}
+
+function shouldHopQuotaError(err: unknown, opts: EngineRunOptions, currentModel: string, nextModel: string): boolean {
+  if (opts.continueSession || opts.abortSignal?.aborted || isAbortError(err)) return false;
+  if (!(err instanceof EngineFailedError) || err.infra || err.auth) return false;
+  return isQuotaError(err) && shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
+}
+
+function refuseQuotaHop(result: EngineResult, currentModel: string, nextModel: string | undefined): EngineResult {
+  if (!nextModel || !isQuotaStuckResult(result) || !shouldHopInsteadOfQuotaStuck(currentModel, nextModel)) {
+    return result;
+  }
+  return { ...result, hopRefused: true };
+}
+
+function refuseQuotaHopError(err: unknown, currentModel: string, nextModel: string | undefined): void {
+  if (!nextModel || !isQuotaError(err) || !shouldHopInsteadOfQuotaStuck(currentModel, nextModel)) return;
+  if (err !== null && typeof err === "object") (err as { hopRefused?: boolean }).hopRefused = true;
+}
+
 function settleQuotaSigterm(opts: EngineRunOptions, result: EngineResult, hopped: boolean): void {
   if (!shouldDeferQuotaExit(result)) return;
   recordOpenCodeRun(opts.trace?.kind ?? "review", { ...result, hopped });
@@ -214,11 +242,25 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
 
     if (index > 0 && opts.hopFromIncomplete !== true) {
       const current = runners[index]!;
+      const next = runners[index + 1];
+      let result: EngineResult | undefined;
       try {
-        return stampRunner(await engine(engineOptsForRunner(opts, current)), current);
+        result = stampRunner(await engine(engineOptsForRunner(opts, current)), current);
       } catch (err) {
         attachRunner(err, runnerStamp(current));
-        throw err;
+        if (!next || !shouldHopQuotaError(err, opts, current.model, next.model)) throw err;
+        if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
+          refuseQuotaHopError(err, current.model, next.model);
+          throw err;
+        }
+        await beginHop(hop, opts, current, next);
+        index++;
+      }
+      if (result) {
+        if (!next || !shouldHopQuotaResult(result, opts, current.model, next.model)) return result;
+        if (!(await leaseAllowsHop(hop, opts.timeoutMs))) return refuseQuotaHop(result, current.model, next.model);
+        await beginHop(hop, opts, current, next);
+        index++;
       }
     }
 
@@ -236,8 +278,14 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       } catch (err) {
         attachRunner(err, runnerStamp(runner));
         const next = runners[index + 1];
-        if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) throw err;
-        if (!(await leaseAllowsHop(hop, opts.timeoutMs))) throw err;
+        if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) {
+          if (next) refuseQuotaHopError(err, runner.model, next.model);
+          throw err;
+        }
+        if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
+          refuseQuotaHopError(err, runner.model, next.model);
+          throw err;
+        }
         await beginHop(hop, opts, runner, next);
         index++;
         continue;
@@ -246,11 +294,11 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       const next = runners[index + 1];
       if (!next || !shouldHopFromResult(result, opts, runner.model, next.model)) {
         settleQuotaSigterm(opts, result, false);
-        return result;
+        return refuseQuotaHop(result, runner.model, next?.model);
       }
       if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
         settleQuotaSigterm(opts, result, false);
-        return result;
+        return refuseQuotaHop(result, runner.model, next.model);
       }
       try {
         await beginHop(hop, opts, runner, next);
