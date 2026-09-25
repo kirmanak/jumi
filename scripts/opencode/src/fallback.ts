@@ -245,7 +245,11 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       const next = runners[index + 1];
       let result: EngineResult | undefined;
       try {
-        result = stampRunner(await engine(engineOptsForRunner(opts, current)), current, index);
+        result = stampRunner(
+          await engine(engineOptsForRunner(opts, current, { deferQuotaExit: true })),
+          current,
+          index
+        );
       } catch (err) {
         attachRunner(err, runnerStamp(current), index);
         if (!next || !shouldHopQuotaError(err, opts, current.model, next.model)) {
@@ -261,10 +265,20 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       }
       if (result) {
         if (!next || !shouldHopQuotaResult(result, opts, current.model, next.model)) {
+          settleQuotaSigterm(opts, result, false);
           return refuseQuotaHop(result, current.model, next?.model);
         }
-        if (!(await leaseAllowsHop(hop, opts.timeoutMs))) return refuseQuotaHop(result, current.model, next.model);
-        await beginHop(hop, opts, current, next);
+        if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
+          settleQuotaSigterm(opts, result, false);
+          return refuseQuotaHop(result, current.model, next.model);
+        }
+        try {
+          await beginHop(hop, opts, current, next);
+        } catch (err) {
+          settleQuotaSigterm(opts, result, false);
+          throw err;
+        }
+        settleQuotaSigterm(opts, result, true);
         index++;
       }
     }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { observeEngineRun, renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { type Engine, EngineFailedError, type EngineResult } from "../src/engine.ts";
 import {
   agyConversationPath,
@@ -906,6 +907,108 @@ describe("withEngineChain", () => {
     const hopped = await run({ model: spark.model, workdir: "/tmp" });
     expect(hopped).toMatchObject(ok(claude.model));
     expect(models).toEqual([spark.model, grok.model, grok.model, claude.model]);
+  });
+
+  test("later call defers a quota SIGTERM and classifies a hop as quota", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const sigterm: EngineResult = {
+      status: "stuck",
+      exitCode: 143,
+      message: QUOTA_MESSAGE,
+      quota: "resetting",
+    };
+    let later = false;
+    const deferred: boolean[] = [];
+    const engine: Engine = async (opts) => {
+      if (later && opts.model === grok.model) deferred.push(opts.deferQuotaExit === true);
+      if (opts.model === spark.model) return observeEngineRun(opts, unavailable);
+      if (!later) return observeEngineRun(opts, ok(opts.model));
+      if (opts.model === grok.model) return observeEngineRun(opts, sigterm);
+      return observeEngineRun(opts, ok(opts.model));
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok, claude] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    resetControlMetricsForTests();
+    later = true;
+    try {
+      const hopped = await run({ model: spark.model, workdir: "/tmp" });
+      expect(hopped).toMatchObject(ok(claude.model));
+      expect(deferred).toEqual([true]);
+      const text = renderRunMetrics();
+      expect(text).toContain('jumi_opencode_exits_total{kind="review",class="quota"} 1');
+      expect(text).toContain('jumi_opencode_exits_total{kind="review",class="ok"} 1');
+      expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 0');
+    } finally {
+      resetControlMetricsForTests();
+    }
+  });
+
+  test("later call quota SIGTERM with no later runner stays class 143", async () => {
+    const sigterm: EngineResult = {
+      status: "stuck",
+      exitCode: 143,
+      message: QUOTA_MESSAGE,
+      quota: "resetting",
+    };
+    let later = false;
+    const deferred: boolean[] = [];
+    const engine: Engine = async (opts) => {
+      if (later) deferred.push(opts.deferQuotaExit === true);
+      if (opts.model === spark.model) return observeEngineRun(opts, unavailable);
+      if (!later) return observeEngineRun(opts, ok(opts.model));
+      return observeEngineRun(opts, sigterm);
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    resetControlMetricsForTests();
+    later = true;
+    try {
+      const result = await run({ model: spark.model, workdir: "/tmp" });
+      expect(result.exitCode).toBe(143);
+      expect(result.quota).toBe("resetting");
+      expect(result.hopRefused).toBeUndefined();
+      expect(deferred).toEqual([true]);
+      const text = renderRunMetrics();
+      expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 1');
+      expect(text).toContain('jumi_opencode_exits_total{kind="review",class="quota"} 0');
+    } finally {
+      resetControlMetricsForTests();
+    }
+  });
+
+  test("later call quota SIGTERM refused by lease stays class 143", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const sigterm: EngineResult = {
+      status: "stuck",
+      exitCode: 143,
+      message: QUOTA_MESSAGE,
+      quota: "resetting",
+    };
+    let later = false;
+    const engine: Engine = async (opts) => {
+      if (opts.model === spark.model) return observeEngineRun(opts, unavailable);
+      if (!later) return observeEngineRun(opts, ok(opts.model));
+      if (opts.model === grok.model) return observeEngineRun(opts, sigterm);
+      return observeEngineRun(opts, ok(opts.model));
+    };
+    const run = withEngineChain(engine, {
+      chain: [spark, grok, claude],
+      extendLease: async () => !later,
+    });
+    await run({ model: spark.model, workdir: "/tmp" });
+    resetControlMetricsForTests();
+    later = true;
+    try {
+      const result = await run({ model: spark.model, workdir: "/tmp" });
+      expect(result.exitCode).toBe(143);
+      expect(result.hopRefused).toBe(true);
+      expect(result.runner?.model).toBe(grok.model);
+      const text = renderRunMetrics();
+      expect(text).toContain('jumi_opencode_exits_total{kind="review",class="143"} 1');
+      expect(text).toContain('jumi_opencode_exits_total{kind="review",class="quota"} 0');
+    } finally {
+      resetControlMetricsForTests();
+    }
   });
 
   test("stamps the producing index when the same model appears twice", async () => {
