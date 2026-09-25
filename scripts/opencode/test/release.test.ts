@@ -23,6 +23,7 @@ import {
   touchesGitHubWorkflows,
   workflowRebuildsOnTag,
 } from "../src/release.ts";
+import { ANTIGRAVITY_HOMELAB_CONSTRAINT } from "../src/runners.ts";
 
 const repoRoot = join(process.cwd(), "../..");
 
@@ -218,6 +219,28 @@ describe("version bump", () => {
     expect(body).toContain("removed required env GITEA_WEBHOOK_SECRET");
   });
 
+  test("required constraint add or removal → major", () => {
+    const heading = "#### required constraints\n- `Antigravity refused unless FORGE=github`\n\n";
+    const withReviewer = BASE_CONTRACT.replace("### reviewer\n", `### reviewer\n${heading}`);
+    expect(classifyBump(BASE_CONTRACT, withReviewer)).toBe("major");
+    const added = buildReleaseBody({
+      previousContract: BASE_CONTRACT,
+      currentContract: withReviewer,
+      changes: ["agy1111 refuse homelab antigravity"],
+    });
+    expect(added).toContain("**constraint** `Antigravity refused unless FORGE=github`");
+    expect(added).toContain("## Breaking\nnone\n");
+
+    const removed = buildReleaseBody({
+      previousContract: withReviewer,
+      currentContract: BASE_CONTRACT,
+      changes: ["agy2222 drop constraint"],
+    });
+    expect(classifyBump(withReviewer, BASE_CONTRACT)).toBe("major");
+    expect(removed).toContain("**removed constraint** `Antigravity refused unless FORGE=github`");
+    expect(removed).toContain("reviewer: removed required constraint Antigravity refused unless FORGE=github");
+  });
+
   test("BREAKING marker → major even without key removal", () => {
     const next = `${BASE_CONTRACT}\n## BREAKING\n- app protocol change\n`;
     expect(classifyBump(BASE_CONTRACT, next)).toBe("major");
@@ -400,6 +423,8 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.imageTarget).toBe("worker");
     expect(parsed.reviewer.volumes).toEqual(["/data", "/work"]);
     expect(parsed.worker.volumes).toEqual(["/data", "/work"]);
+    expect(parsed.reviewer.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);
+    expect(parsed.worker.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);
     expect(markdown).toContain("workflow_job");
   });
 

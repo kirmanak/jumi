@@ -108,9 +108,9 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     fallbackModel: optionalEnv(resolved, "OPENCODE_FALLBACK_MODEL"),
     fallbackVariant: optionalEnv(resolved, "OPENCODE_FALLBACK_VARIANT"),
   };
-  const runnersFile = optionalEnv(resolved, "JUMI_RUNNERS_FILE");
-  const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv);
   const forge = parseForge(resolved.FORGE);
+  const runnersFile = optionalEnv(resolved, "JUMI_RUNNERS_FILE");
+  const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv, forge);
   const forgeBind =
     forge === "github"
       ? loadForgeBind(resolved, { requireWebhookSecret: true })

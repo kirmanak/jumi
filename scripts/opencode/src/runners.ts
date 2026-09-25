@@ -1,9 +1,16 @@
 import { readFileSync } from "node:fs";
+import type { ForgeKind } from "./forge.ts";
 
 export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
 export const OPENCODE_RUNNER_TYPE = "opencode";
 export const CLAUDE_RUNNER_TYPE = "claude";
 export const AGY_RUNNER_TYPE = "agy";
+/**
+ * Deploy-contract required constraint. Homelab (`FORGE` unset, empty, or `gitea`)
+ * must not start if a runners file names `type: agy`. `FORGE=github` may.
+ * Listed under `required constraints` so a later removal is a major bump.
+ */
+export const ANTIGRAVITY_HOMELAB_CONSTRAINT = "Antigravity refused unless FORGE=github";
 export const SYNTHESIZED_PRIMARY = "primary";
 export const SYNTHESIZED_FALLBACK = "fallback";
 
@@ -159,9 +166,34 @@ export function synthesizeRunners(input: SynthesizeRunnersInput): RunnersCatalog
   return { runners, chain };
 }
 
-export function loadRunnersCatalog(path: string | undefined, fromEnv: SynthesizeRunnersInput): RunnersCatalog {
-  if (!path) return synthesizeRunners(fromEnv);
-  return parseRunnersFile(path);
+export class AntigravityRefusedError extends Error {
+  readonly constraint = ANTIGRAVITY_HOMELAB_CONSTRAINT;
+
+  constructor(runnerNames: readonly string[]) {
+    const listed = runnerNames.join(", ");
+    super(`${ANTIGRAVITY_HOMELAB_CONSTRAINT}: ${RUNNERS_FILE_ENV} names type ${AGY_RUNNER_TYPE} (${listed})`);
+    this.name = "AntigravityRefusedError";
+  }
+}
+
+/** Fail closed at process start. A synthesized OpenCode chain never names `agy`. */
+export function refuseAntigravityUnlessGithub(catalog: RunnersCatalog, forge: ForgeKind): void {
+  if (forge === "github") return;
+  const names = Object.entries(catalog.runners)
+    .filter(([, runner]) => runner.type === AGY_RUNNER_TYPE)
+    .map(([name]) => name)
+    .sort();
+  if (names.length > 0) throw new AntigravityRefusedError(names);
+}
+
+export function loadRunnersCatalog(
+  path: string | undefined,
+  fromEnv: SynthesizeRunnersInput,
+  forge: ForgeKind
+): RunnersCatalog {
+  const catalog = path ? parseRunnersFile(path) : synthesizeRunners(fromEnv);
+  refuseAntigravityUnlessGithub(catalog, forge);
+  return catalog;
 }
 
 export function orderedRunners(catalog: RunnersCatalog): NamedRunner[] {

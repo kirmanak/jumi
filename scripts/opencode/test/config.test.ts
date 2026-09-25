@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, SECRET_ENV_KEYS, SECRETS_FILE_ENV, scrubSecretEnv } from "../src/config.ts";
-import { RUNNERS_FILE_ENV } from "../src/runners.ts";
+import { AntigravityRefusedError, RUNNERS_FILE_ENV } from "../src/runners.ts";
 import { validateCloneUrl } from "../src/workspace.ts";
 
 describe("loadConfig", () => {
@@ -166,6 +166,47 @@ describe("loadConfig", () => {
     const bad = join(dir, "bad.json");
     writeFileSync(bad, JSON.stringify({ runners: { x: { type: "hermes", model: "claude" } }, chain: ["x"] }));
     expect(() => loadConfig({ ...required, [RUNNERS_FILE_ENV]: bad })).toThrow("Unknown runner type");
+  });
+
+  test("Gitea reviewer refuses a runners file that names Antigravity and still synthesizes OpenCode", () => {
+    expect(loadConfig(required).runners).toEqual({
+      primary: { type: "opencode", model: "openai/gpt-5.5" },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "jumi-agy-gitea-"));
+    const file = join(dir, "runners.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        runners: {
+          agy: { type: "agy", model: "gemini-3-pro", effort: "high" },
+          grok: { type: "opencode", model: "opencode/grok-4.6" },
+        },
+        chain: ["agy", "grok"],
+      })
+    );
+    for (const forge of [undefined, "", "gitea"] as const) {
+      const env = forge === undefined ? required : { ...required, FORGE: forge };
+      expect(() => loadConfig({ ...env, [RUNNERS_FILE_ENV]: file, JUMI_ROLE: "router" })).toThrow(
+        AntigravityRefusedError
+      );
+      expect(() => loadConfig({ ...env, [RUNNERS_FILE_ENV]: file, JUMI_ROLE: "engine" })).toThrow(
+        AntigravityRefusedError
+      );
+    }
+    const unused = join(dir, "unused.json");
+    writeFileSync(
+      unused,
+      JSON.stringify({
+        runners: {
+          spare: { type: "agy", model: "gemini-3-pro" },
+          grok: { type: "opencode", model: "opencode/grok-4.6" },
+        },
+        chain: ["grok"],
+      })
+    );
+    expect(() => loadConfig({ ...required, [RUNNERS_FILE_ENV]: unused })).toThrow(
+      "Antigravity refused unless FORGE=github"
+    );
   });
 
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {
@@ -364,6 +405,22 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...githubRequired, GITHUB_APP_PRIVATE_KEY: "" })).toThrow("GITHUB_APP_PRIVATE_KEY");
     expect(() => loadConfig({ ...githubRequired, FORGE_URL: "" })).toThrow("FORGE_URL");
     expect(() => loadConfig({ ...githubRequired, GITHUB_ALLOWED_ORGS: "" })).toThrow("GITHUB_ALLOWED_ORGS");
+  });
+
+  test("FORGE=github still starts when the runners file names Antigravity", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jumi-agy-github-"));
+    const file = join(dir, "runners.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        runners: { agy: { type: "agy", model: "gemini-3-pro", effort: "high" } },
+        chain: ["agy"],
+      })
+    );
+    const config = loadConfig({ ...githubRequired, [RUNNERS_FILE_ENV]: file });
+    expect(config.forge).toBe("github");
+    expect(config.chain).toEqual(["agy"]);
+    expect(config.runners.agy).toEqual({ type: "agy", model: "gemini-3-pro", effort: "high" });
   });
 
   test("FORGE=github dual-binds URL/orgs/webhook and requires GitHub App env", () => {
