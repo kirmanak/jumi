@@ -16,6 +16,11 @@ import type {
   Repo,
   Task,
 } from "./ports.ts";
+import {
+  GITHUB_STATUS_DESCRIPTION_MAX_CHARS,
+  omitOpenCodeStderr,
+  truncateStatusDescription,
+} from "./status_description.ts";
 
 export type GithubAuth = {
   getInstallationToken(target?: GithubTokenTarget): Promise<string>;
@@ -943,9 +948,16 @@ export class GithubAPI {
   }
 
   async createCommitStatus(owner: string, repo: string, sha: string, status: CheckPayload): Promise<CheckPayload> {
+    const description =
+      typeof status.description === "string"
+        ? truncateStatusDescription(omitOpenCodeStderr(status.description), {
+            maxChars: GITHUB_STATUS_DESCRIPTION_MAX_CHARS,
+          })
+        : status.description;
     return toCheckPayload(
       await this.post<GithubStatus>(`/repos/${this.repoPath(owner, repo)}/statuses/${encodeURIComponent(sha)}`, {
         ...status,
+        description,
         // GitHub statuses have no "warning". Only skipped reviews (no parsed verdict) use it; posting
         // "success" would let a skip satisfy a required check, and "pending" can wedge the PR forever.
         state: status.state === "warning" ? "failure" : status.state,

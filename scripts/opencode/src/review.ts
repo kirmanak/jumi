@@ -35,6 +35,11 @@ import {
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner } from "./runners.ts";
 import {
+  GITEA_STATUS_DESCRIPTION_MAX_BYTES,
+  omitOpenCodeStderr,
+  truncateStatusDescription,
+} from "./status_description.ts";
+import {
   appendStuckFingerprint,
   clearQuotaStuck,
   evaluateStuck,
@@ -546,7 +551,6 @@ function leftoverAttemptedFingerprints(
 }
 
 const CHECK_CONTEXT = "jumi/opencode-review";
-const MAX_STATUS_DESCRIPTION_BYTES = 255;
 const REVIEW_ARTIFACT = "JUMI_REVIEW.md";
 const DEFAULT_MAX_OUTPUT_BYTES = 80_000;
 export const MAX_INCOMPLETE_RETRIES = 2;
@@ -582,22 +586,10 @@ async function readReviewArtifact(worktree: string, maxOutputBytes: number): Pro
   }
 }
 
-function truncateStatusDescription(description: string): string {
-  const bytes = encoder.encode(description);
-  if (bytes.byteLength <= MAX_STATUS_DESCRIPTION_BYTES) return description;
-  const suffix = "…";
-  const budget = MAX_STATUS_DESCRIPTION_BYTES - encoder.encode(suffix).byteLength;
-  const chars: string[] = [];
-  let used = 0;
-
-  for (const char of description) {
-    const charBytes = encoder.encode(char).byteLength;
-    if (used + charBytes > budget) break;
-    chars.push(char);
-    used += charBytes;
-  }
-
-  return `${chars.join("").replace(/\p{Mark}+$/u, "")}${suffix}`;
+function statusDescription(description: string): string {
+  return truncateStatusDescription(omitOpenCodeStderr(description), {
+    maxBytes: GITEA_STATUS_DESCRIPTION_MAX_BYTES,
+  });
 }
 
 async function postReviewStatus(
@@ -612,7 +604,7 @@ async function postReviewStatus(
   await api.createCommitStatus(owner, repo, headSha, {
     state,
     context: CHECK_CONTEXT,
-    description: truncateStatusDescription(description),
+    description: statusDescription(description),
     target_url: targetUrl,
   });
 }
