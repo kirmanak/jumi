@@ -3,12 +3,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
-import { CI_PENDING_REASON } from "../src/ci.ts";
+import { CI_LOOKUP_BACKOFF_MS, CI_LOOKUP_BUDGET_MS, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
 import { INCOMPLETE_REVIEW_STUCK, MAX_INCOMPLETE_RETRIES, type ReviewApi } from "../src/review.ts";
-import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY } from "../src/review_jobs.ts";
+import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { stuckMarker } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -476,6 +476,131 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: blocker }), api, "engine-1");
       expect(store.rows[0]?.state).toBe("skipped");
       expect(store.rows[0]?.resultReason).toBe(CI_PENDING_REASON);
+    });
+  });
+
+  test("always-failing CI lookup is not leasable until backoff, then terminal after the budget", async () => {
+    await withWorkspace(async (workspace) => {
+      const blocker = join(workspace, "not-a-dir");
+      await writeFile(blocker, "x");
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let lists = 0;
+      const boom = async () => {
+        lists++;
+        throw new Error("rate limited");
+      };
+      const api = makeApi({
+        listCommitStatuses: boom,
+        listCheckRuns: boom,
+        listActionJobs: boom,
+      });
+      let now = Date.UTC(2026, 0, 1);
+      const extras = {
+        now: () => now,
+        openCodeRunner: async () => {
+          throw new Error("runner should not be called");
+        },
+      };
+      const config = makeConfig({ workdir: blocker, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      const cooling = store.rows[0];
+      expect(cooling?.state).toBe("queued");
+      expect(cooling?.leasedUntil).toBe(now + CI_LOOKUP_BACKOFF_MS[0]);
+      expect(api.statuses).toEqual([]);
+      expect(await store.lease("engine-2", 60_000, new Date(now), [REVIEW_KIND])).toBeUndefined();
+      now = cooling?.leasedUntil ?? now;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.leasedUntil).toBe(now + CI_LOOKUP_BACKOFF_MS[1]);
+      expect((store.rows[0]?.leasedUntil ?? 0) - now).toBeGreaterThan(CI_LOOKUP_BACKOFF_MS[0]);
+      now += CI_LOOKUP_BUDGET_MS;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      const done = store.rows[0];
+      expect(done?.state).toBe("failed");
+      expect(done?.resultReason).toBe(CI_LOOKUP_FAILED_REASON);
+      expect(done?.publishedAt).not.toBeNull();
+      expect(api.statuses).toEqual([{ sha: "headsha", state: "failure", description: CI_LOOKUP_FAILED_REASON }]);
+      expect(lists).toBe(18);
+      expect(await store.lease("engine-2", 60_000, new Date(now), [REVIEW_KIND])).toBeUndefined();
+      expect(await processEngineTick(store, config, api, "engine-1", extras)).toBe("idle");
+      expect(lists).toBe(18);
+      expect(await store.enqueue(makeJob())).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    });
+  });
+
+  test("closed or merged pull finishes in one lease when CI lookups would fail", async () => {
+    await withWorkspace(async (workspace) => {
+      const blocker = join(workspace, "not-a-dir");
+      await writeFile(blocker, "x");
+      const config = makeConfig({ workdir: blocker, home: workspace });
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let lists = 0;
+      const boom = async () => {
+        lists++;
+        throw new Error("rate limited");
+      };
+      const closed = makeApi({
+        getPR: async () => makePR({ state: "closed" }),
+        listCommitStatuses: boom,
+        listCheckRuns: boom,
+        listActionJobs: boom,
+      });
+      await processEngineTick(store, config, closed, "engine-1", {
+        openCodeRunner: async () => {
+          throw new Error("runner should not be called");
+        },
+      });
+      expect(lists).toBe(0);
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe("PR is closed");
+      expect(await processEngineTick(store, config, closed, "engine-1")).toBe("idle");
+
+      const mergedStore = new MemoryReviewJobStore();
+      await mergedStore.enqueue(makeJob());
+      const merged = makeApi({
+        getPR: async () => makePR({ merged: true }),
+        listCommitStatuses: boom,
+        listCheckRuns: boom,
+        listActionJobs: boom,
+      });
+      await processEngineTick(mergedStore, config, merged, "engine-1");
+      expect(lists).toBe(0);
+      expect(mergedStore.rows[0]?.state).toBe("skipped");
+      expect(mergedStore.rows[0]?.resultReason).toBe("PR is already merged");
+      expect(await processEngineTick(mergedStore, config, merged, "engine-1")).toBe("idle");
+    });
+  });
+
+  test("same-SHA wake during a failing CI lookup requeues immediately", async () => {
+    await withWorkspace(async (workspace) => {
+      const blocker = join(workspace, "not-a-dir");
+      await writeFile(blocker, "x");
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi({
+        listCommitStatuses: async () => {
+          await store.enqueue(makeJob());
+          throw new Error("rate limited");
+        },
+        listCheckRuns: async () => {
+          throw new Error("rate limited");
+        },
+        listActionJobs: async () => {
+          throw new Error("rate limited");
+        },
+      });
+      await processEngineTick(store, makeConfig({ workdir: blocker, home: workspace }), api, "engine-1", {
+        openCodeRunner: async () => {
+          throw new Error("runner should not be called");
+        },
+      });
+      const row = store.rows[0];
+      expect(row?.state).toBe("queued");
+      expect(row?.leasedUntil).toBeNull();
+      expect(row?.rewakeRequested).toBe(false);
+      expect(api.statuses).toEqual([]);
     });
   });
 

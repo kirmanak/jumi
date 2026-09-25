@@ -668,7 +668,7 @@ async function gatePersonalJumiContractEnv(
   }
 }
 
-function skipReasonForPR(pr: Pull): string | undefined {
+export function skipReasonForPR(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
   if (/^\s*(wip|\[wip\])/i.test(pr.title)) {

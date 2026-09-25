@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CI_LOOKUP_RETRY_MS } from "../src/ci.ts";
+import { CI_LOOKUP_FAILED_REASON } from "../src/ci.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, REVIEW_KIND, WORKER_JOB_KINDS, workerJobKey } from "../src/review_jobs.ts";
@@ -154,20 +154,16 @@ describe("job envelope kinds", () => {
     expect(row?.leasedUntil).toBeNull();
   });
 
-  test("CI lookup skip requeues with backoff when no wake arrived", async () => {
+  test("CI lookup skip without a wake is terminal at publish time", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeJob();
     await store.enqueue(job);
     const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
-    const before = Date.now();
-    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI lookup failed" });
+    await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: CI_LOOKUP_FAILED_REASON });
     const row = store.rows.find((item) => item.id === leased!.id);
-    expect(row?.state).toBe("queued");
-    expect(row?.resultReason).toBeNull();
-    expect(row?.leasedUntil).toBeGreaterThanOrEqual(before + CI_LOOKUP_RETRY_MS);
-    expect(await store.lease("engine-1", 60_000, new Date(before), [REVIEW_KIND])).toBeUndefined();
-    const again = await store.lease("engine-1", 60_000, new Date((row?.leasedUntil ?? 0) + 1), [REVIEW_KIND]);
-    expect(again?.id).toBe(leased!.id);
+    expect(row?.state).toBe("skipped");
+    expect(row?.resultReason).toBe(CI_LOOKUP_FAILED_REASON);
+    expect(await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND])).toBeUndefined();
   });
 
   test("same-SHA wake during a leased review does not requeue a finished review", async () => {

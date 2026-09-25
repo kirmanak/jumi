@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { encodeCiLookupMarker } from "../src/ci.ts";
 import { encodeInfraMarker, INFRA_RETRY_PREFIX } from "../src/infra.ts";
 import { encodeQuotaWaitMarker } from "../src/quota.ts";
 import {
@@ -804,6 +805,28 @@ describe("PgReviewJobStore infra requeue", () => {
     );
     const update = queries.find((row) => row.query.includes("error = $4"));
     expect(update?.query).toContain("quota-wait:%");
+    expect(update?.query).not.toContain("attempt = attempt + 1");
+  });
+
+  test("ci-lookup marker reuses the same not-before requeue", async () => {
+    const queries: { query: string; params?: unknown[] }[] = [];
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        queries.push({ query, params });
+        if (query.includes("state = 'queued'") && query.includes("error = $4")) {
+          expect(params?.[3]).toBe(encodeCiLookupMarker(1, 1_500));
+          return [{ id: 1 }];
+        }
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.requeueInfra(1, "engine-1", 15_000, encodeCiLookupMarker(1, 1_500), new Date(1_500))).toBe(true);
+    const update = queries.find((row) => row.query.includes("error = $4"));
+    expect(update?.query).toContain("ci-lookup-retry:%");
     expect(update?.query).not.toContain("attempt = attempt + 1");
   });
 

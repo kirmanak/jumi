@@ -46,12 +46,59 @@ export interface CiInspection {
 export const CI_PENDING_REASON = "CI still pending";
 export const CI_FAILED_REASON = "CI failed";
 export const CI_LOOKUP_FAILED_REASON = "CI lookup failed";
-/** Backoff before retrying a review whose CI lookup failed with no further wake. */
-export const CI_LOOKUP_RETRY_MS = 15_000;
+/** Growing waits before a review whose CI lookup keeps failing is given up. */
+export const CI_LOOKUP_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000, 300_000] as const;
+export const CI_LOOKUP_MAX_ATTEMPTS = 8;
+export const CI_LOOKUP_BUDGET_MS = 10 * 60 * 1000;
+export const CI_LOOKUP_RETRY_PREFIX = "ci-lookup-retry:";
 
 /** Non-terminal review skips that wait for a later workflow_job wake. */
 export function isCiWaitSkipReason(reason: string | null | undefined): boolean {
   return reason === CI_PENDING_REASON || reason === CI_FAILED_REASON || reason === CI_LOOKUP_FAILED_REASON;
+}
+
+export function isCiLookupRetryMarker(error: string | null | undefined): boolean {
+  return Boolean(error?.startsWith(CI_LOOKUP_RETRY_PREFIX));
+}
+
+export function parseCiLookupMarker(
+  error: string | null | undefined
+): { count: number; firstFailAt: number } | undefined {
+  if (!isCiLookupRetryMarker(error) || !error) return undefined;
+  const parts = error.slice(CI_LOOKUP_RETRY_PREFIX.length).split(":");
+  const count = Number(parts[0]);
+  const firstFailAt = Number(parts[1]);
+  if (!Number.isFinite(count) || count < 1 || !Number.isFinite(firstFailAt)) return undefined;
+  return { count, firstFailAt };
+}
+
+export function encodeCiLookupMarker(count: number, firstFailAt: number): string {
+  return `${CI_LOOKUP_RETRY_PREFIX}${count}:${firstFailAt}`;
+}
+
+export function ciLookupBackoffMs(count: number): number {
+  const index = Math.min(Math.max(count, 1), CI_LOOKUP_BACKOFF_MS.length) - 1;
+  return CI_LOOKUP_BACKOFF_MS[index] ?? 300_000;
+}
+
+export type CiLookupDecision =
+  | { action: "requeue"; count: number; firstFailAt: number; backoffMs: number; marker: string }
+  | { action: "exhaust"; reason: string };
+
+export function decideCiLookupRetry(prevError: string | null | undefined, nowMs: number): CiLookupDecision {
+  const prev = parseCiLookupMarker(prevError);
+  const count = (prev?.count ?? 0) + 1;
+  const firstFailAt = prev?.firstFailAt ?? nowMs;
+  if (count >= CI_LOOKUP_MAX_ATTEMPTS || nowMs - firstFailAt >= CI_LOOKUP_BUDGET_MS) {
+    return { action: "exhaust", reason: CI_LOOKUP_FAILED_REASON };
+  }
+  return {
+    action: "requeue",
+    count,
+    firstFailAt,
+    backoffMs: ciLookupBackoffMs(count),
+    marker: encodeCiLookupMarker(count, firstFailAt),
+  };
 }
 
 const PENDING_JOB_STATUS = new Set([

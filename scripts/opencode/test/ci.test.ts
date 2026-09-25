@@ -6,10 +6,15 @@ import {
   actionJobCheckState,
   buildCiMarkdown,
   CI_FAILED_REASON,
+  CI_LOOKUP_BACKOFF_MS,
+  CI_LOOKUP_BUDGET_MS,
   CI_LOOKUP_FAILED_REASON,
+  CI_LOOKUP_MAX_ATTEMPTS,
   capFailedJobLog,
   classifyInfraFlake,
+  decideCiLookupRetry,
   dropUnpackNoise,
+  encodeCiLookupMarker,
   flakeSkipReason,
   hashText,
   infraFlakeReason,
@@ -862,6 +867,36 @@ describe("inspectCi", () => {
     } finally {
       await rm(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("decideCiLookupRetry", () => {
+  test("grows backoff then exhausts on the attempt cap", () => {
+    const first = decideCiLookupRetry(null, 1_000);
+    expect(first).toEqual({
+      action: "requeue",
+      count: 1,
+      firstFailAt: 1_000,
+      backoffMs: CI_LOOKUP_BACKOFF_MS[0],
+      marker: encodeCiLookupMarker(1, 1_000),
+    });
+    const second = decideCiLookupRetry(first.action === "requeue" ? first.marker : null, 2_000);
+    expect(second.action).toBe("requeue");
+    if (second.action === "requeue" && first.action === "requeue") {
+      expect(second.backoffMs).toBe(CI_LOOKUP_BACKOFF_MS[1]);
+      expect(second.backoffMs).toBeGreaterThan(first.backoffMs);
+    }
+    expect(decideCiLookupRetry(encodeCiLookupMarker(CI_LOOKUP_MAX_ATTEMPTS - 1, 1_000), 2_000)).toEqual({
+      action: "exhaust",
+      reason: CI_LOOKUP_FAILED_REASON,
+    });
+  });
+
+  test("exhausts when the wall-clock budget elapses", () => {
+    expect(decideCiLookupRetry(encodeCiLookupMarker(1, 1_000), 1_000 + CI_LOOKUP_BUDGET_MS)).toEqual({
+      action: "exhaust",
+      reason: CI_LOOKUP_FAILED_REASON,
+    });
   });
 });
 
