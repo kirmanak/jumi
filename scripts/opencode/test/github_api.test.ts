@@ -95,6 +95,55 @@ describe("GithubAPI", () => {
     });
   });
 
+  test("truncates GitHub status descriptions to 140 characters before the POST", async () => {
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return Response.json({ state: "failure", context: "jumi/opencode-review" });
+    }) as unknown as typeof fetch;
+
+    const exact = "y".repeat(140);
+    await api().createCommitStatus("owner", "repo", "sha", {
+      state: "failure",
+      context: "jumi/opencode-review",
+      description: exact,
+    });
+    expect(JSON.parse(bodies[0] ?? "{}").description).toBe(exact);
+
+    await api().createCommitStatus("owner", "repo", "sha", {
+      state: "failure",
+      context: "jumi/opencode-review",
+      description: "x".repeat(255),
+    });
+    const ascii = JSON.parse(bodies[1] ?? "{}").description as string;
+    expect(Array.from(ascii).length).toBe(140);
+    expect(ascii.endsWith("…")).toBe(true);
+    expect(ascii).not.toBe("x".repeat(255));
+
+    await api().createCommitStatus("owner", "repo", "sha", {
+      state: "failure",
+      context: "jumi/opencode-review",
+      description: "€".repeat(141),
+    });
+    const euros = JSON.parse(bodies[2] ?? "{}").description as string;
+    expect(Array.from(euros).length).toBe(140);
+    expect(euros.endsWith("…")).toBe(true);
+    expect(euros.startsWith("€".repeat(100))).toBe(true);
+    expect(new TextEncoder().encode(euros).byteLength).toBeGreaterThan(255);
+
+    const stderr = `tool trace ${"z".repeat(400)}`;
+    await api().createCommitStatus("owner", "repo", "sha", {
+      state: "failure",
+      context: "jumi/opencode-review",
+      description: `Jumi review failed: opencode exited with code 143:\n${stderr}`,
+    });
+    const failure = JSON.parse(bodies[3] ?? "{}").description as string;
+    expect(failure).not.toContain(stderr);
+    expect(failure).not.toContain("tool trace");
+    expect(failure).toContain("opencode exited with code 143");
+    expect(Array.from(failure).length).toBeLessThanOrEqual(140);
+  });
+
   test("toGithubReviewEvent maps Gitea APPROVED to GitHub APPROVE", () => {
     expect(toGithubReviewEvent("APPROVED")).toBe("APPROVE");
     expect(toGithubReviewEvent("REQUEST_CHANGES")).toBe("REQUEST_CHANGES");

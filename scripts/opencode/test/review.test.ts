@@ -6,6 +6,7 @@ import { providerAuthDeathMessage } from "../src/auth.ts";
 import { CI_FAILED_REASON, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
+import { GithubAPI } from "../src/github_api.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
 import {
   applyContractEnvGate,
@@ -1391,6 +1392,81 @@ describe("reviewPullRequest", () => {
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description?.endsWith("…")).toBe(true);
       expect(new TextEncoder().encode(statuses[1].description ?? "").byteLength).toBeLessThanOrEqual(255);
+      expect(Array.from(statuses[1].description ?? "").length).toBeLessThanOrEqual(140);
+    });
+  });
+
+  test("posts a short failure status without OpenCode stderr", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const persisted: PersistReviewResult[] = [];
+      const stderr = `tool trace ${"x".repeat(400)}`;
+      const message = `opencode exited with code 143:\n${stderr}`;
+      await expect(
+        reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          persistResult: async (value) => {
+            persisted.push(value);
+          },
+          openCodeRunner: async () => {
+            throw new Error(message);
+          },
+        })
+      ).rejects.toThrow(message);
+
+      expect(persisted).toEqual([{ kind: "error", error: `Jumi review failed: ${message}` }]);
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(statuses[1].description).toBe(`Jumi review failed: ${hostname()}: opencode exited with code 143`);
+      expect(statuses[1].description).toContain(hostname());
+      expect(statuses[1].description).not.toContain(stderr);
+      expect(statuses[1].description).not.toContain("tool trace");
+      expect(Array.from(statuses[1].description ?? "").length).toBeLessThanOrEqual(140);
+    });
+  });
+
+  test("GitHub status POST stays within 140 characters and still publishes a produced review", async () => {
+    await withWorkspace(async (workspace) => {
+      const bodies: string[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.body) bodies.push(String(init.body));
+        return Response.json({ state: "failure", context: "jumi/opencode-review" });
+      }) as unknown as typeof fetch;
+      const reviews: unknown[] = [];
+      const github = new GithubAPI({ token: "token" });
+      try {
+        const reason = "blocking ".repeat(30);
+        await reviewPullRequest({
+          ...reviewOptions(workspace),
+          api: makeApi({
+            createPullReview: async (_owner, _repo, _index, review) => {
+              reviews.push(review);
+              return { id: 1 };
+            },
+            createCommitStatus: (owner, repo, sha, status) => github.createCommitStatus(owner, repo, sha, status),
+          }),
+          openCodeRunner: async () => {
+            await writeReview(workspace, `note\n<!-- jumi-check: failure; ${reason} -->`);
+            return { status: "ok" };
+          },
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      expect(reviews).toHaveLength(1);
+      const posted = bodies.map((body) => JSON.parse(body) as { state?: string; description?: string });
+      expect(posted.some((status) => status.state === "pending")).toBe(true);
+      const failure = posted.find((status) => status.state === "failure");
+      expect(failure?.description?.endsWith("…")).toBe(true);
+      expect(Array.from(failure?.description ?? "").length).toBeLessThanOrEqual(140);
+      expect(failure?.description).not.toBe("blocking ".repeat(30));
     });
   });
 
@@ -2085,6 +2161,73 @@ describe("publishReviewResult", () => {
         target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
       },
     ]);
+  });
+
+  test("an over-long error does not drop a produced review writeup", async () => {
+    const reviews: unknown[] = [];
+    const statuses: Array<{ state: string; description?: string; context?: string; target_url?: string }> = [];
+    const stderr = "x".repeat(500);
+    const result = await publishReviewResult({
+      ...publishOpts,
+      error: `Jumi review failed: opencode exited with code 143:\n${stderr}`,
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(reviews).toHaveLength(1);
+    expect(statuses).toEqual([
+      {
+        state: "success",
+        context: "jumi/opencode-review",
+        description: "No blocking issues",
+        target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
+      },
+    ]);
+    expect(statuses[0]?.description).not.toContain(stderr);
+  });
+
+  test("publishes a short failure status for an over-long OpenCode stderr error", async () => {
+    const statuses: Array<{ state: string; description?: string; context?: string; target_url?: string }> = [];
+    const reviews: unknown[] = [];
+    const stderr = `trace ${"x".repeat(400)}`;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      error: `Jumi review failed: opencode exited with code 143:\n${stderr}`,
+      api: makeApi({
+        createPullReview: async () => {
+          reviews.push(true);
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(reviews).toEqual([]);
+    expect(result).toEqual({
+      status: "skipped",
+      reason: `Jumi review failed: opencode exited with code 143:\n${stderr}`,
+    });
+    expect(statuses).toEqual([
+      {
+        state: "failure",
+        context: "jumi/opencode-review",
+        description: `Jumi review failed: ${hostname()}: opencode exited with code 143`,
+        target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
+      },
+    ]);
+    expect(statuses[0]?.description).not.toContain(stderr);
+    expect(Array.from(statuses[0]?.description ?? "").length).toBeLessThanOrEqual(140);
   });
 
   test("posts locatable findings as pull-review comments and keeps the writeup trailer", async () => {
