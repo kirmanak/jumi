@@ -3,7 +3,13 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
-import { CI_LOOKUP_BACKOFF_MS, CI_LOOKUP_BUDGET_MS, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
+import {
+  CI_ABSENT_NOTE,
+  CI_LOOKUP_BACKOFF_MS,
+  CI_LOOKUP_BUDGET_MS,
+  CI_LOOKUP_FAILED_REASON,
+  CI_PENDING_REASON,
+} from "../src/ci.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
@@ -53,6 +59,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
       return status;
     },
     ...emptyCiMethods(),
+    listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   };
   return { ...defaults, ...overrides, comments, reviews, statuses };
 }
@@ -526,6 +533,107 @@ describe("processEngineTick", () => {
       expect(await processEngineTick(store, config, api, "engine-1", extras)).toBe("idle");
       expect(lists).toBe(18);
       expect(await store.enqueue(makeJob())).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    });
+  });
+
+  test("pending external status then success is reviewed without a new push", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let state = "pending";
+      const api = makeApi({
+        listCommitStatuses: async () => [{ id: 1, context: "external/ci", status: state }],
+      });
+      let ran = 0;
+      const extras = {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (opts: { workdir: string }) => {
+          ran++;
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" as const };
+        },
+      };
+      const config = makeConfig({ workdir: workspace, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(0);
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe(CI_PENDING_REASON);
+      state = "success";
+      expect(await store.enqueue(makeJob())).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(1);
+      expect(store.rows.some((row) => row.state === "succeeded")).toBe(true);
+    });
+  });
+
+  test("no checks wait on the lookup budget, then review and say there is no CI", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let looks = 0;
+      const api = makeApi({
+        listCommitStatuses: async () => {
+          looks++;
+          return [];
+        },
+        listCheckRuns: async () => [],
+        listActionJobs: async () => [],
+      });
+      let ran = 0;
+      let now = Date.UTC(2026, 0, 1);
+      const extras = {
+        now: () => now,
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (opts: { workdir: string }) => {
+          ran++;
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" as const };
+        },
+      };
+      const config = makeConfig({ workdir: workspace, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(0);
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.leasedUntil).toBe(now + CI_LOOKUP_BACKOFF_MS[0]);
+      expect(store.rows[0]?.error).toContain("ci-lookup-retry:");
+      now += CI_LOOKUP_BUDGET_MS;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(1);
+      expect(store.rows[0]?.state).toBe("succeeded");
+      expect((api.reviews[0] as { body: string }).body).toContain(CI_ABSENT_NOTE);
+      expect(looks).toBeGreaterThan(0);
+    });
+  });
+
+  test("Actions that appear after the first list are not reviewed before they finish", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let looks = 0;
+      const api = makeApi({
+        listCommitStatuses: async () => [],
+        listCheckRuns: async () => [],
+        listActionJobs: async () => {
+          looks++;
+          if (looks < 2) return [];
+          return [{ id: 9, name: "build", head_sha: "headsha", status: "in_progress" }];
+        },
+      });
+      let ran = 0;
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async () => {
+          ran++;
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(0);
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe(CI_PENDING_REASON);
+      expect(looks).toBe(2);
     });
   });
 

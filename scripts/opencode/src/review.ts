@@ -133,6 +133,8 @@ export interface ReviewOptions {
   ciRelistDelayMs?: number;
   /** When false, the caller already applied `skipReasonForOtherChecks`. */
   inspectOtherChecks?: boolean;
+  /** Prepended to the review when the lookup budget expired with no checks at all. */
+  noCiNote?: string;
 }
 
 export type PersistReviewResult =
@@ -688,7 +690,8 @@ export async function skipReasonForOtherChecks(
     let ci = await inspectCi(inspectOpts);
     if (ci.empty || ci.lookupFailed) {
       // Actions may not have created the push's jobs yet, or a list call blipped;
-      // give it one short beat, then re-list once.
+      // give it one short beat, then re-list once. Still no checks is not green:
+      // the engine waits on the CI lookup budget, then reviews and says so.
       await delay(opts.ciRelistDelayMs ?? 0, opts.abortSignal);
       ci = await inspectCi(inspectOpts);
     }
@@ -1036,6 +1039,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const ids = extractClosingIssueNumbers(pr);
     const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(opts.api, opts.owner, opts.repo, id)));
     const notes: string[] = [];
+    if (opts.noCiNote) notes.push(`${opts.noCiNote} Mention it in the review. It is not a finding.`);
     if (prCommentResult.note) notes.push(prCommentResult.note);
     const linkedIssues: Array<{ issue: Task; comments: Comment[] }> = [];
     for (const result of linkedResults) {
@@ -1253,7 +1257,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           return await persistSkipAndStatus("Incomplete review: output too large", currentPR.html_url);
         }
         if (artifact.status !== "missing" && artifact.content.trim()) {
-          const markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
+          let markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
+          if (opts.noCiNote && !markdown.includes(opts.noCiNote)) {
+            markdown = `${opts.noCiNote}\n\n${markdown}`;
+          }
           await persistOutcome({ kind: "markdown", markdown, ...(runner ? { runner } : {}) });
           if (opts.home) {
             const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);

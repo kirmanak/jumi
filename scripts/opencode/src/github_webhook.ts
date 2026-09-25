@@ -1,6 +1,7 @@
 import { hasLabel, type IssueAssignees, type PickupPolicy } from "./assignee.ts";
 import {
   parseWorkflowJobPayload,
+  shouldEnqueueSiblingCheckReview,
   shouldEnqueueWorkflowJobFollowUp,
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
@@ -320,7 +321,27 @@ export async function handleGithubWebhookEvent(
   rememberWebhookInstallation(rawBody, deps);
   if (event === "ping") return json(200, { ok: true });
   if (event === "status" || event === "check_run") {
-    return skipped(`unsupported event ${event}`, logger);
+    if (!deps.review || !deps.worker?.api) return skipped(`unsupported event ${event}`, logger);
+    try {
+      const decision = await shouldEnqueueSiblingCheckReview(rawBody, event, policy, deps.worker.api, logger);
+      if (decision.type === "skip") return skipped(decision.reason, logger);
+      const receivedAt = new Date().toISOString();
+      const reviewResults: EnqueueResult[] = [];
+      for (const partial of decision.jobs) {
+        const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+        reviewResults.push(result);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      }
+      if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
+      return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+    } catch (err) {
+      if (isQueueUnavailable(err)) {
+        logger(`queue unavailable: ${err.message}`);
+        return json(503, { error: "queue unavailable" });
+      }
+      logger(`status webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      return json(500, { error: "internal error" });
+    }
   }
 
   if (event === "pull_request") {

@@ -53,6 +53,7 @@ function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { commen
     dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
     ...emptyCiMethods(),
+    listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   };
   return { ...defaults, ...overrides, comments };
 }

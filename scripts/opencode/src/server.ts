@@ -1,5 +1,5 @@
 import { hostname } from "node:os";
-import { CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
+import { CI_ABSENT_NOTE, CI_ABSENT_REASON, CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { meterWebhook, recordJobCompleted, renderProcessMetrics, renderWebhookMetrics } from "./control_metrics.ts";
@@ -91,6 +91,8 @@ export interface RunReviewJobExtras {
   jobId?: string;
   breaker?: InfraCircuitBreaker;
   ciRelistDelayMs?: number;
+  /** Lookup budget expired with no checks. Review, and say the repository has no CI. */
+  assumeNoCi?: boolean;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   now?: () => number;
@@ -109,22 +111,24 @@ export async function runReviewJob(
     logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${early}`);
     return { status: "skipped", reason: early };
   }
-  const ciSkip = await skipReasonForOtherChecks(
-    {
-      api,
-      owner: job.owner,
-      repo: job.repo,
-      prNumber: job.prNumber,
-      home: config.home,
-      abortSignal: extras.abortSignal,
-      ciRelistDelayMs: extras.ciRelistDelayMs,
-    },
-    job.headSha,
-    logger
-  );
-  if (ciSkip) {
-    logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${ciSkip}`);
-    return { status: "skipped", reason: ciSkip };
+  if (!extras.assumeNoCi) {
+    const ciSkip = await skipReasonForOtherChecks(
+      {
+        api,
+        owner: job.owner,
+        repo: job.repo,
+        prNumber: job.prNumber,
+        home: config.home,
+        abortSignal: extras.abortSignal,
+        ciRelistDelayMs: extras.ciRelistDelayMs,
+      },
+      job.headSha,
+      logger
+    );
+    if (ciSkip) {
+      logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${ciSkip}`);
+      return { status: "skipped", reason: ciSkip };
+    }
   }
   const workspace = await createReviewWorkspace(config.workdir, job);
   try {
@@ -162,6 +166,7 @@ export async function runReviewJob(
       jobId: extras.jobId ?? job.delivery,
       ciRelistDelayMs: extras.ciRelistDelayMs,
       inspectOtherChecks: false,
+      noCiNote: extras.assumeNoCi ? CI_ABSENT_NOTE : undefined,
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;
@@ -466,6 +471,36 @@ async function settleCiLookupFailure(
   logger(`ci-lookup-exhausted ${row.jobKey}: ${decision.reason}`);
 }
 
+async function settleCiAbsent(
+  store: ReviewJobStore,
+  config: ServiceConfig,
+  api: ReviewApi,
+  row: ReviewJobRecord,
+  job: ReviewJob,
+  leasedBy: string,
+  nowMs: number,
+  extras: RunReviewJobExtras,
+  logger: (message: string) => void
+): Promise<ReviewResult | undefined> {
+  if (row.rewakeRequested) {
+    await store.markPublished(row.id, leasedBy, { state: "skipped", reason: CI_ABSENT_REASON });
+    logger(`ci-absent-rewake ${row.jobKey}`);
+    return undefined;
+  }
+  const decision = decideCiLookupRetry(row.error, nowMs);
+  if (decision.action === "requeue") {
+    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs));
+    if (!ok) {
+      logger(`ci-absent requeue failed ${row.jobKey}`);
+      return undefined;
+    }
+    logger(`ci-absent-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
+    return undefined;
+  }
+  logger(`ci-absent-exhausted ${row.jobKey}: reviewing with no CI`);
+  return runReviewJob(config, job, api, logger, { ...extras, assumeNoCi: true });
+}
+
 export async function processEngineTick(
   store: ReviewJobStore,
   config: ServiceConfig,
@@ -520,7 +555,7 @@ export async function processEngineTick(
       headSha: row.headSha,
       receivedAt: new Date(row.createdAt).toISOString(),
     };
-    const result = await runReviewJob(config, job, api, logger, {
+    const runExtras: RunReviewJobExtras = {
       ...extras,
       abortSignal: abort.signal,
       jobId: String(row.id),
@@ -533,17 +568,34 @@ export async function processEngineTick(
       persistResult: async (persisted) => {
         await store.saveResult(row.id, leasedBy, persisted);
       },
-    });
-    stopHeartbeat();
+    };
+    let result = await runReviewJob(config, job, api, logger, runExtras);
     const current = await store.get(row.id);
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
+      stopHeartbeat();
       logger(`engine job ${row.jobKey} cancelled`);
       return "processed";
     }
     if (result.status === "skipped" && result.reason === CI_LOOKUP_FAILED_REASON) {
+      stopHeartbeat();
       await settleCiLookupFailure(store, api, config, current, leasedBy, nowMs, logger);
       return "processed";
     }
+    if (result.status === "skipped" && result.reason === CI_ABSENT_REASON) {
+      const reviewed = await settleCiAbsent(store, config, api, current, job, leasedBy, nowMs, runExtras, logger);
+      if (!reviewed) {
+        stopHeartbeat();
+        return "processed";
+      }
+      const after = await store.get(row.id);
+      if (after?.state !== "leased" || after.leasedBy !== leasedBy) {
+        stopHeartbeat();
+        logger(`engine job ${row.jobKey} cancelled`);
+        return "processed";
+      }
+      result = reviewed;
+    }
+    stopHeartbeat();
     const state = publishedState(result);
     await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
     recordJobCompleted(row.kind, state);

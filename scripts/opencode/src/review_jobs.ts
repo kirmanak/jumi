@@ -211,7 +211,7 @@ function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefi
   return state === "succeeded" || (state === "skipped" && isTerminalSkipReason(reason));
 }
 
-// The completed workflow_job is the only wake after a CI skip, so one that lands while the
+// A finished sibling check is the wake after a CI skip, so one that lands while the
 // row is leased (and is deduped against it) must not be lost when the lease ends in a CI wait.
 function isCiRewakeOutcome(outcome: { state: string; reason?: string }): boolean {
   return outcome.state === "skipped" && isCiWaitSkipReason(outcome.reason);
