@@ -149,6 +149,14 @@ verify_worker_skills() {
     echo "agy missing in worker image" >&2
     exit 1
   fi
+  # The worker holds the write-capable forge token. `--version` does not prove
+  # the child is refused a fetch of that host.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "agy forge read_url deny probe failed against the installed agy binary" >&2
+    exit 1
+  fi
   # `--version` only proves the binary is there. Run the argv `claudeArgv()`
   # emits against a loopback stub endpoint (nothing billed, no token in the
   # child env) so a flag this Claude release rejects — or silently ignores —
@@ -167,7 +175,7 @@ verify_worker_skills() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude flags, agy, opencode debug config, and the xAI child credential"
+  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 

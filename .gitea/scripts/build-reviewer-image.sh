@@ -134,6 +134,15 @@ verify_reviewer_runtime() {
     echo "reviewer webfetch permission probe failed against the installed opencode binary" >&2
     exit 1
   fi
+  # Same idea for Antigravity: `--version` says nothing about whether a child
+  # can fetch the forge host. The probe installs the production read_url deny
+  # and drives the installed binary at a loopback Gemini endpoint.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "agy forge read_url deny probe failed against the installed agy binary" >&2
+    exit 1
+  fi
   # Same idea for Claude: `--version` says nothing about the flags Jumi spawns
   # with. Run the production argv against a loopback stub endpoint (nothing
   # billed, no token in the child env) so a rejected or silently ignored flag
@@ -154,7 +163,7 @@ verify_reviewer_runtime() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, claude flags, agy, gitops-apply-review skill, opencode debug config, webfetch denies, and the xAI child credential"
+  echo "Verified python3, helm, claude flags, agy forge read_url deny, gitops-apply-review skill, opencode debug config, webfetch denies, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 

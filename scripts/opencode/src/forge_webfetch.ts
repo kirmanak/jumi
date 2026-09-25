@@ -7,9 +7,10 @@
  * injected, and act on it. Containment is webfetch only: git push via the
  * credential helper stays allowed, and public upstream docs stay reachable.
  *
- * Prompt prose is a hint, not a control. The rules below are what the two
+ * Prompt prose is a hint, not a control. The rules below are what the
  * binaries enforce: OpenCode through `OPENCODE_PERMISSION`, Claude through
- * `--disallowedTools`. Derive them here, not in a third copy of prose.
+ * `--disallowedTools`, Antigravity through `permissions.deny` in
+ * `settings.json`. Derive them here, not in another copy of prose.
  *
  * The host is per-spawn, not compile-time: the forge is configured, and the
  * GitHub factory hands the child `GIT_AUTH_HOST=github.com` with a write-capable
@@ -59,4 +60,13 @@ export function forgeOpenCodePermission(host: string): string {
  */
 export function claudeDisallowedTools(host: string): string {
   return [`WebFetch(domain:${host})`, `WebFetch(domain:*.${host})`].join(",");
+}
+
+/**
+ * Antigravity `read_url(host)` matches the hostname and its subdomains, so one
+ * apex rule covers `api.<host>` as well as the host itself. Deny outranks allow
+ * and `--dangerously-skip-permissions`.
+ */
+export function agyReadUrlDeny(host: string): string {
+  return `read_url(${host})`;
 }
