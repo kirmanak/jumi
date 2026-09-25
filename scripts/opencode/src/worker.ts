@@ -23,6 +23,7 @@ import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { orderedRunners } from "./runners.ts";
+import { releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { isSkipLatchReason } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
@@ -266,27 +267,6 @@ export async function reclaimExpiredWorkerJobs(
   return { requeued: requeued.length, published: publish.length };
 }
 
-async function releaseWorkerLeaseOnShutdown(
-  store: ReviewJobStore,
-  id: number,
-  jobKey: string,
-  leasedBy: string,
-  logger: (message: string) => void
-): Promise<void> {
-  try {
-    const current = await store.get(id);
-    if (current && current.leasedBy !== leasedBy) return;
-    const released = await store.releaseLease(id, leasedBy);
-    if (released) {
-      logger(`released ${jobKey} on shutdown`);
-    } else {
-      await store.expireLease(id, leasedBy);
-    }
-  } catch (expireErr) {
-    logger(`worker expire failed ${jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`);
-  }
-}
-
 export async function processWorkerTick(
   store: ReviewJobStore,
   config: WorkerConfig,
@@ -342,6 +322,10 @@ export async function processWorkerTick(
     heartbeatStopped = true;
     clearInterval(heartbeat);
   };
+  const untrack = trackInFlightLease(async () => {
+    stopHeartbeat();
+    await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
+  });
 
   try {
     const job = issueJobFromRecord(row);
@@ -419,7 +403,7 @@ export async function processWorkerTick(
       return "processed";
     }
     if (result.status === "cancelled" && extras.abortSignal?.aborted) {
-      await releaseWorkerLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger);
+      await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
       return "processed";
     }
     const reason =
@@ -464,7 +448,7 @@ export async function processWorkerTick(
     stopHeartbeat();
     if (extras.abortSignal?.aborted) {
       logger(`worker job ${row.jobKey} interrupted`);
-      await releaseWorkerLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger);
+      await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
       return "processed";
     }
     if (abort.signal.aborted) {
@@ -534,6 +518,7 @@ export async function processWorkerTick(
     }
     return "processed";
   } finally {
+    untrack();
     aborts?.delete(key);
     pids?.delete(key);
     stopHeartbeat();
