@@ -3,12 +3,15 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ANTIGRAVITY_HOMELAB_CONSTRAINT,
+  AntigravityRefusedError,
   appendRunnerStamp,
   CLAUDE_EFFORT_LEVELS,
   formatRunnerStamp,
   parseRunnersCatalog,
   parseRunnersFile,
   RUNNERS_FILE_ENV,
+  refuseAntigravityUnlessGithub,
   runnerStamp,
   synthesizeRunners,
 } from "../src/runners.ts";
@@ -120,11 +123,40 @@ describe("parseRunnersFile", () => {
 });
 
 describe("synthesizeRunners", () => {
-  test("omits fallback when unset", () => {
-    expect(synthesizeRunners({ model: "openai/gpt-5.5" })).toEqual({
+  test("omits fallback when unset and never selects agy", () => {
+    const catalog = synthesizeRunners({ model: "openai/gpt-5.5" });
+    expect(catalog).toEqual({
       runners: { primary: { type: "opencode", model: "openai/gpt-5.5" } },
       chain: ["primary"],
     });
+    expect(Object.values(catalog.runners).some((runner) => runner.type === "agy")).toBe(false);
+    expect(() => refuseAntigravityUnlessGithub(catalog, "gitea")).not.toThrow();
+  });
+});
+
+describe("refuseAntigravityUnlessGithub", () => {
+  const named = parseRunnersCatalog({
+    runners: {
+      spare: { type: "agy", model: "gemini-3-pro" },
+      grok: { type: "opencode", model: "opencode/grok-4.6" },
+    },
+    chain: ["grok"],
+  });
+
+  test("homelab refuses a runners file that names agy, even off the chain", () => {
+    expect(() => refuseAntigravityUnlessGithub(named, "gitea")).toThrow(AntigravityRefusedError);
+    try {
+      refuseAntigravityUnlessGithub(named, "gitea");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AntigravityRefusedError);
+      expect((err as AntigravityRefusedError).name).toBe("AntigravityRefusedError");
+      expect((err as AntigravityRefusedError).constraint).toBe(ANTIGRAVITY_HOMELAB_CONSTRAINT);
+      expect((err as Error).message).toContain("JUMI_RUNNERS_FILE names type agy (spare)");
+    }
+  });
+
+  test("GitHub factory may name agy", () => {
+    expect(() => refuseAntigravityUnlessGithub(named, "github")).not.toThrow();
   });
 });
 

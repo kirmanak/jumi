@@ -210,7 +210,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     fallbackVariant: optionalEnv(resolved, "OPENCODE_FALLBACK_VARIANT"),
   };
   const runnersFile = optionalEnv(resolved, "JUMI_RUNNERS_FILE");
-  const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv);
+  const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv, forgeBind.forge);
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ReviewQueue } from "../src/queue.ts";
-import { RUNNERS_FILE_ENV } from "../src/runners.ts";
+import { AntigravityRefusedError, RUNNERS_FILE_ENV } from "../src/runners.ts";
 import type { IssueJob } from "../src/types.ts";
 import { loadWorkerConfig } from "../src/worker_config.ts";
 import { makeIssueJob } from "./fixtures.ts";
@@ -118,6 +118,25 @@ describe("loadWorkerConfig", () => {
     expect(claudeConfig.runners.spark).toEqual({ type: "claude", model: "opus" });
   });
 
+  test("Gitea worker refuses a runners file that names Antigravity", () => {
+    expect(loadWorkerConfig(required).runners).toEqual({
+      primary: { type: "opencode", model: "openai/gpt-5.5" },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "jumi-worker-agy-gitea-"));
+    const file = join(dir, "runners.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        runners: { agy: { type: "agy", model: "gemini-3-pro" } },
+        chain: ["agy"],
+      })
+    );
+    for (const forge of [undefined, "", "gitea"] as const) {
+      const env = forge === undefined ? required : { ...required, FORGE: forge };
+      expect(() => loadWorkerConfig({ ...env, [RUNNERS_FILE_ENV]: file })).toThrow(AntigravityRefusedError);
+    }
+  });
+
   test("parses optional PHOENIX_OTLP_ENDPOINT", () => {
     const config = loadWorkerConfig({
       ...required,
@@ -224,6 +243,22 @@ describe("loadWorkerConfig", () => {
     expect(() => loadWorkerConfig({ ...githubRequired, GITHUB_WEBHOOK_SECRET: "" })).toThrow("GITHUB_WEBHOOK_SECRET");
     expect(() => loadWorkerConfig({ ...githubRequired, FORGE_URL: "" })).toThrow("FORGE_URL");
     expect(() => loadWorkerConfig({ ...githubRequired, GITHUB_ALLOWED_ORGS: "" })).toThrow("GITHUB_ALLOWED_ORGS");
+  });
+
+  test("FORGE=github still starts when the runners file names Antigravity", () => {
+    const dir = mkdtempSync(join(tmpdir(), "jumi-worker-agy-github-"));
+    const file = join(dir, "runners.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        runners: { agy: { type: "agy", model: "gemini-3-pro", effort: "high" } },
+        chain: ["agy"],
+      })
+    );
+    const config = loadWorkerConfig({ ...githubRequired, [RUNNERS_FILE_ENV]: file });
+    expect(config.forge).toBe("github");
+    expect(config.chain).toEqual(["agy"]);
+    expect(config.runners.agy).toEqual({ type: "agy", model: "gemini-3-pro", effort: "high" });
   });
 
   test("FORGE=github dual-binds URL/orgs/webhook and optional repos", () => {

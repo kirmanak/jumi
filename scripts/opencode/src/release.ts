@@ -44,6 +44,8 @@ export interface ImageContract {
   /** GitOps must set it, but the loader tolerates unset (local/dev mode, or another `FORGE`). */
   gitOpsEnv: string[];
   optionalEnv: string[];
+  /** Process-start rules. Adding or removing one is a required GitOps change (major). */
+  requiredConstraints: string[];
   ports: string[];
   runAs: string;
   probes: string[];
@@ -98,6 +100,7 @@ function emptyImage(): ImageContract {
     requiredEnv: [],
     gitOpsEnv: [],
     optionalEnv: [],
+    requiredConstraints: [],
     ports: [],
     runAs: "",
     probes: [],
@@ -139,6 +142,7 @@ function parseImage(section: string): ImageContract {
     requiredEnv: listValues(headingSection(section, 4, "required env")),
     gitOpsEnv: listValues(headingSection(section, 4, "gitops env")),
     optionalEnv: listValues(headingSection(section, 4, "optional env")),
+    requiredConstraints: listValues(headingSection(section, 4, "required constraints")),
     ports: listValues(headingSection(section, 4, "ports")),
     runAs: firstValue(listValues(headingSection(section, 4, "runAs"))),
     probes: listValues(headingSection(section, 4, "probes")),
@@ -630,6 +634,9 @@ export function removedRequiredFields(previous: ImageContract, current: ImageCon
   for (const key of removedItems(gitOpsRequiredEnv(previous), gitOpsRequiredEnv(current))) {
     removed.push(`env ${key}`);
   }
+  for (const item of removedItems(previous.requiredConstraints, current.requiredConstraints)) {
+    removed.push(`constraint ${item}`);
+  }
   for (const port of removedItems(previous.ports, current.ports)) {
     removed.push(`port ${port}`);
   }
@@ -648,6 +655,8 @@ function hasRequiredGitOpsChange(previous: ImageContract, current: ImageContract
   return (
     addedItems(gitOpsRequiredEnv(previous), gitOpsRequiredEnv(current)).length > 0 ||
     removedItems(gitOpsRequiredEnv(previous), gitOpsRequiredEnv(current)).length > 0 ||
+    addedItems(previous.requiredConstraints, current.requiredConstraints).length > 0 ||
+    removedItems(previous.requiredConstraints, current.requiredConstraints).length > 0 ||
     addedItems(previous.ports, current.ports).length > 0 ||
     removedItems(previous.ports, current.ports).length > 0 ||
     previous.runAs !== current.runAs ||
@@ -743,6 +752,12 @@ function gitOpsBullets(previous: ImageContract, current: ImageContract): string[
   }
   if (previous.imageTarget !== current.imageTarget && (previous.imageTarget || current.imageTarget)) {
     bullets.push(`- **image target** \`${previous.imageTarget || "none"}\` → \`${current.imageTarget || "none"}\``);
+  }
+  for (const item of addedItems(previous.requiredConstraints, current.requiredConstraints)) {
+    bullets.push(`- **constraint** \`${item}\` (new; process start fails closed)`);
+  }
+  for (const item of removedItems(previous.requiredConstraints, current.requiredConstraints)) {
+    bullets.push(`- **removed constraint** \`${item}\``);
   }
   for (const key of addedItems(previous.optionalEnv, current.optionalEnv)) {
     bullets.push(`- **optional env** \`${key}\` (new)`);
