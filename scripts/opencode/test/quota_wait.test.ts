@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { EngineFailedError } from "../src/engine.ts";
+import { EngineFailedError, throwIfEngineFailed } from "../src/engine.ts";
 import { QUOTA_MESSAGE, QuotaWaitError } from "../src/quota.ts";
 import { isResettingQuotaError, isResettingQuotaResult, throwIfQuotaWait } from "../src/quota_wait.ts";
 
@@ -56,6 +56,29 @@ describe("throwIfQuotaWait", () => {
         random: () => 0,
       })
     ).not.toThrow();
+  });
+
+  test("a refused hop survives throwIfEngineFailed so a later runner does not skip the wait", () => {
+    let thrown: unknown;
+    try {
+      throwIfEngineFailed({
+        status: "stuck",
+        message: QUOTA_MESSAGE,
+        quota: "resetting",
+        runner: { type: "opencode", model: "opencode/big-pickle" },
+        hopRefused: true,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(() =>
+      throwIfQuotaWait({
+        err: thrown,
+        model: "opencode/big-pickle",
+        chain: [{ model: "opencode/big-pickle" }, { model: "anthropic/claude-sonnet-4-6" }],
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
   });
 
   test("refused hop waits even when a later runner remains", () => {

@@ -97,6 +97,7 @@ export function throwIfEngineFailed(result: EngineResult): void {
     auth: result.auth === true,
   });
   if (result.runner) err.runner = result.runner;
+  if (result.hopRefused) err.hopRefused = true;
   throw err;
 }
 

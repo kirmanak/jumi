@@ -248,7 +248,10 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         result = stampRunner(await engine(engineOptsForRunner(opts, current)), current);
       } catch (err) {
         attachRunner(err, runnerStamp(current));
-        if (!next || !shouldHopQuotaError(err, opts, current.model, next.model)) throw err;
+        if (!next || !shouldHopQuotaError(err, opts, current.model, next.model)) {
+          if (next) refuseQuotaHopError(err, current.model, next.model);
+          throw err;
+        }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
           refuseQuotaHopError(err, current.model, next.model);
           throw err;
@@ -257,7 +260,9 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         index++;
       }
       if (result) {
-        if (!next || !shouldHopQuotaResult(result, opts, current.model, next.model)) return result;
+        if (!next || !shouldHopQuotaResult(result, opts, current.model, next.model)) {
+          return refuseQuotaHop(result, current.model, next?.model);
+        }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) return refuseQuotaHop(result, current.model, next.model);
         await beginHop(hop, opts, current, next);
         index++;

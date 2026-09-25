@@ -846,6 +846,45 @@ describe("withEngineChain", () => {
     expect(result.hopRefused).toBe(true);
   });
 
+  test("later call marks a session-refused quota hop", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const quotaStuck: EngineResult = { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+    let later = false;
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === spark.model) return unavailable;
+      if (!later) return ok(opts.model);
+      return quotaStuck;
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok, claude] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    later = true;
+    const result = await run({ model: spark.model, workdir: "/tmp", continueSession: true });
+    expect(models).toEqual([spark.model, grok.model, grok.model]);
+    expect(result.runner?.model).toBe(grok.model);
+    expect(result.hopRefused).toBe(true);
+  });
+
+  test("later call marks an abort-refused thrown quota hop", async () => {
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+    const quotaErr = new EngineFailedError(QUOTA_MESSAGE, false, { quota: "resetting" });
+    let later = false;
+    const engine: Engine = async (opts) => {
+      if (opts.model === spark.model) return unavailable;
+      if (!later) return ok(opts.model);
+      throw quotaErr;
+    };
+    const run = withEngineChain(engine, { chain: [spark, grok, claude] });
+    await run({ model: spark.model, workdir: "/tmp" });
+    later = true;
+    const abort = new AbortController();
+    abort.abort();
+    await expect(run({ model: spark.model, workdir: "/tmp", abortSignal: abort.signal })).rejects.toBe(quotaErr);
+    expect(quotaErr.hopRefused).toBe(true);
+    expect(quotaErr.runner?.model).toBe(grok.model);
+  });
+
   test("later call still hops a quota when a runner remains", async () => {
     const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
     let second = false;
