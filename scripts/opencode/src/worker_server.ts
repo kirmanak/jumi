@@ -6,6 +6,7 @@ import { handleGithubWebhook } from "./github_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { ReviewQueue } from "./queue.ts";
 import { createPgReviewJobStore, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
+import { installProcessShutdown } from "./shutdown.ts";
 import type { IssueJob } from "./types.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
 import {
@@ -148,12 +149,7 @@ async function main() {
   const config = loadWorkerConfig();
   scrubSecretEnv();
   const shutdown = new AbortController();
-  const onSignal = (signal: string) => {
-    log(`received ${signal}, shutting down`);
-    if (!shutdown.signal.aborted) shutdown.abort();
-  };
-  process.once("SIGTERM", () => onSignal("SIGTERM"));
-  process.once("SIGINT", () => onSignal("SIGINT"));
+  installProcessShutdown(shutdown, log);
   await adoptOrphanXaiSibling(config.home, log).catch((err) =>
     log(`xAI sibling adoption failed: ${err instanceof Error ? err.message : String(err)}`)
   );
