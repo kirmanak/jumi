@@ -243,9 +243,9 @@ function readStatusRepository(
   };
 }
 
-function parseStatusFinish(
-  parsed: Record<string, unknown>
-): { sha: string; context?: string; state: string } | { skip: string } {
+type SiblingCheckFinish = { sha: string; branch?: string; context?: string; state: string };
+
+function parseStatusFinish(parsed: Record<string, unknown>): SiblingCheckFinish | { skip: string } {
   const sha = stringField(parsed.sha);
   if (!sha) return { skip: "malformed status payload" };
   const state = stringField(parsed.state) ?? stringField(parsed.status) ?? "";
@@ -253,9 +253,7 @@ function parseStatusFinish(
   return { sha, context, state };
 }
 
-function parseCheckRunFinish(
-  parsed: Record<string, unknown>
-): { sha: string; branch?: string; context?: string; state: string } | { skip: string } {
+function parseCheckRunFinish(parsed: Record<string, unknown>): SiblingCheckFinish | { skip: string } {
   const action = stringField(parsed.action) ?? "";
   const run = parsed.check_run;
   if (!isObject(run)) return { skip: "malformed check_run payload" };

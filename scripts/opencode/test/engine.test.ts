@@ -540,7 +540,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      let state = "pending";
+      let state: "pending" | "success" = "pending";
       const api = makeApi({
         listCommitStatuses: async () => [{ id: 1, context: "external/ci", status: state }],
       });
