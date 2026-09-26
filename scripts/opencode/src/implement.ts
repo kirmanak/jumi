@@ -415,6 +415,7 @@ export async function implementIssue(
             result,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
+            chain: opts.chain,
             previousError: opts.previousError,
           });
           await diary(QUOTA_STUCK_TEXT);
@@ -579,6 +580,7 @@ export async function implementIssue(
               err,
               model: opts.model,
               fallbackModel: opts.fallbackModel,
+              chain: opts.chain,
               previousError: opts.previousError,
             });
             return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
@@ -652,6 +654,7 @@ export async function implementIssue(
           err,
           model: opts.model,
           fallbackModel: opts.fallbackModel,
+          chain: opts.chain,
           previousError: opts.previousError,
         });
         await diary(QUOTA_STUCK_TEXT).catch(() => undefined);

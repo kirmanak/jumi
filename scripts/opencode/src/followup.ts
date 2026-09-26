@@ -1068,6 +1068,7 @@ export async function implementFollowUp(
             err,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
+            chain: opts.chain,
             previousError: opts.previousError,
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
@@ -1216,6 +1217,7 @@ export async function implementFollowUp(
             result,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
+            chain: opts.chain,
             previousError: opts.previousError,
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
@@ -1256,6 +1258,7 @@ export async function implementFollowUp(
             err,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
+            chain: opts.chain,
             previousError: opts.previousError,
           });
           return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
@@ -1310,6 +1313,7 @@ export async function implementFollowUp(
           err,
           model: opts.model,
           fallbackModel: opts.fallbackModel,
+          chain: opts.chain,
           previousError: opts.previousError,
         });
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
