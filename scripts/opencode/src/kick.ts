@@ -1,5 +1,5 @@
+import { AUTH_DEATH_REASON, looksLikeProviderAuthDeath } from "./auth.ts";
 import { isCiWaitSkipReason } from "./ci.ts";
-import { looksLikeProviderAuthDeath, AUTH_DEATH_REASON } from "./auth.ts";
 
 /**
  * Requeue-a-review kick ("replace the empty commit").
@@ -12,8 +12,7 @@ import { looksLikeProviderAuthDeath, AUTH_DEATH_REASON } from "./auth.ts";
 export const KICK_PATHS = new Set(["/api/board/kick", "/board/kick"]);
 
 export function isKickPath(pathname: string): boolean {
-  const normalized =
-    pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
+  const normalized = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
   return KICK_PATHS.has(normalized);
 }
 
@@ -33,12 +32,7 @@ export interface KickRequest extends KickItem {
   idempotencyKey: string;
 }
 
-export type KickRejectCode =
-  | "bad-request"
-  | "not-found"
-  | "stale-kick"
-  | "conflict"
-  | "not-kickable";
+export type KickRejectCode = "bad-request" | "not-found" | "stale-kick" | "conflict" | "not-kickable";
 
 export interface KickNotKickable {
   kickable: false;
@@ -52,7 +46,7 @@ export interface Kickable {
 }
 
 const STATUS_DESCRIPTION_RE =
-  /status description|description[^]{0,80}(reject|422|validat|too long|too large|exceed|invalid)|422[^]{0,80}description|validat[^]{0,80}description/i;
+  /status description|description[\s\S]{0,80}(reject|422|validat|too long|too large|exceed|invalid)|422[\s\S]{0,80}description|validat[\s\S]{0,80}description/i;
 
 export function isStatusDescriptionRejection(reason: string | null | undefined): boolean {
   if (!reason) return false;
@@ -149,14 +143,8 @@ export function parseKickBody(body: unknown, headerIdempotencyKey: string): Kick
   const rec = body as Record<string, unknown>;
   const owner = strField(rec.owner).trim();
   const repo = strField(rec.repo).trim();
-  const number =
-    numField(rec.number) ?? numField(rec.prNumber) ?? numField(rec.pr_number) ?? numField(rec.issueNumber);
-  const commit = (
-    strField(rec.commit) ||
-    strField(rec.headSha) ||
-    strField(rec.head_sha) ||
-    strField(rec.sha)
-  ).trim();
+  const number = numField(rec.number) ?? numField(rec.prNumber) ?? numField(rec.pr_number) ?? numField(rec.issueNumber);
+  const commit = (strField(rec.commit) || strField(rec.headSha) || strField(rec.head_sha) || strField(rec.sha)).trim();
   const kick = (
     strField(rec.kick) ||
     strField(rec.kickId) ||

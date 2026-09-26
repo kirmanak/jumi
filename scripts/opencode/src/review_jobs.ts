@@ -884,12 +884,25 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           if (prior.result === "ok" && prior.newJobId != null) {
             const job = this.rows.find((row) => row.id === prior.newJobId);
             if (job) {
-              return { status: "ok", job: { ...job }, terminalId: prior.terminalJobId ?? 0, deduped: true, kickLogId: prior.id };
+              return {
+                status: "ok",
+                job: { ...job },
+                terminalId: prior.terminalJobId ?? 0,
+                deduped: true,
+                kickLogId: prior.id,
+              };
             }
           }
           return {
             status: "rejected",
-            code: prior.result === "conflict" ? "conflict" : prior.result === "stale-kick" ? "stale-kick" : prior.result === "not-found" ? "not-found" : "not-kickable",
+            code:
+              prior.result === "conflict"
+                ? "conflict"
+                : prior.result === "stale-kick"
+                  ? "stale-kick"
+                  : prior.result === "not-found"
+                    ? "not-found"
+                    : "not-kickable",
             why: prior.result === "ok" ? "already kicked" : `already decided: ${prior.result}`,
             terminalId: prior.terminalJobId,
             newJobId: prior.newJobId,
@@ -898,11 +911,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           };
         }
       }
-      const record = (
-        terminalId: number | null,
-        newJobId: number | null,
-        result: string
-      ): KickLogRecord => {
+      const record = (terminalId: number | null, newJobId: number | null, result: string): KickLogRecord => {
         const entry: KickLogRecord = {
           id: this.nextKickId++,
           idempotencyKey: input.idempotencyKey,
@@ -929,7 +938,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           row.headSha === input.headSha
       );
       const terminals = candidates
-        .filter((row) => row.state === "failed" || row.state === "skipped" || row.state === "succeeded" || row.state === "cancelled")
+        .filter(
+          (row) =>
+            row.state === "failed" || row.state === "skipped" || row.state === "succeeded" || row.state === "cancelled"
+        )
         .sort((a, b) => a.id - b.id);
       const terminal = terminals.length > 0 ? terminals[terminals.length - 1] : undefined;
       if (!terminal) {
@@ -969,7 +981,14 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const disabled = disabledKickWhy(currentReason);
       if (disabled) {
         const entry = record(terminal.id, null, "not-kickable");
-        return { status: "rejected", code: "not-kickable", why: disabled, terminalId: terminal.id, newJobId: null, kickLogId: entry.id };
+        return {
+          status: "rejected",
+          code: "not-kickable",
+          why: disabled,
+          terminalId: terminal.id,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
       }
       const key = terminal.jobKey;
       if (this.rows.some((row) => row.jobKey === key && (row.state === "queued" || row.state === "leased"))) {
@@ -1837,10 +1856,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     };
   }
 
-  private async findKickByIdempotency(
-    tx: SqlClient,
-    idempotencyKey: string
-  ): Promise<KickLogRecord | undefined> {
+  private async findKickByIdempotency(tx: SqlClient, idempotencyKey: string): Promise<KickLogRecord | undefined> {
     if (!idempotencyKey) return undefined;
     const rows = asRows<{
       id: unknown;
@@ -1855,9 +1871,7 @@ export class PgReviewJobStore implements ReviewJobStore {
       terminal_job_id: unknown;
       new_job_id: unknown;
       created_at: unknown;
-    }>(
-      await tx.unsafe(`SELECT * FROM review_kicks WHERE idempotency_key = $1`, [idempotencyKey])
-    );
+    }>(await tx.unsafe(`SELECT * FROM review_kicks WHERE idempotency_key = $1`, [idempotencyKey]));
     return rows[0] ? this.mapKickRow(rows[0]) : undefined;
   }
 
@@ -2002,10 +2016,9 @@ export class PgReviewJobStore implements ReviewJobStore {
           } as RequeueKickOutcome;
         }
         const inflight = asRows<{ id: unknown }>(
-          await tx.unsafe(
-            `SELECT id FROM review_jobs WHERE job_key = $1 AND state IN ('queued', 'leased') LIMIT 1`,
-            [terminal.jobKey]
-          )
+          await tx.unsafe(`SELECT id FROM review_jobs WHERE job_key = $1 AND state IN ('queued', 'leased') LIMIT 1`, [
+            terminal.jobKey,
+          ])
         );
         if (inflight.length > 0) {
           const logged = await this.insertKickLog(tx, input, "conflict", terminal.id, null);
@@ -2025,7 +2038,15 @@ export class PgReviewJobStore implements ReviewJobStore {
               `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, pr_updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, 'queued', 0, (SELECT pr_updated_at FROM review_jobs WHERE id = $7))
                RETURNING *`,
-              [terminal.jobKey, terminal.owner, terminal.repo, terminal.prNumber, terminal.headSha, input.delivery, terminal.id]
+              [
+                terminal.jobKey,
+                terminal.owner,
+                terminal.repo,
+                terminal.prNumber,
+                terminal.headSha,
+                input.delivery,
+                terminal.id,
+              ]
             )
           );
         } catch (err) {
@@ -2046,7 +2067,13 @@ export class PgReviewJobStore implements ReviewJobStore {
         if (!job) throw new Error("failed to requeue kick");
         await this.clearSitTx(tx, input.owner, input.repo, input.prNumber);
         const logged = await this.insertKickLog(tx, input, "ok", terminal.id, job.id);
-        return { status: "ok", job, terminalId: terminal.id, deduped: false, kickLogId: logged.id } as RequeueKickOutcome;
+        return {
+          status: "ok",
+          job,
+          terminalId: terminal.id,
+          deduped: false,
+          kickLogId: logged.id,
+        } as RequeueKickOutcome;
       });
     } catch (err) {
       if (isUniqueViolation(err) && input.idempotencyKey) {
@@ -2071,7 +2098,13 @@ export class PgReviewJobStore implements ReviewJobStore {
               await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [prior.newJobId])
             );
             if (jobs[0]) {
-              return { status: "ok", job: mapRow(jobs[0]), terminalId: prior.terminalJobId ?? 0, deduped: true, kickLogId: prior.id };
+              return {
+                status: "ok",
+                job: mapRow(jobs[0]),
+                terminalId: prior.terminalJobId ?? 0,
+                deduped: true,
+                kickLogId: prior.id,
+              };
             }
           }
           const code =
@@ -2112,9 +2145,7 @@ export class PgReviewJobStore implements ReviewJobStore {
       terminal_job_id: unknown;
       new_job_id: unknown;
       created_at: unknown;
-    }>(
-      await this.sql.unsafe(`SELECT * FROM review_kicks ORDER BY id DESC LIMIT $1`, [cap])
-    );
+    }>(await this.sql.unsafe(`SELECT * FROM review_kicks ORDER BY id DESC LIMIT $1`, [cap]));
     return rows.map((row) => this.mapKickRow(row));
   }
 }

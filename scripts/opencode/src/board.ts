@@ -1,7 +1,7 @@
 import { isKickPath, parseKickBody } from "./kick.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
-import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
+import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
 
 /**
@@ -42,8 +42,7 @@ export function edgeActor(request: Request): string {
 }
 
 function idempotencyKeyOf(request: Request): string {
-  const value =
-    request.headers.get("idempotency-key") ?? request.headers.get("x-idempotency-key") ?? "";
+  const value = request.headers.get("idempotency-key") ?? request.headers.get("x-idempotency-key") ?? "";
   return value.trim();
 }
 
