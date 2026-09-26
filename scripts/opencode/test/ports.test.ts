@@ -95,6 +95,7 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
     unresolvePullComment: async () => undefined,
     dismissPullReview: async () => ({ id: 1 }),
     ...emptyCiMethods(),
+    listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
     createCommitStatus: async (_owner, _repo, sha, status) => {
       statuses.push({ sha, state: status.state, context: status.context, description: status.description });
       return status;

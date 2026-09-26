@@ -545,6 +545,27 @@ describe("GiteaAPI", () => {
     expect(urls[0]).not.toContain("head_sha");
   });
 
+  test("a disabled Actions unit is an empty job list, not an error", async () => {
+    for (const status of [403, 404]) {
+      globalThis.fetch = (async () => new Response("unit disabled", { status })) as unknown as typeof fetch;
+      await expect(
+        new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo")
+      ).resolves.toEqual([]);
+    }
+  });
+
+  test("an Actions list that might hide a job still throws", async () => {
+    globalThis.fetch = (async () =>
+      new Response("API rate limit exceeded", { status: 403 })) as unknown as typeof fetch;
+    await expect(new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo")).rejects.toThrow(
+      "403"
+    );
+    globalThis.fetch = (async () => new Response("boom", { status: 500 })) as unknown as typeof fetch;
+    await expect(new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo")).rejects.toThrow(
+      "500"
+    );
+  });
+
   test("throws useful errors for non-2xx responses", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 

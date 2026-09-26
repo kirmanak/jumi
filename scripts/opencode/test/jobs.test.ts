@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CI_LOOKUP_FAILED_REASON } from "../src/ci.ts";
+import { CI_LOOKUP_FAILED_REASON, encodeCiLookupMarker } from "../src/ci.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, REVIEW_KIND, WORKER_JOB_KINDS, workerJobKey } from "../src/review_jobs.ts";
@@ -53,6 +53,7 @@ function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { commen
     dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
     ...emptyCiMethods(),
+    listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   };
   return { ...defaults, ...overrides, comments };
 }
@@ -152,6 +153,22 @@ describe("job envelope kinds", () => {
     const row = store.rows.find((item) => item.id === leased!.id);
     expect(row?.state).toBe("queued");
     expect(row?.leasedUntil).toBeNull();
+  });
+
+  test("same-SHA wake clears a queued CI-lookup backoff", async () => {
+    const store = new MemoryReviewJobStore();
+    const job = makeJob();
+    await store.enqueue(job);
+    const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
+    const now = Date.now();
+    const marker = encodeCiLookupMarker(1, now);
+    expect(await store.requeueInfra(leased!.id, "engine-1", 60_000, marker, new Date(now))).toBe(true);
+    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
+    const row = store.rows.find((item) => item.id === leased!.id);
+    expect(row?.state).toBe("queued");
+    expect(row?.leasedUntil).toBeNull();
+    expect(row?.error).toBe(marker);
+    expect((await store.lease("engine-1", 60_000, new Date(now), [REVIEW_KIND]))?.id).toBe(leased!.id);
   });
 
   test("CI lookup skip without a wake is terminal at publish time", async () => {

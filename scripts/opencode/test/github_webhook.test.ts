@@ -829,7 +829,7 @@ describe("POST /webhooks/github", () => {
     expect(remembered).toEqual([]);
   });
 
-  test("skips status and check_run", async () => {
+  test("skips status and check_run without a worker api", async () => {
     const handler = createFetchHandler(githubConfig(), { queue: makeReviewQueue() });
     expect(await responseJson(await handler(await signedGithubRequest({}, { event: "status" })))).toEqual({
       skipped: "unsupported event status",
@@ -837,6 +837,79 @@ describe("POST /webhooks/github", () => {
     expect(await responseJson(await handler(await signedGithubRequest({}, { event: "check_run" })))).toEqual({
       skipped: "unsupported event check_run",
     });
+  });
+
+  test("finished external status and check_run wake the matching review", async () => {
+    const store = new MemoryReviewJobStore();
+    const human = makePR({
+      number: 55,
+      title: "Add feature",
+      body: "please review",
+      user: makeUser({ login: "alice", type: "User" }),
+      html_url: "https://github.com/kirmanak/demo/pull/55",
+      head: {
+        label: "kirmanak:feature",
+        ref: "feature",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: {
+          listOpenPulls: async () => [human],
+          getIssue: async () => githubIssue(),
+        },
+      },
+    });
+    const pending = await handler(
+      await signedGithubRequest(
+        {
+          sha: "headsha",
+          state: "pending",
+          context: "external/ci",
+          repository: githubRepo,
+        },
+        { event: "status" }
+      )
+    );
+    expect(await responseJson(pending)).toEqual({ skipped: "status pending" });
+    expect(store.rows).toHaveLength(0);
+
+    const status = await handler(
+      await signedGithubRequest(
+        {
+          sha: "headsha",
+          state: "success",
+          context: "external/ci",
+          repository: githubRepo,
+        },
+        { event: "status" }
+      )
+    );
+    expect(await responseJson(status)).toEqual({ key: "kirmanak/demo#55:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "review")?.state).toBe("queued");
+
+    const checkRun = await handler(
+      await signedGithubRequest(
+        {
+          action: "completed",
+          check_run: {
+            name: "external",
+            head_sha: "headsha",
+            status: "completed",
+            conclusion: "success",
+            check_suite: { head_branch: "feature" },
+          },
+          repository: githubRepo,
+        },
+        { event: "check_run" }
+      )
+    );
+    expect(await responseJson(checkRun)).toEqual({ key: "kirmanak/demo#55:headsha", queued: false });
   });
 
   test("later sibling workflow_job is not same-SHA deduped while the first follow-up is leased", async () => {

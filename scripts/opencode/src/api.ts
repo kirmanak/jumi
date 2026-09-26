@@ -216,6 +216,12 @@ function isNotFoundError(err: unknown): boolean {
   return err instanceof Error && /→ 404\b/.test(err.message);
 }
 
+function isActionsDisabledError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (/rate limit/i.test(err.message)) return false;
+  return /→ (403|404)\b/.test(err.message);
+}
+
 /**
  * Minimal Gitea REST API client.
  * All methods throw on non-2xx responses.
@@ -585,9 +591,15 @@ export class GiteaAPI {
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
     const needle = opts?.headSha?.toLowerCase();
     while (page <= 40) {
-      const body = await this.get<{ jobs?: GiteaActionJob[] }>(
-        `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}&order=desc${statusQ}`
-      );
+      let body: { jobs?: GiteaActionJob[] };
+      try {
+        body = await this.get<{ jobs?: GiteaActionJob[] }>(
+          `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}&order=desc${statusQ}`
+        );
+      } catch (err) {
+        if (results.length === 0 && isActionsDisabledError(err)) return [];
+        throw err;
+      }
       const batch = Array.isArray(body?.jobs) ? body.jobs : [];
       for (const job of batch) {
         if (needle && (job.head_sha ?? "").toLowerCase() !== needle) continue;

@@ -1,5 +1,6 @@
 import {
   parseWorkflowJobPayload,
+  shouldEnqueueSiblingCheckReview,
   shouldEnqueueWorkflowJobFollowUp,
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
@@ -75,6 +76,10 @@ export function isPushWebhookEvent(event: string | null, eventType: string | nul
 
 export function isWorkflowJobWebhookEvent(event: string | null, eventType: string | null): boolean {
   return event === "workflow_job" || eventType === "workflow_job";
+}
+
+export function isCommitStatusWebhookEvent(event: string | null, eventType: string | null): boolean {
+  return event === "status" || eventType === "status";
 }
 
 export function isPullAssignWebhookEvent(event: string | null, eventType: string | null): boolean {
@@ -258,6 +263,29 @@ export async function handleWorkerWebhookEvent(
   }
   // Gitea 1.27: assignment uses X-Gitea-Event=issues and X-Gitea-Event-Type=issue_assign.
   // Accept either header so a proxy that copies Event-Type into Event still works.
+  if (isCommitStatusWebhookEvent(event, eventType)) {
+    if (!deps.review || !deps.api) return skipped(`unsupported event ${event ?? eventType ?? "status"}`, logger);
+    try {
+      const decision = await shouldEnqueueSiblingCheckReview(rawBody, "status", policy, deps.api, logger);
+      if (decision.type === "skip") return skipped(decision.reason, logger);
+      const receivedAt = new Date().toISOString();
+      const reviewResults: EnqueueResult[] = [];
+      for (const partial of decision.jobs) {
+        const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+        reviewResults.push(result);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      }
+      if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
+      return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+    } catch (err) {
+      if (isQueueUnavailable(err)) {
+        logger(`queue unavailable: ${err.message}`);
+        return json(503, { error: "queue unavailable" });
+      }
+      logger(`status webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      return json(500, { error: "internal error" });
+    }
+  }
   if (!isWorkerWebhookEvent(event, eventType)) {
     return skipped(`unsupported event ${event ?? eventType ?? "unknown"}`, logger);
   }
