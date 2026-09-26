@@ -134,18 +134,18 @@ function grantKey(refresh: string): string {
   return createHash("sha256").update(refresh).digest("hex");
 }
 
+export function hasLatchedXaiGrant(): boolean {
+  return rejectedGrants.size > 0;
+}
+
 /**
  * One-line operator notice when this process already knows the xAI refresh
  * grant is spent. Single line, no secrets: the board renders it as one row,
  * never as a banner. Undefined when the process knows of no grant problem.
  */
 export function latchedXaiGrantNotice(): string | undefined {
-  if (rejectedGrants.size === 0) return undefined;
+  if (!hasLatchedXaiGrant()) return undefined;
   return "xAI refresh grant refused; run /connect to restore Grok";
-}
-
-export function hasLatchedXaiGrant(): boolean {
-  return rejectedGrants.size > 0;
 }
 
 export function isXaiModel(model: string | undefined): boolean {

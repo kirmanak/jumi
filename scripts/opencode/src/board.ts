@@ -140,7 +140,7 @@ export async function buildBoardGroups(store: BoardStore): Promise<BoardGroups> 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }
 
