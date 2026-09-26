@@ -1217,6 +1217,180 @@ describe("processWorkerTick", () => {
     }
   });
 
+  test("mixed chain waits on the second runner quota and does not latch", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-chain-wait-home-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-chain-wait-work-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const api = makeApi();
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") throw new Error("missing");
+        return "";
+      };
+      await processWorkerTick(
+        store,
+        makeWorkerConfig({
+          home,
+          workdir,
+          model: "openai/gpt-5.5",
+          fallbackModel: "anthropic/claude-sonnet-4-6",
+          runners: {
+            first: { type: "opencode", model: "openai/gpt-5.5" },
+            second: { type: "opencode", model: "anthropic/claude-sonnet-4-6" },
+          },
+          chain: ["first", "second"],
+        }),
+        api,
+        "worker-1",
+        {
+          breaker: new InfraCircuitBreaker(),
+          quotaCooldown: new QuotaCooldown(),
+          implement: async (opts) =>
+            implementIssue({
+              ...opts,
+              heartbeatIntervalMs: 0,
+              gitRunner,
+              openCodeRunner: async (engineOpts) => {
+                models.push(engineOpts.model);
+                return { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+              },
+            }),
+        }
+      );
+      expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.attempt).toBe(0);
+      expect(isQuotaWaitMarker(store.rows[0]?.error)).toBe(true);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
+      expect(
+        isQuotaStuck(await readStuckLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }))
+      ).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("mixed chain still hops a quota on the first runner", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-chain-hop-home-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-chain-hop-work-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") throw new Error("missing");
+        return "";
+      };
+      await processWorkerTick(
+        store,
+        makeWorkerConfig({
+          home,
+          workdir,
+          model: "openai/gpt-5.5",
+          fallbackModel: "anthropic/claude-sonnet-4-6",
+          runners: {
+            first: { type: "opencode", model: "openai/gpt-5.5" },
+            second: { type: "opencode", model: "anthropic/claude-sonnet-4-6" },
+          },
+          chain: ["first", "second"],
+        }),
+        makeApi(),
+        "worker-1",
+        {
+          breaker: new InfraCircuitBreaker(),
+          quotaCooldown: new QuotaCooldown(),
+          implement: async (opts) =>
+            implementIssue({
+              ...opts,
+              heartbeatIntervalMs: 0,
+              gitRunner,
+              openCodeRunner: async (engineOpts) => {
+                models.push(engineOpts.model);
+                if (engineOpts.model === "openai/gpt-5.5") {
+                  return { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+                }
+                return { status: "ok" };
+              },
+            }),
+        }
+      );
+      expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
+      expect(store.rows[0]?.state).toBe("succeeded");
+      expect(isQuotaWaitMarker(store.rows[0]?.error)).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("refused quota hop waits instead of latching", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-worker-hop-refused-home-"));
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-hop-refused-work-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob());
+      const api = makeApi();
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") throw new Error("missing");
+        return "";
+      };
+      await processWorkerTick(
+        store,
+        makeWorkerConfig({
+          home,
+          workdir,
+          model: "openai/gpt-5.5",
+          fallbackModel: "anthropic/claude-sonnet-4-6",
+          runners: {
+            first: { type: "opencode", model: "openai/gpt-5.5" },
+            second: { type: "opencode", model: "anthropic/claude-sonnet-4-6" },
+          },
+          chain: ["first", "second"],
+        }),
+        api,
+        "worker-1",
+        {
+          breaker: new InfraCircuitBreaker(),
+          quotaCooldown: new QuotaCooldown(),
+          implement: async (opts) =>
+            implementIssue({
+              ...opts,
+              heartbeatIntervalMs: 0,
+              extendLease: async () => false,
+              gitRunner,
+              openCodeRunner: async (engineOpts) => {
+                models.push(engineOpts.model);
+                return { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" };
+              },
+            }),
+        }
+      );
+      expect(models).toEqual(["openai/gpt-5.5"]);
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(isQuotaWaitMarker(store.rows[0]?.error)).toBe(true);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
+      expect(
+        isQuotaStuck(await readStuckLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }))
+      ).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
   test("quota hit cools the instance so another job does not spawn OpenCode", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob());
