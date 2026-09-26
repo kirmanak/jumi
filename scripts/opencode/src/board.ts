@@ -306,7 +306,7 @@ const PAGE_CATALOG = ${JSON.stringify(catalog)};
 const state = { data: null, selected: null, forge: "gitea", catalogOk: true };
 const $ = (id) => document.getElementById(id);
 const narrow = () => !window.matchMedia("(min-width: 700px)").matches;
-function keyOf(item) { return item.owner + "/" + item.repo + "#" + item.number; }
+function keyOf(item) { const forge = item.forge || (state.data && state.data.forge) || "gitea"; return forge + "/" + item.owner + "/" + item.repo + "/" + item.kind + "#" + item.number; }
 function groupsOf(data) {
   const inProgress = data.in_progress || data.inProgress || [];
   const needsKick = data.needs_kick || data.needsKick || [];
@@ -320,9 +320,6 @@ function forgeHref(item, data) {
   const forge = forgeOf(item, data);
   const path = item.kind === "review" ? (forge === "github" ? "pull" : "pulls") : "issues";
   return base + "/" + item.owner + "/" + item.repo + "/" + path + "/" + item.number;
-}
-function esc(text) {
-  return String(text ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 async function load() {
   const errBox = $("load-error");
@@ -574,6 +571,10 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     if (pathname === BOARD_KICK_PATH) {
       if (request.method !== "POST") return json(405, { error: "method not allowed" });
       if (!hasEdgeIdentity(request)) return json(401, { error: "missing edge identity" });
+      const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+      if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
+      const origin = request.headers.get("origin");
+      if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
       let payload: unknown;
       try {
         payload = await request.json();
