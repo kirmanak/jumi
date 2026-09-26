@@ -31,22 +31,8 @@ const CODEX_AUTH_RE =
 const CODEX_USAGE_LIMIT_RE =
   /usage[_\s-]*limit|rate[\s_-]*limit|too many requests|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|out of quota|hit your (?:usage|free|session) limit/i;
 
-function codexConfigArgs(model: string, effort: string): string[] {
+function codexHardeningArgs(effort: string): string[] {
   return [
-    "--json",
-    "--color",
-    "never",
-    // `--sandbox` is a documented `codex exec` flag; `-c sandbox_mode` below
-    // repeats it so the resume path (which omits `--sandbox`) keeps the same
-    // danger-full-access class without relying on a flag `exec resume` has
-    // rejected on past releases.
-    "--sandbox",
-    CODEX_SANDBOX,
-    "--skip-git-repo-check",
-    "--ignore-rules",
-    "--ignore-user-config",
-    "--model",
-    model,
     "-c",
     `model_reasoning_effort="${effort}"`,
     "-c",
@@ -81,27 +67,52 @@ function codexConfigArgs(model: string, effort: string): string[] {
   ];
 }
 
-/**
- * Minimal flag list for `codex exec resume <id>`: only flags the `exec
- * resume` help lists. Past releases rejected `-s/--sandbox` there, so the
- * sandbox and approval posture travels via `-c` overrides only. The session
- * already carries model, effort, and feature pins from the first spawn.
- */
-function codexResumeArgs(): string[] {
+function codexConfigArgs(model: string, effort: string): string[] {
   return [
     "--json",
     "--color",
     "never",
-    "-c",
-    `sandbox_mode="${CODEX_SANDBOX}"`,
-    "-c",
-    `approval_policy="${CODEX_APPROVAL}"`,
+    // `--sandbox` is a documented `codex exec` flag; `-c sandbox_mode` below
+    // repeats it so the resume path (which omits `--sandbox`) keeps the same
+    // danger-full-access class without relying on a flag `exec resume` has
+    // rejected on past releases.
+    "--sandbox",
+    CODEX_SANDBOX,
+    "--skip-git-repo-check",
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--model",
+    model,
+    ...codexHardeningArgs(effort),
   ];
 }
 
+/**
+ * Flags for `codex exec resume <id>`. `--color` is declared on the `exec`
+ * command without `global = true`, so it must appear before the `resume`
+ * subcommand — after it the real binary rejects it as an unexpected
+ * argument. `--json`, `--skip-git-repo-check`, `--ignore-rules`,
+ * `--ignore-user-config`, and `-c` are `global = true` and therefore valid
+ * on either side; the globals stay before `resume` with `--color` while the
+ * `-c` overrides travel after the thread id. Every `-c` override is
+ * per-invocation config reloaded from scratch on each `exec resume`, not
+ * per-thread state, so the full turn-1 hardening list is repeated here —
+ * otherwise turn 2+ would silently re-enable hooks, web-search,
+ * experimental context management, and project `.rules` loading that turn 1
+ * disabled.
+ */
+function codexResumePreArgs(): string[] {
+  return ["--json", "--color", "never", "--skip-git-repo-check", "--ignore-rules", "--ignore-user-config"];
+}
+
+function codexResumeArgs(effort: string): string[] {
+  return codexHardeningArgs(effort);
+}
+
 export function codexArgv(opts: EngineRunOptions, threadId?: string): string[] {
-  if (opts.continueSession && threadId) return ["codex", "exec", "resume", threadId, ...codexResumeArgs(), "-"];
   const effort = opts.effort || CODEX_DEFAULT_EFFORT;
+  if (opts.continueSession && threadId)
+    return ["codex", "exec", ...codexResumePreArgs(), "resume", threadId, ...codexResumeArgs(effort), "-"];
   const flags = codexConfigArgs(opts.model, effort);
   return ["codex", "exec", ...flags, "-"];
 }

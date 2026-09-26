@@ -110,25 +110,47 @@ describe("codexArgv", () => {
     const fresh = codexArgv({ model: "gpt-6-sol", workdir: "/w", continueSession: true });
     expect(fresh).not.toContain("resume");
     const resumed = codexArgv({ model: "gpt-6-sol", workdir: "/w", continueSession: true }, "thread-9");
-    expect(resumed.slice(0, 4)).toEqual(["codex", "exec", "resume", "thread-9"]);
+    expect(resumed.slice(0, 2)).toEqual(["codex", "exec"]);
+    expect(resumed).toContain("resume");
+    expect(resumed).toContain("thread-9");
+    expect(resumed.indexOf("resume")).toBeLessThan(resumed.indexOf("thread-9"));
     expect(resumed).not.toContain("--last");
     expect(resumed).not.toContain("--all");
   });
 
   test("resume uses a minimal flag list exec resume accepts", () => {
     const resumed = codexArgv({ model: "gpt-6-sol", workdir: "/w", continueSession: true }, "thread-9");
-    expect(resumed).toContain("--json");
+    const resumeIdx = resumed.indexOf("resume");
+    // `--color` is not global on `exec`, so it and the other globals must
+    // appear before the `resume` subcommand, never after it.
+    expect(resumed.indexOf("--json")).toBeLessThan(resumeIdx);
+    expect(resumed.indexOf("--color")).toBeLessThan(resumeIdx);
+    expect(resumed.slice(resumeIdx + 2)).not.toContain("--color");
+    expect(resumed.slice(resumeIdx + 2)).not.toContain("--json");
+    expect(resumed.indexOf("--skip-git-repo-check")).toBeLessThan(resumeIdx);
+    expect(resumed.indexOf("--ignore-rules")).toBeLessThan(resumeIdx);
+    expect(resumed.indexOf("--ignore-user-config")).toBeLessThan(resumeIdx);
+    // `-c` is global so it travels after the thread id; every turn-1
+    // hardening override is per-invocation config and must be repeated.
     expect(resumed).toContain(`sandbox_mode="${CODEX_SANDBOX}"`);
     expect(resumed).toContain(`approval_policy="${CODEX_APPROVAL}"`);
+    expect(resumed).toContain("features.hooks=false");
+    expect(resumed).toContain("features.multi_agent=false");
+    expect(resumed).toContain("features.apps=false");
+    expect(resumed).toContain("agents.enabled=false");
+    expect(resumed).toContain('web_search="disabled"');
+    expect(resumed).toContain("features.context_management.experimental_mode=false");
+    expect(resumed).toContain("otel.log_user_prompt=false");
+    expect(resumed).toContain('otel.trace_exporter="none"');
+    expect(resumed.indexOf(`sandbox_mode="${CODEX_SANDBOX}"`)).toBeGreaterThan(resumeIdx);
     // `exec resume` has rejected `-s/--sandbox` on past releases, and neither
     // `--ask-for-approval` nor `--disable` is in its flag set either.
     expect(resumed).not.toContain("--sandbox");
     expect(resumed).not.toContain("-s");
     expect(resumed).not.toContain("--ask-for-approval");
     expect(resumed).not.toContain("--disable");
-    // The session already carries model, effort, and feature pins.
+    // The session already carries the model.
     expect(resumed).not.toContain("--model");
-    expect(resumed).not.toContain("--skip-git-repo-check");
     expect(resumed.at(-1)).toBe("-");
   });
 });
