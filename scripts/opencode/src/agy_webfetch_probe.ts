@@ -238,7 +238,7 @@ function toolOutcome(output: string): ToolOutcome {
       continue;
     }
     const step = ev.step_update;
-    if (step?.step_type !== "tool" || step.tool_name !== "read_url_content") continue;
+    if (step?.step_type !== "tool" || step?.tool_name !== "read_url_content") continue;
     if (step.state !== "DONE" && step.state !== "ERROR") continue;
     seen = true;
     const info = step.tool_info ?? {};
