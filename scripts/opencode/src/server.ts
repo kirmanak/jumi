@@ -619,6 +619,11 @@ export async function processEngineTick(
         return "processed";
       }
       result = reviewed;
+      if (result.status === "skipped" && result.reason === CI_LOOKUP_FAILED_REASON) {
+        stopHeartbeat();
+        await settleCiLookupFailure(store, api, config, after, leasedBy, nowMs, logger);
+        return "processed";
+      }
     }
     stopHeartbeat();
     const state = publishedState(result);

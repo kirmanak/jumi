@@ -161,14 +161,13 @@ describe("job envelope kinds", () => {
     await store.enqueue(job);
     const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
     const now = Date.now();
-    expect(await store.requeueInfra(leased!.id, "engine-1", 60_000, encodeCiLookupMarker(1, now), new Date(now))).toBe(
-      true
-    );
+    const marker = encodeCiLookupMarker(1, now);
+    expect(await store.requeueInfra(leased!.id, "engine-1", 60_000, marker, new Date(now))).toBe(true);
     expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
     const row = store.rows.find((item) => item.id === leased!.id);
     expect(row?.state).toBe("queued");
     expect(row?.leasedUntil).toBeNull();
-    expect(row?.error).toBeNull();
+    expect(row?.error).toBe(marker);
     expect((await store.lease("engine-1", 60_000, new Date(now), [REVIEW_KIND]))?.id).toBe(leased!.id);
   });
 

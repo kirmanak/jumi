@@ -298,7 +298,7 @@ describePg("PgReviewJobStore against real postgres", () => {
     const row = await store.get(leased!.id);
     expect(row?.state).toBe("queued");
     expect(row?.leasedUntil).toBeNull();
-    expect(row?.error).toBeNull();
+    expect(row?.error).toBe(encodeCiLookupMarker(1, now));
     expect(await store.lease("engine-1", 60_000, new Date(now))).toBeDefined();
   });
 

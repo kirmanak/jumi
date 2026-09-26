@@ -683,6 +683,90 @@ describe("processEngineTick", () => {
     });
   });
 
+  test("absent-budget exhaust that fails the final list publishes the lookup failure", async () => {
+    await withWorkspace(async (workspace) => {
+      const blocker = join(workspace, "not-a-dir");
+      await writeFile(blocker, "x");
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      let looks = 0;
+      const emptyThenFail = async () => {
+        looks++;
+        if (looks < 5) return [];
+        throw new Error("rate limited");
+      };
+      const api = makeApi({
+        listCommitStatuses: emptyThenFail,
+        listCheckRuns: async () => {
+          if (looks < 5) return [];
+          throw new Error("rate limited");
+        },
+        listActionJobs: async () => {
+          if (looks < 5) return [];
+          throw new Error("rate limited");
+        },
+      });
+      let ran = 0;
+      let now = Date.UTC(2026, 0, 1);
+      const extras = {
+        now: () => now,
+        openCodeRunner: async () => {
+          ran++;
+          return { status: "ok" as const };
+        },
+      };
+      const config = makeConfig({ workdir: blocker, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(0);
+      expect(store.rows[0]?.state).toBe("queued");
+      now += CI_LOOKUP_BUDGET_MS;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(ran).toBe(0);
+      expect(store.rows[0]?.state).toBe("failed");
+      expect(store.rows[0]?.resultReason).toBe(CI_LOOKUP_FAILED_REASON);
+      expect(store.rows[0]?.publishedAt).not.toBeNull();
+      expect(api.statuses).toEqual([{ sha: "headsha", state: "failure", description: CI_LOOKUP_FAILED_REASON }]);
+      expect(looks).toBe(5);
+      expect(await processEngineTick(store, config, api, "engine-1", extras)).toBe("idle");
+    });
+  });
+
+  test("sibling finish during a CI lookup outage does not restart the budget", async () => {
+    await withWorkspace(async (workspace) => {
+      const blocker = join(workspace, "not-a-dir");
+      await writeFile(blocker, "x");
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const boom = async () => {
+        throw new Error("rate limited");
+      };
+      const api = makeApi({
+        listCommitStatuses: boom,
+        listCheckRuns: boom,
+        listActionJobs: boom,
+      });
+      let now = Date.now();
+      const extras = {
+        now: () => now,
+        openCodeRunner: async () => {
+          throw new Error("runner should not be called");
+        },
+      };
+      const config = makeConfig({ workdir: blocker, home: workspace });
+      await processEngineTick(store, config, api, "engine-1", extras);
+      const marker = store.rows[0]?.error;
+      expect(marker).toContain("ci-lookup-retry:");
+      expect(await store.enqueue(makeJob())).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
+      expect(store.rows[0]?.leasedUntil).toBeNull();
+      expect(store.rows[0]?.error).toBe(marker);
+      now += CI_LOOKUP_BUDGET_MS;
+      await processEngineTick(store, config, api, "engine-1", extras);
+      expect(store.rows[0]?.state).toBe("failed");
+      expect(store.rows[0]?.resultReason).toBe(CI_LOOKUP_FAILED_REASON);
+      expect(api.statuses).toEqual([{ sha: "headsha", state: "failure", description: CI_LOOKUP_FAILED_REASON }]);
+    });
+  });
+
   test("Actions that appear after the first list are not reviewed before they finish", async () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();

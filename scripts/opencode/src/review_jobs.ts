@@ -434,7 +434,6 @@ export class MemoryReviewJobStore implements ReviewJobStore {
             isCiLookupRetryMarker(row.error)
           ) {
             row.leasedUntil = null;
-            row.error = null;
             row.updatedAt = now;
           }
         }
@@ -982,10 +981,6 @@ export class PgReviewJobStore implements ReviewJobStore {
                leased_until = CASE
                  WHEN state = 'queued' AND leased_until > NOW() AND error LIKE 'ci-lookup-retry:%' THEN NULL
                  ELSE leased_until
-               END,
-               error = CASE
-                 WHEN state = 'queued' AND leased_until > NOW() AND error LIKE 'ci-lookup-retry:%' THEN NULL
-                 ELSE error
                END,
                updated_at = NOW()
            WHERE job_key = $1

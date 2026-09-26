@@ -202,6 +202,20 @@ describe("MemoryReviewJobStore", () => {
     expect(again?.attempt).toBe(0);
   });
 
+  test("same-key enqueue clears a queued ci-lookup backoff but keeps the marker", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000, new Date(1_000));
+    const now = Date.now();
+    const marker = encodeCiLookupMarker(3, now);
+    expect(await store.requeueInfra(leased!.id, "engine-1", 60_000, marker, new Date(now))).toBe(true);
+    expect(await store.enqueue(makeJob())).toEqual({ key: "kirmanak/demo#7:headsha", queued: false });
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.leasedUntil).toBeNull();
+    expect(store.rows[0]?.error).toBe(marker);
+    expect(await store.lease("engine-1", 60_000, new Date(now))).toBeDefined();
+  });
+
   test("model reclaim still increments attempt after an infra marker", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
@@ -489,6 +503,7 @@ describe("PgReviewJobStore.enqueue", () => {
     expect(wake).toContain("state = 'leased' THEN TRUE");
     expect(wake).toContain("ci-lookup-retry:%");
     expect(wake).toContain("leased_until");
+    expect(wake).not.toContain("error = CASE");
     expect(queries.some((query) => query.includes("INSERT"))).toBe(false);
   });
 
