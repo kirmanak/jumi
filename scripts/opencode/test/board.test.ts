@@ -113,6 +113,29 @@ describe("operator board read API", () => {
     expect((await handler(new Request("https://reviewer.test/api/board"))).status).toBe(404);
   });
 
+  test("HEAD on board paths is 405 without touching the ledger", async () => {
+    const failing = {
+      listInflight: async (): Promise<never[]> => {
+        throw new Error("db down");
+      },
+      sits: {
+        list: async () => {
+          throw new Error("db down");
+        },
+      },
+    };
+    const handler = createBoardFetchHandler({
+      store: failing as unknown as MemoryReviewJobStore,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+    const response = await handler(
+      new Request("https://board.test/board", { method: "HEAD", headers: new Headers(EDGE_HEADERS) })
+    );
+    expect(response.status).toBe(405);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
   test("ledger failure is 503 with no cached list", async () => {
     const failing = {
       listInflight: async (): Promise<never[]> => {

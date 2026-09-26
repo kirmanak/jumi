@@ -16,7 +16,9 @@ export const BOARD_PORT = 3001;
 
 const BOARD_PATHS = new Set(["/", "/board", "/api/board"]);
 
-/** Ingress injects one of these; the webhook secret is never a substitute. */
+/** Ingress injects one of these; the webhook secret is never a substitute.
+ * 3001 must only be reachable via that auth proxy (ingress is out of scope):
+ * a direct-to-pod route would let anyone self-assert these headers. */
 const EDGE_IDENTITY_HEADERS = [
   "x-forwarded-user",
   "x-forwarded-email",
@@ -158,7 +160,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     if (url.pathname === "/healthz") return json(200, { ok: true });
     const pathname = url.pathname.length > 1 && url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
     if (!BOARD_PATHS.has(pathname)) return json(404, { error: "not found" });
-    if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
+    if (request.method !== "GET") return json(405, { error: "method not allowed" });
     // Edge identity only. The webhook HMAC secret and auth token are not accepted here.
     if (!hasEdgeIdentity(request)) return json(401, { error: "missing edge identity" });
     let groups: BoardGroups;

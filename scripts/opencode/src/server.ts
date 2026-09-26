@@ -889,11 +889,21 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       // Operator board on its own port. Same process (no sidecar, no new
       // Deployment), same ledger, single replica with no leader election.
       // Polling GET only; the webhook host never serves the board paths.
-      const boardServer = Bun.serve({
-        hostname: config.host,
-        port: BOARD_PORT,
-        fetch: createBoardFetchHandler({ store, logger }),
-      });
+      let boardServer: ReturnType<typeof Bun.serve>;
+      try {
+        boardServer = Bun.serve({
+          hostname: config.host,
+          port: BOARD_PORT,
+          fetch: createBoardFetchHandler({ store, logger }),
+        });
+      } catch (err) {
+        try {
+          started.stop();
+        } catch {
+          // Best-effort: the webhook listener must not leak on board bind failure.
+        }
+        throw err;
+      }
       logger(`board listening on ${boardServer.hostname}:${boardServer.port} role=${config.role}`);
       started.boardServer = boardServer;
       const reclaim = new AbortController();
