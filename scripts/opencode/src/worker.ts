@@ -435,6 +435,12 @@ export async function processWorkerTick(
     } else if (result.status === "pr" || result.status === "pushed" || state === "succeeded") {
       await clearSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, logger);
     }
+    // A freshly latched object gets its board row now, not on some later run:
+    // latchReason is already computed above, and still flows through normalizeSitReason.
+    // Placed after the clear branch because stuck publishes as succeeded.
+    if (latchReason) {
+      await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, latchReason, logger);
+    }
     breaker.recordModelReached();
     const prNumber = pushedPrNumber(result);
     if (prNumber !== undefined) {
