@@ -13,6 +13,7 @@ import {
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
+import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT, QUOTA_WAIT_PREFIX } from "../src/quota.ts";
 import { INCOMPLETE_REVIEW_STUCK, MAX_INCOMPLETE_RETRIES, type ReviewApi } from "../src/review.ts";
 import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
@@ -1205,6 +1206,56 @@ describe("processEngineTick", () => {
       expect(store.rows[0]?.leasedUntil).toBeGreaterThan(Date.now());
       expect(logs.some((line) => line.includes("infra-retry") && line.includes("n=1"))).toBe(true);
       expect(logs.some((line) => line.includes("requeued") && line.includes("attempt="))).toBe(false);
+    });
+  });
+
+  test("resetting quota stuck requeues the same head with a quota-wait marker", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const logs: string[] = [];
+      const api = makeApi();
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        api,
+        "engine-1",
+        {
+          gitRunner: frozenGit(),
+          workspacePreparer: async () => undefined,
+          breaker: new InfraCircuitBreaker(),
+          openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" }),
+        },
+        (message) => logs.push(message)
+      );
+      expect(store.rows[0]?.state).toBe("queued");
+      expect(store.rows[0]?.headSha).toBe("headsha");
+      expect(store.rows[0]?.error?.startsWith(QUOTA_WAIT_PREFIX)).toBe(true);
+      expect(store.rows[0]?.resultReason).toBeNull();
+      expect(store.rows[0]?.resultMarkdown).toBeNull();
+      expect(store.rows[0]?.leasedUntil).toBeGreaterThan(Date.now());
+      expect(logs.some((line) => line.includes("quota-wait") && line.includes("n=1"))).toBe(true);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
+      expect(api.statuses.map((status) => status.state)).toEqual(["pending"]);
+    });
+  });
+
+  test("hard quota stuck still takes the day-long skip path", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi();
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        breaker: new InfraCircuitBreaker(),
+        openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "hard" }),
+      });
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe(QUOTA_STUCK_TEXT);
+      expect((store.rows[0]?.error ?? "").startsWith(QUOTA_WAIT_PREFIX)).toBe(false);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(true);
+      expect(api.statuses.at(-1)?.state).toBe("warning");
     });
   });
 
