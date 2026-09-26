@@ -569,3 +569,35 @@ describe("codex catalog", () => {
     );
   });
 });
+
+describe("codex image flag probe", () => {
+  const repoRoot = join(process.cwd(), "../..");
+
+  test("every image verification path probes the codex exec/resume flags", async () => {
+    // `codex --version` proves the binary exists, not that it accepts the
+    // argv `codexArgv()` emits — the failure class this runner already hit
+    // twice. Each verification path therefore greps the no-auth
+    // `codex exec --help` / `codex exec resume --help` output for the flags
+    // the fresh spawn and the resume extra turn depend on, so a CODEX_VERSION
+    // bump that renames one fails the image job instead of every Codex run.
+    // `opencode-checks.yml` matters most: it is the one that runs on
+    // pull_request, so it is what gates the bump before the image is published.
+    const paths = [
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".gitea/scripts/build-worker-image.sh",
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/jumi-worker-image.yml",
+      ".github/workflows/opencode-checks.yml",
+    ];
+    for (const path of paths) {
+      const text = await readFile(join(repoRoot, path), "utf8");
+      expect(text).toContain("codex exec --help");
+      expect(text).toContain("codex exec resume --help");
+    }
+    // Both pull_request image builds in that one file — reviewer and worker —
+    // ship `codex`, so both have to prove the flags, not just the first.
+    const checks = await readFile(join(repoRoot, ".github/workflows/opencode-checks.yml"), "utf8");
+    expect(checks.split("codex exec --help").length - 1).toBe(2);
+    expect(checks.split("codex exec resume --help").length - 1).toBe(2);
+  });
+});
