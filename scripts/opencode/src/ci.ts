@@ -46,15 +46,24 @@ export interface CiInspection {
 export const CI_PENDING_REASON = "CI still pending";
 export const CI_FAILED_REASON = "CI failed";
 export const CI_LOOKUP_FAILED_REASON = "CI lookup failed";
+/** Lists succeeded and no sibling check exists yet. Waits on the lookup budget, then reviews. */
+export const CI_ABSENT_REASON = "CI not started";
+/** Posted and prompted once the lookup budget expires with still no checks. */
+export const CI_ABSENT_NOTE = "This repository has no CI checks on this head.";
 /** Growing waits before a review whose CI lookup keeps failing is given up. */
 export const CI_LOOKUP_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000, 300_000] as const;
 export const CI_LOOKUP_MAX_ATTEMPTS = 8;
 export const CI_LOOKUP_BUDGET_MS = 10 * 60 * 1000;
 export const CI_LOOKUP_RETRY_PREFIX = "ci-lookup-retry:";
 
-/** Non-terminal review skips that wait for a later workflow_job wake. */
+/** Non-terminal review skips that wait for a later sibling-check wake. */
 export function isCiWaitSkipReason(reason: string | null | undefined): boolean {
-  return reason === CI_PENDING_REASON || reason === CI_FAILED_REASON || reason === CI_LOOKUP_FAILED_REASON;
+  return (
+    reason === CI_PENDING_REASON ||
+    reason === CI_FAILED_REASON ||
+    reason === CI_LOOKUP_FAILED_REASON ||
+    reason === CI_ABSENT_REASON
+  );
 }
 
 export function isCiLookupRetryMarker(error: string | null | undefined): boolean {
@@ -154,7 +163,9 @@ function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
 export function reviewSkipReasonForCi(ci: CiInspection): string | undefined {
   if (ci.pending) return CI_PENDING_REASON;
   if (ci.failed.length > 0) return CI_FAILED_REASON;
-  if (ci.lookupFailed && ci.empty) return CI_LOOKUP_FAILED_REASON;
+  // A thrown list hides checks. Rows from the calls that worked are not a green bill, and not "no CI".
+  if (ci.lookupFailed) return CI_LOOKUP_FAILED_REASON;
+  if (ci.empty) return CI_ABSENT_REASON;
   return undefined;
 }
 
@@ -501,8 +512,7 @@ export async function inspectCi(opts: {
     lookupFailed = true;
   }
   const sawShaJobs = fromForge.length > 0 || live.length > 0;
-  // Live Action jobs are fresher than forge rows (status / check-run lag), and the
-  // completed workflow_job is the only wake, so a matching live job's state wins.
+  // Live Action jobs are fresher than forge rows (status / check-run lag), so a matching live job's state wins.
   const matchedLive = new Set<Check>();
   const merged = fromForge.map((forge) => {
     const matches = live.filter((check) => {

@@ -1,4 +1,5 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
+import { isJumiReviewContext } from "./ci.ts";
 import {
   extractClosingIssueNumber,
   type IssueApi,
@@ -194,6 +195,128 @@ export async function shouldEnqueueWorkflowJobReview(
       repo,
       prNumber: pr.number,
       action: payload.action || "completed",
+      headSha: pr.head.sha,
+      prUpdatedAt: pr.updated_at,
+    });
+  }
+  if (jobs.length === 0) return { type: "skip", reason: "no matching pull request" };
+  return { type: "enqueue", jobs };
+}
+
+const FINISHED_CHECK_STATES = new Set([
+  "success",
+  "failure",
+  "error",
+  "warning",
+  "neutral",
+  "cancelled",
+  "canceled",
+  "skipped",
+  "timed_out",
+  "startup_failure",
+  "action_required",
+  "stale",
+]);
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function siblingFinishSkip(context: string | undefined, state: string | undefined): string | undefined {
+  if (isJumiReviewContext(context)) return "jumi review status";
+  const normalized = (state ?? "").toLowerCase();
+  if (!FINISHED_CHECK_STATES.has(normalized)) return normalized ? `status ${normalized}` : "status not completed";
+  return undefined;
+}
+
+function readStatusRepository(
+  parsed: Record<string, unknown>
+): { full_name: string; html_url?: string; clone_url?: string } | undefined {
+  const repository = parsed.repository;
+  if (!isObject(repository)) return undefined;
+  const fullName = stringField(repository.full_name);
+  if (!fullName) return undefined;
+  return {
+    full_name: fullName,
+    html_url: stringField(repository.html_url),
+    clone_url: stringField(repository.clone_url),
+  };
+}
+
+type SiblingCheckFinish = { sha: string; branch?: string; context?: string; state: string };
+
+function parseStatusFinish(parsed: Record<string, unknown>): SiblingCheckFinish | { skip: string } {
+  const sha = stringField(parsed.sha);
+  if (!sha) return { skip: "malformed status payload" };
+  const state = stringField(parsed.state) ?? stringField(parsed.status) ?? "";
+  const context = stringField(parsed.context) ?? stringField(parsed.name);
+  return { sha, context, state };
+}
+
+function parseCheckRunFinish(parsed: Record<string, unknown>): SiblingCheckFinish | { skip: string } {
+  const action = stringField(parsed.action) ?? "";
+  const run = parsed.check_run;
+  if (!isObject(run)) return { skip: "malformed check_run payload" };
+  const status = stringField(run.status) ?? "";
+  if (action !== "completed" && status !== "completed") {
+    return { skip: action ? `check_run ${action}` : "check_run not completed" };
+  }
+  const conclusion = stringField(run.conclusion);
+  if (!conclusion) return { skip: "check_run not completed" };
+  const sha = stringField(run.head_sha);
+  if (!sha) return { skip: "malformed check_run payload" };
+  const suite = isObject(run.check_suite) ? run.check_suite : undefined;
+  return {
+    sha,
+    branch: suite ? stringField(suite.head_branch) : undefined,
+    context: stringField(run.name),
+    state: conclusion,
+  };
+}
+
+export async function shouldEnqueueSiblingCheckReview(
+  rawBody: Uint8Array,
+  event: string,
+  policy: WebhookPolicy,
+  api: Pick<IssueApi, "listOpenPulls">,
+  logger?: (message: string) => void
+): Promise<CiReviewWebhookDecision> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(rawBody));
+  } catch {
+    return { type: "skip", reason: "malformed status payload" };
+  }
+  if (!isObject(parsed)) return { type: "skip", reason: "malformed status payload" };
+  const repository = readStatusRepository(parsed);
+  if (!repository) return { type: "skip", reason: "malformed status payload" };
+
+  const finish = event === "check_run" ? parseCheckRunFinish(parsed) : parseStatusFinish(parsed);
+  if ("skip" in finish) return { type: "skip", reason: finish.skip };
+  const early = siblingFinishSkip(finish.context, finish.state);
+  if (early) return { type: "skip", reason: early };
+
+  let owner: string;
+  let repo: string;
+  try {
+    ({ owner, repo } = assertRepositoryPolicy(repository, policy));
+  } catch (err) {
+    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    return { type: "skip", reason: "repository not allowed" };
+  }
+
+  const pulls = await api.listOpenPulls(owner, repo);
+  const jobs: Omit<ReviewJob, "delivery" | "receivedAt">[] = [];
+  for (const pr of pulls) {
+    if (!jobHeadMatches(pr.head.sha, pr.head.ref, { head_sha: finish.sha, head_branch: finish.branch })) continue;
+    if (pr.state !== "open" || pr.merged) continue;
+    if (isWipOrDraft(pr)) continue;
+    if (!pr.head?.sha) continue;
+    jobs.push({
+      owner,
+      repo,
+      prNumber: pr.number,
+      action: "completed",
       headSha: pr.head.sha,
       prUpdatedAt: pr.updated_at,
     });

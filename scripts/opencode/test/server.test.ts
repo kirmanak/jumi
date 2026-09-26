@@ -553,10 +553,60 @@ describe("createFetchHandler router mailbox", () => {
 
   test("unknown events 202-skip", async () => {
     const { handler, logs } = mailboxHandler();
-    const response = await handler(await signedRequest(makePayload(), { event: "status" }));
+    const response = await handler(await signedRequest(makePayload(), { event: "fork" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
-    expect(logs.some((line) => line.includes("skipped unsupported event status"))).toBe(true);
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported event fork" });
+    expect(logs.some((line) => line.includes("skipped unsupported event fork"))).toBe(true);
+  });
+
+  test("finished Gitea commit status wakes the matching review without a push", async () => {
+    const { handler, store } = mailboxHandler();
+    const pending = await handler(
+      await signedRequest(
+        {
+          sha: "headsha",
+          state: "pending",
+          context: "external/ci",
+          repository: repo,
+          sender: makeUser({ login: "ci" }),
+        },
+        { event: "status" }
+      )
+    );
+    expect(await responseJson(pending)).toEqual({ skipped: "status pending" });
+    expect(store.rows).toHaveLength(0);
+
+    const own = await handler(
+      await signedRequest(
+        {
+          sha: "headsha",
+          state: "success",
+          context: "jumi/opencode-review",
+          repository: repo,
+          sender: makeUser({ login: "jumi" }),
+        },
+        { event: "status" }
+      )
+    );
+    expect(await responseJson(own)).toEqual({ skipped: "jumi review status" });
+    expect(store.rows).toHaveLength(0);
+
+    const response = await handler(
+      await signedRequest(
+        {
+          sha: "headsha",
+          state: "success",
+          context: "external/ci",
+          repository: repo,
+          sender: makeUser({ login: "ci" }),
+        },
+        { event: "status" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#127:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "review")?.state).toBe("queued");
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
   });
 
   test("returns 503 when the ledger is down for worker events", async () => {

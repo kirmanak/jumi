@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   actionJobCheckState,
   buildCiMarkdown,
+  CI_ABSENT_REASON,
   CI_FAILED_REASON,
   CI_LOOKUP_BACKOFF_MS,
   CI_LOOKUP_BUDGET_MS,
@@ -454,7 +455,7 @@ describe("inspectCi", () => {
     }
   });
 
-  test("terminal forge checks proceed when listing jobs throws", async () => {
+  test("partial list failure is not green", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
@@ -474,7 +475,7 @@ describe("inspectCi", () => {
       expect(inspection.lookupFailed).toBe(true);
       expect(inspection.pending).toBe(false);
       expect(inspection.failed).toEqual([]);
-      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_LOOKUP_FAILED_REASON);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -493,6 +494,8 @@ describe("inspectCi", () => {
       });
       expect(inspection.pending).toBe(false);
       expect(inspection.empty).toBe(true);
+      expect(inspection.lookupFailed).toBeFalsy();
+      expect(reviewSkipReasonForCi(inspection)).toBe(CI_ABSENT_REASON);
       expect(inspection.failed).toEqual([]);
     } finally {
       await rm(home, { recursive: true, force: true });

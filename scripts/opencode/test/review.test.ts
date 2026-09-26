@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
-import { CI_FAILED_REASON, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
+import { CI_ABSENT_REASON, CI_FAILED_REASON, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import { GithubAPI } from "../src/github_api.ts";
@@ -57,6 +57,7 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => status,
     ...emptyCiMethods(),
+    listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   };
   return { ...defaults, ...overrides };
 }
@@ -220,6 +221,8 @@ describe("reviewPullRequest", () => {
     const result = await reviewPullRequest({
       ...skipOptions,
       api: makeApi({
+        listCommitStatuses: async () => [],
+        listCheckRuns: async () => [],
         listActionJobs: async () => {
           looks++;
           if (looks === 1) return [];
@@ -271,24 +274,41 @@ describe("reviewPullRequest", () => {
     expect(looks).toBe(2);
   });
 
-  test("reviews when forge checks are green even if listing jobs fails", async () => {
-    await withWorkspace(async (workspace) => {
-      const result = await reviewPullRequest({
-        ...reviewOptionsWithSha(workspace),
-        api: makeApi({
-          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
-          listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-          listActionJobs: async () => {
-            throw new Error("rate limited");
-          },
-        }),
-        openCodeRunner: async () => {
-          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
-          return { status: "ok" };
+  test("partial list failure is not green and is not no CI", async () => {
+    const runner = async () => {
+      throw new Error("runner should not be called");
+    };
+    const result = await reviewPullRequest({
+      ...skipOptions,
+      api: makeApi({
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
+        listActionJobs: async () => {
+          throw new Error("rate limited");
         },
-      });
-      expect(result).toEqual({ status: "posted" });
+      }),
+      openCodeRunner: runner,
     });
+    expect(result).toEqual({ status: "skipped", reason: CI_LOOKUP_FAILED_REASON });
+  });
+
+  test("does not review when no checks have appeared", async () => {
+    let looks = 0;
+    const result = await reviewPullRequest({
+      ...skipOptions,
+      api: makeApi({
+        listCommitStatuses: async () => [],
+        listCheckRuns: async () => [],
+        listActionJobs: async () => {
+          looks++;
+          return [];
+        },
+      }),
+      openCodeRunner: async () => {
+        throw new Error("runner should not be called");
+      },
+    });
+    expect(result).toEqual({ status: "skipped", reason: CI_ABSENT_REASON });
+    expect(looks).toBe(2);
   });
 
   test("reviews PRs titled [skip review]", async () => {

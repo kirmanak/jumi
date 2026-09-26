@@ -211,7 +211,7 @@ function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefi
   return state === "succeeded" || (state === "skipped" && isTerminalSkipReason(reason));
 }
 
-// The completed workflow_job is the only wake after a CI skip, so one that lands while the
+// A finished sibling check is the wake after a CI skip, so one that lands while the
 // row is leased (and is deduped against it) must not be lost when the lease ends in a CI wait.
 function isCiRewakeOutcome(outcome: { state: string; reason?: string }): boolean {
   return outcome.state === "skipped" && isCiWaitSkipReason(outcome.reason);
@@ -425,7 +425,18 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         return { key, queued: false };
       }
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
-        for (const row of sameKey) if (row.state === "leased") row.rewakeRequested = true;
+        for (const row of sameKey) {
+          if (row.state === "leased") row.rewakeRequested = true;
+          if (
+            row.state === "queued" &&
+            row.leasedUntil != null &&
+            row.leasedUntil > now &&
+            isCiLookupRetryMarker(row.error)
+          ) {
+            row.leasedUntil = null;
+            row.updatedAt = now;
+          }
+        }
         return { key, queued: false };
       }
       if (hasNewerInflight(this.rows, job, key)) {
@@ -965,8 +976,15 @@ export class PgReviewJobStore implements ReviewJobStore {
       );
       if (inflight.some((row) => str(row.job_key) === key)) {
         await tx.unsafe(
-          `UPDATE review_jobs SET rewake_requested = TRUE, updated_at = NOW()
-           WHERE job_key = $1 AND state = 'leased'`,
+          `UPDATE review_jobs
+           SET rewake_requested = CASE WHEN state = 'leased' THEN TRUE ELSE rewake_requested END,
+               leased_until = CASE
+                 WHEN state = 'queued' AND leased_until > NOW() AND error LIKE 'ci-lookup-retry:%' THEN NULL
+                 ELSE leased_until
+               END,
+               updated_at = NOW()
+           WHERE job_key = $1
+             AND (state = 'leased' OR (state = 'queued' AND leased_until > NOW() AND error LIKE 'ci-lookup-retry:%'))`,
           [key]
         );
         return { key, queued: false };

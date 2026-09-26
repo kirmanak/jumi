@@ -82,6 +82,7 @@ function makeReviewApi(): ReviewApi & ProbeApi {
       return status;
     },
     ...emptyCiMethods(),
+    listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   };
 }
 
