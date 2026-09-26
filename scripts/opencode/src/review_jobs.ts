@@ -193,6 +193,37 @@ function issueSkipLatchKey(owner: string, repo: string, issueNumber: number): st
   return `${owner}/${repo}#${issueNumber}`;
 }
 
+/**
+ * Idempotency keys are single-use per kick operation. A replay must carry the
+ * same item (owner/repo/number/commit/kick); a reused key with different
+ * params is a client error, never a replay of the first job.
+ */
+function kickIdempotencyMismatch(input: RequeueKickInput, prior: KickLogRecord): boolean {
+  return (
+    prior.owner !== input.owner ||
+    prior.repo !== input.repo ||
+    prior.number !== input.prNumber ||
+    prior.commit !== input.headSha ||
+    prior.kick !== input.kick
+  );
+}
+
+function kickIdempotencyMismatchOutcome(
+  input: RequeueKickInput,
+  prior: KickLogRecord
+): Extract<RequeueKickOutcome, { status: "rejected" }> {
+  void input;
+  return {
+    status: "rejected",
+    code: "bad-request",
+    why: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+    terminalId: prior.terminalJobId,
+    newJobId: prior.newJobId,
+    kickLogId: prior.id,
+    deduped: true,
+  };
+}
+
 export const REVIEW_JOBS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS review_jobs (
   id BIGSERIAL PRIMARY KEY,
@@ -881,6 +912,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       if (input.idempotencyKey) {
         const prior = this.kickLog.find((entry) => entry.idempotencyKey === input.idempotencyKey);
         if (prior) {
+          if (kickIdempotencyMismatch(input, prior)) return kickIdempotencyMismatchOutcome(input, prior);
           if (prior.result === "ok" && prior.newJobId != null) {
             const job = this.rows.find((row) => row.id === prior.newJobId);
             if (job) {
@@ -1925,6 +1957,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         if (input.idempotencyKey) {
           const prior = await this.findKickByIdempotency(tx, input.idempotencyKey);
           if (prior) {
+            if (kickIdempotencyMismatch(input, prior)) return kickIdempotencyMismatchOutcome(input, prior);
             if (prior.result === "ok" && prior.newJobId != null) {
               const jobs = asRows<ReviewJobRow>(
                 await tx.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [prior.newJobId])
@@ -2031,37 +2064,39 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as RequeueKickOutcome;
         }
-        let inserted: ReviewJobRow[];
-        try {
-          inserted = asRows<ReviewJobRow>(
-            await tx.unsafe(
-              `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, pr_updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, 'queued', 0, (SELECT pr_updated_at FROM review_jobs WHERE id = $7))
-               RETURNING *`,
-              [
-                terminal.jobKey,
-                terminal.owner,
-                terminal.repo,
-                terminal.prNumber,
-                terminal.headSha,
-                input.delivery,
-                terminal.id,
-              ]
-            )
-          );
-        } catch (err) {
-          if (isUniqueViolation(err)) {
-            const logged = await this.insertKickLog(tx, input, "conflict", terminal.id, null);
-            return {
-              status: "rejected",
-              code: "conflict",
-              why: `A job for ${terminal.jobKey} is already queued or leased; not a second queued row.`,
-              terminalId: terminal.id,
-              newJobId: null,
-              kickLogId: logged.id,
-            } as RequeueKickOutcome;
-          }
-          throw err;
+        // ON CONFLICT DO NOTHING keeps the transaction healthy: a concurrent
+        // kick that wins the in-flight race yields an empty RETURNING, which
+        // is the conflict path below. Catch-and-continue on a unique
+        // violation would abort the Postgres transaction and turn the
+        // follow-up kick-log insert into a 25P02 rollback (503, no audit row).
+        const inserted = asRows<ReviewJobRow>(
+          await tx.unsafe(
+            `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, pr_updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'queued', 0, (SELECT pr_updated_at FROM review_jobs WHERE id = $7))
+             ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
+             DO NOTHING
+             RETURNING *`,
+            [
+              terminal.jobKey,
+              terminal.owner,
+              terminal.repo,
+              terminal.prNumber,
+              terminal.headSha,
+              input.delivery,
+              terminal.id,
+            ]
+          )
+        );
+        if (inserted.length === 0) {
+          const logged = await this.insertKickLog(tx, input, "conflict", terminal.id, null);
+          return {
+            status: "rejected",
+            code: "conflict",
+            why: `A job for ${terminal.jobKey} is already queued or leased; not a second queued row.`,
+            terminalId: terminal.id,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as RequeueKickOutcome;
         }
         const job = inserted[0] ? mapRow(inserted[0]) : undefined;
         if (!job) throw new Error("failed to requeue kick");
@@ -2093,6 +2128,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         }>(await this.sql.unsafe(`SELECT * FROM review_kicks WHERE idempotency_key = $1`, [input.idempotencyKey]));
         const prior = rows[0] ? this.mapKickRow(rows[0]) : undefined;
         if (prior) {
+          if (kickIdempotencyMismatch(input, prior)) return kickIdempotencyMismatchOutcome(input, prior);
           if (prior.result === "ok" && prior.newJobId != null) {
             const jobs = asRows<ReviewJobRow>(
               await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [prior.newJobId])
