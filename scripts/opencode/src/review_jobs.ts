@@ -110,6 +110,8 @@ export interface ReviewJobStore {
   countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>>;
   oldestQueuedAgeSeconds(now?: Date): Promise<Record<JobKind, number>>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
+  /** Queued or leased rows for the operator board. No forge calls. Throws when the ledger is down. */
+  listInflight(limit?: number): Promise<ReviewJobRecord[]>;
   readonly skipLatches: SkipLatchStore;
   readonly sits: RouterSitStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
@@ -774,6 +776,17 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       return row ? { ...row } : undefined;
+    });
+  }
+
+  listInflight(limit = 200): Promise<ReviewJobRecord[]> {
+    return this.locked(() => {
+      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+      return this.rows
+        .filter((row) => row.state === "queued" || row.state === "leased")
+        .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
+        .slice(0, cap)
+        .map((row) => ({ ...row }));
     });
   }
 
@@ -1478,6 +1491,17 @@ export class PgReviewJobStore implements ReviewJobStore {
   async get(id: number): Promise<ReviewJobRecord | undefined> {
     const rows = asRows<ReviewJobRow>(await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [id]));
     return rows[0] ? mapRow(rows[0]) : undefined;
+  }
+
+  async listInflight(limit = 200): Promise<ReviewJobRecord[]> {
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+    const rows = asRows<ReviewJobRow>(
+      await this.sql.unsafe(
+        `SELECT * FROM review_jobs WHERE state IN ('queued', 'leased') ORDER BY created_at ASC, id ASC LIMIT $1`,
+        [cap]
+      )
+    );
+    return rows.map(mapRow);
   }
 
   async cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
