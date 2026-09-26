@@ -123,6 +123,7 @@ jobs:
           docker run --rm jumi-reviewer:ci helm version --short
           docker run --rm jumi-reviewer:ci claude --version
           docker run --rm jumi-reviewer:ci agy --version
+          docker run --rm jumi-reviewer:ci codex --version
           docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
           # Claude tracing is vendored, never installed at run time, and its
           # hooks are pure shell over jq + python3 — both must be in the image.
@@ -230,6 +231,7 @@ jobs:
           printf '%s\n' "$java_version" | grep -F Temurin
           docker run --rm jumi-worker:ci claude --version
           docker run --rm jumi-worker:ci agy --version
+          docker run --rm jumi-worker:ci codex --version
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
           docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md

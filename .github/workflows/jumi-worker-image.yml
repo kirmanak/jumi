@@ -131,6 +131,7 @@ jobs:
           echo "Verified worker env: ${config} ${instance}"
 
           docker run --rm "${TEST_TAG}" claude --version
+          docker run --rm "${TEST_TAG}" codex --version
 
           # The version only proves the binary is there. Run the production
           # argv against a loopback stub endpoint (nothing billed) so a flag

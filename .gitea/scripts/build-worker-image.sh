@@ -149,6 +149,11 @@ verify_worker_skills() {
     echo "agy missing in worker image" >&2
     exit 1
   fi
+  if ! buildah run "${ctr}" -- codex --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex missing in worker image" >&2
+    exit 1
+  fi
   # The worker holds the write-capable forge token. `--version` does not prove
   # the child is refused a fetch of that host.
   if ! buildah run "${ctr}" -- \

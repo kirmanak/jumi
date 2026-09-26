@@ -125,6 +125,11 @@ verify_reviewer_runtime() {
     echo "agy missing in reviewer image" >&2
     exit 1
   fi
+  if ! buildah run "${ctr}" -- codex --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex missing in reviewer image" >&2
+    exit 1
+  fi
   # Drive the installed opencode binary over a loopback provider and make it
   # resolve the reviewer webfetch map for a table of URLs. Proves the forge-host
   # deny against the real matcher, not a copy of it.
