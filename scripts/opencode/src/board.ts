@@ -317,7 +317,8 @@ function forgeOf(item, data) { return item.forge || data.forge || "gitea"; }
 function forgeHref(item, data) {
   const base = (data.forgeUrl || "").replace(/\\/+$/, "");
   if (!base) return null;
-  const path = item.kind === "review" ? "pulls" : "issues";
+  const forge = forgeOf(item, data);
+  const path = item.kind === "review" ? (forge === "github" ? "pull" : "pulls") : "issues";
   return base + "/" + item.owner + "/" + item.repo + "/" + path + "/" + item.number;
 }
 function esc(text) {
@@ -347,6 +348,7 @@ async function load() {
   $("forge-switch").value = state.forge;
   state.catalogOk = !data.catalog || data.catalog === PAGE_CATALOG;
   $("catalog-mismatch").hidden = state.catalogOk;
+  if (!state.catalogOk) closeConfirm();
   const grant = $("grant");
   if (typeof data.grant === "string" && data.grant.trim() !== "") {
     grant.hidden = false;
@@ -449,6 +451,10 @@ function confirmBlock(item, data, confirmIdPrefix) {
     msg.className = "sub";
     msg.id = confirmIdPrefix + "-msg";
     primary.addEventListener("click", async () => {
+      if (!state.catalogOk) {
+        msg.textContent = "Board updated — refresh to get the latest kick list before confirming.";
+        return;
+      }
       msg.textContent = "Working…";
       try {
         const res = await fetch("/api/board/kick", {
