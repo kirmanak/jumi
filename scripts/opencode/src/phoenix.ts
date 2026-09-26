@@ -563,11 +563,39 @@ export function buildOpenCodeTraceRequest(dbPath: string, trace?: TraceContext):
   return buildTraceBody(dbPath, trace).body;
 }
 
-export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceContext }): Promise<void> {
+async function postTraces(body: Uint8Array): Promise<void> {
   const endpoint = phoenixEndpoint();
   if (!endpoint) return;
   const url = tracesUrl(endpoint);
   if (!url) {
+    noteError();
+    return;
+  }
+  const agent = agentInstance();
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url.toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-protobuf",
+        "phoenix-project": agent,
+      },
+      body: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer,
+      signal: ac.signal,
+    });
+    if (!response.ok) noteError();
+  } catch {
+    noteError();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceContext }): Promise<void> {
+  const endpoint = phoenixEndpoint();
+  if (!endpoint) return;
+  if (!tracesUrl(endpoint)) {
     noteError();
     return;
   }
@@ -583,26 +611,35 @@ export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceC
     return;
   }
   if (!result.body) return;
-  const agent = agentInstance();
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  await postTraces(result.body);
+}
+
+/**
+ * Parent-built OTLP spans for a runner that leaves no session sqlite.
+ * Fail-open: no endpoint, a public Phoenix hostname, a body over the cap, or a
+ * POST that throws or returns non-2xx records an error and never throws.
+ */
+export async function exportOtlpSpans(spans: OtlpSpan[], trace?: TraceContext): Promise<void> {
+  if (spans.length === 0) return;
   try {
-    const response = await fetchImpl(url.toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-protobuf",
-        "phoenix-project": agent,
+    const agent = agentInstance();
+    const body = encodeTracesRequest(
+      {
+        attributes: {
+          "service.name": agent,
+          "openinference.project.name": agent,
+          ...filterAttrs(trace, agent),
+        },
       },
-      body: result.body.buffer.slice(
-        result.body.byteOffset,
-        result.body.byteOffset + result.body.byteLength
-      ) as ArrayBuffer,
-      signal: ac.signal,
-    });
-    if (!response.ok) noteError();
+      spans,
+      "jumi-codex"
+    );
+    if (body.byteLength > maxOtlpBytes) {
+      noteError();
+      return;
+    }
+    await postTraces(body);
   } catch {
     noteError();
-  } finally {
-    clearTimeout(timer);
   }
 }
