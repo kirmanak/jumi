@@ -156,7 +156,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
-    if (!BOARD_PATHS.has(url.pathname)) return json(404, { error: "not found" });
+    const pathname =
+      url.pathname.length > 1 && url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+    if (!BOARD_PATHS.has(pathname)) return json(404, { error: "not found" });
     if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
     // Edge identity only. The webhook HMAC secret and auth token are not accepted here.
     if (!hasEdgeIdentity(request)) return json(401, { error: "missing edge identity" });
@@ -171,11 +173,11 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     const grantLine = typeof grant === "string" && grant.trim() !== "" ? grant.split("\n")[0]?.trim() : undefined;
     const body: Record<string, unknown> = {
       in_progress: groups.in_progress,
-      inProgress: groups.in_progress,
+      inProgress: [...groups.in_progress],
       needs_kick: groups.needs_kick,
-      needsKick: groups.needs_kick,
+      needsKick: [...groups.needs_kick],
       sitting: groups.sitting,
-      sitting_on_purpose: groups.sitting,
+      sitting_on_purpose: [...groups.sitting],
     };
     if (grantLine) body.grant = grantLine;
     return json(200, body);
