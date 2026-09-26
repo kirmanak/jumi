@@ -329,10 +329,12 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     const pathname = url.pathname.length > 1 && url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
     if (!BOARD_PATHS.has(pathname)) return json(404, { error: "not found" });
     if (request.method !== "GET") return json(405, { error: "method not allowed" });
-    // Peer hop trusts the bearer only. Edge identity headers are ignored here:
-    // a forwarded header from an arbitrary caller must never authenticate.
-    const peerCall = hasBearerAuth(request, peerToken);
-    if (peerCall) {
+    // Auth path is gated on the forge. The peer listener is bearer-only and
+    // never reads edge headers; homelab requires edge identity and never
+    // accepts the bearer (the outgoing hop credential is not an incoming one).
+    const homelab = isHomelabForge(localForge);
+    if (!homelab) {
+      if (!hasBearerAuth(request, peerToken)) return json(401, { error: "missing bearer" });
       let groups: BoardGroups;
       try {
         groups = await buildBoardGroups(deps.store, localForge);
@@ -385,7 +387,10 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     }
     try {
       const peer = await fetchPeerBoard(peerUrl, peerToken, fetchFn, peerTimeoutMs);
-      (body.peers as Record<string, BoardPeerStatus>)[peer.forge] = peer;
+      // Key by the constant, not the peer-supplied forge string, so a
+      // misconfigured or compromised peer cannot collide with the local namespace.
+      peer.forge = PEER_FORGE;
+      (body.peers as Record<string, BoardPeerStatus>)[PEER_FORGE] = peer;
     } catch (err) {
       // No invented token, no crash: an unset or unreachable peer is unavailable.
       logger(`peer board unavailable: ${err instanceof Error ? err.message : String(err)}`);
