@@ -11,8 +11,8 @@ import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
-import { isQuotaWaitError } from "./quota.ts";
 import type { EnqueueResult } from "./queue.ts";
+import { isQuotaWaitError } from "./quota.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,

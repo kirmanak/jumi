@@ -965,7 +965,7 @@ describe("image labels and no double-build", () => {
     expect(shouldSkipImageBuild("tag")).toBe(true);
     expect(shouldSkipImageBuild("branch")).toBe(false);
     expect(reviewer).toContain("$" + "{IMAGE}:$" + "{VERSION}");
-    expect(worker).toContain("${{ env.IMAGE }}:${{ env.VERSION }}");
+    expect(worker).toContain("$" + "{{ env.IMAGE }}:$" + "{{ env.VERSION }}");
     expect(reviewer).toContain("bun src/release.ts next-version");
     expect(worker).toContain("bun src/release.ts next-version");
     expect(reviewer).toContain("if: $" + "{{ env.VERSION != '' }}");
