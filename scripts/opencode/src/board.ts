@@ -156,8 +156,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
-    const pathname =
-      url.pathname.length > 1 && url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+    const pathname = url.pathname.length > 1 && url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
     if (!BOARD_PATHS.has(pathname)) return json(404, { error: "not found" });
     if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
     // Edge identity only. The webhook HMAC secret and auth token are not accepted here.
