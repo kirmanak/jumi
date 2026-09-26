@@ -7,7 +7,6 @@ export const CLAUDE_RUNNER_TYPE = "claude";
 export const AGY_RUNNER_TYPE = "agy";
 export const CODEX_RUNNER_TYPE = "codex";
 /** Catalog default when a `type: codex` entry omits effort. Not a synthesized-chain model. */
-export const CODEX_DEFAULT_MODEL = "gpt-6-sol";
 export const CODEX_DEFAULT_EFFORT = "high";
 /**
  * Deploy-contract required constraint. Homelab (`FORGE` unset, empty, or `gitea`)

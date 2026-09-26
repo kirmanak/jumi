@@ -10,7 +10,6 @@ import { codexThreadPath, withEngineChain } from "../src/fallback.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
 import {
   CODEX_DEFAULT_EFFORT,
-  CODEX_DEFAULT_MODEL,
   formatRunnerStamp,
   type NamedRunner,
   runnerStamp,
@@ -90,12 +89,19 @@ const AGENT = JSON.stringify({
 
 describe("codexArgv", () => {
   test("spawns non-interactive exec with danger-full-access, not the TUI or full-auto", () => {
-    const args = codexArgv({ model: CODEX_DEFAULT_MODEL, workdir: "/work" });
+    const args = codexArgv({ model: "gpt-6-sol", workdir: "/work" });
     expect(args.slice(0, 2)).toEqual(["codex", "exec"]);
     expect(args).toContain("--json");
     expect(args).toContain(CODEX_SANDBOX);
-    expect(args).toContain("--ask-for-approval");
-    expect(args).toContain(CODEX_APPROVAL);
+    expect(args).toContain(`sandbox_mode="${CODEX_SANDBOX}"`);
+    expect(args).toContain(`approval_policy="${CODEX_APPROVAL}"`);
+    // `--ask-for-approval` and `--disable` are not documented `codex exec`
+    // flags, so the argv must carry that posture via `-c` overrides only.
+    expect(args).not.toContain("--ask-for-approval");
+    expect(args).not.toContain("--disable");
+    expect(args).toContain("features.hooks=false");
+    expect(args).toContain("features.multi_agent=false");
+    expect(args).toContain("features.apps=false");
     expect(args).toContain(`model_reasoning_effort="${CODEX_DEFAULT_EFFORT}"`);
     expect(args).toContain('web_search="disabled"');
     expect(args).not.toContain("--full-auto");
@@ -112,6 +118,23 @@ describe("codexArgv", () => {
     expect(resumed.slice(0, 4)).toEqual(["codex", "exec", "resume", "thread-9"]);
     expect(resumed).not.toContain("--last");
     expect(resumed).not.toContain("--all");
+  });
+
+  test("resume uses a minimal flag list exec resume accepts", () => {
+    const resumed = codexArgv({ model: "gpt-6-sol", workdir: "/w", continueSession: true }, "thread-9");
+    expect(resumed).toContain("--json");
+    expect(resumed).toContain(`sandbox_mode="${CODEX_SANDBOX}"`);
+    expect(resumed).toContain(`approval_policy="${CODEX_APPROVAL}"`);
+    // `exec resume` has rejected `-s/--sandbox` on past releases, and neither
+    // `--ask-for-approval` nor `--disable` is in its flag set either.
+    expect(resumed).not.toContain("--sandbox");
+    expect(resumed).not.toContain("-s");
+    expect(resumed).not.toContain("--ask-for-approval");
+    expect(resumed).not.toContain("--disable");
+    // The session already carries model, effort, and feature pins.
+    expect(resumed).not.toContain("--model");
+    expect(resumed).not.toContain("--skip-git-repo-check");
+    expect(resumed.at(-1)).toBe("-");
   });
 });
 

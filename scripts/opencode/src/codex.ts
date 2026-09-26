@@ -36,19 +36,15 @@ function codexConfigArgs(model: string, effort: string): string[] {
     "--json",
     "--color",
     "never",
+    // `--sandbox` is a documented `codex exec` flag; `-c sandbox_mode` below
+    // repeats it so the resume path (which omits `--sandbox`) keeps the same
+    // danger-full-access class without relying on a flag `exec resume` has
+    // rejected on past releases.
     "--sandbox",
     CODEX_SANDBOX,
-    "--ask-for-approval",
-    CODEX_APPROVAL,
     "--skip-git-repo-check",
     "--ignore-rules",
     "--ignore-user-config",
-    "--disable",
-    "hooks",
-    "--disable",
-    "multi_agent",
-    "--disable",
-    "apps",
     "--model",
     model,
     "-c",
@@ -57,6 +53,15 @@ function codexConfigArgs(model: string, effort: string): string[] {
     'web_search="disabled"',
     "-c",
     "features.context_management.experimental_mode=false",
+    // `--disable` is not a documented `codex exec` flag (it is a global flag
+    // that does not propagate there), so these use the `-c features.*=false`
+    // form `--disable` itself translates to.
+    "-c",
+    "features.hooks=false",
+    "-c",
+    "features.multi_agent=false",
+    "-c",
+    "features.apps=false",
     "-c",
     "agents.enabled=false",
     "-c",
@@ -65,6 +70,8 @@ function codexConfigArgs(model: string, effort: string): string[] {
     'otel.trace_exporter="none"',
     "-c",
     `sandbox_mode="${CODEX_SANDBOX}"`,
+    // `--ask-for-approval` is likewise absent from the `codex exec` flag set;
+    // `-c approval_policy` is the documented route for the same value.
     "-c",
     `approval_policy="${CODEX_APPROVAL}"`,
     "-c",
@@ -74,10 +81,28 @@ function codexConfigArgs(model: string, effort: string): string[] {
   ];
 }
 
+/**
+ * Minimal flag list for `codex exec resume <id>`: only flags the `exec
+ * resume` help lists. Past releases rejected `-s/--sandbox` there, so the
+ * sandbox and approval posture travels via `-c` overrides only. The session
+ * already carries model, effort, and feature pins from the first spawn.
+ */
+function codexResumeArgs(): string[] {
+  return [
+    "--json",
+    "--color",
+    "never",
+    "-c",
+    `sandbox_mode="${CODEX_SANDBOX}"`,
+    "-c",
+    `approval_policy="${CODEX_APPROVAL}"`,
+  ];
+}
+
 export function codexArgv(opts: EngineRunOptions, threadId?: string): string[] {
+  if (opts.continueSession && threadId) return ["codex", "exec", "resume", threadId, ...codexResumeArgs(), "-"];
   const effort = opts.effort || CODEX_DEFAULT_EFFORT;
   const flags = codexConfigArgs(opts.model, effort);
-  if (opts.continueSession && threadId) return ["codex", "exec", "resume", threadId, ...flags, "-"];
   return ["codex", "exec", ...flags, "-"];
 }
 
