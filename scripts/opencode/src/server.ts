@@ -889,12 +889,20 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       // Operator board on its own port. Same process (no sidecar, no new
       // Deployment), same ledger, single replica with no leader election.
       // Polling GET only; the webhook host never serves the board paths.
+      // Homelab fans out to the peer board (one-way, bearer-only); the peer
+      // never calls back, so the GitHub factory cannot reach the homelab forge.
       let boardServer: ReturnType<typeof Bun.serve>;
       try {
         boardServer = Bun.serve({
           hostname: config.host,
           port: BOARD_PORT,
-          fetch: createBoardFetchHandler({ store, logger }),
+          fetch: createBoardFetchHandler({
+            store,
+            logger,
+            forge: config.forge,
+            peerUrl: config.boardPeerUrl,
+            peerToken: config.boardPeerToken,
+          }),
         });
       } catch (err) {
         try {
