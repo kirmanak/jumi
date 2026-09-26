@@ -1,13 +1,16 @@
+import { isKickPath, parseKickBody } from "./kick.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
+import { isQueueUnavailable } from "./review_jobs.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
 
 /**
- * Operator board read API.
+ * Operator board read API + same-commit requeue kick.
  *
  * Served by the router on a second port (3001), never on the webhook host.
- * Polling GET only; no forge webhooks are pushed to the browser and no
- * per-row forge calls are made. In-progress comes from the job ledger
+ * Polling GET only for the page; POST /api/board/kick requeues a failed or
+ * skipped review of the same commit without a push, without rerunning CI,
+ * and without an empty commit. In-progress comes from the job ledger
  * (queued or leased); sitting rows come from persisted refusals
  * (`router_sits`). The router stays a single replica; no leader election.
  */
@@ -27,11 +30,21 @@ const EDGE_IDENTITY_HEADERS = [
 ] as const;
 
 export function hasEdgeIdentity(request: Request): boolean {
+  return edgeActor(request) !== "";
+}
+
+export function edgeActor(request: Request): string {
   for (const header of EDGE_IDENTITY_HEADERS) {
     const value = request.headers.get(header);
-    if (value != null && value.trim() !== "") return true;
+    if (value != null && value.trim() !== "") return value.trim();
   }
-  return false;
+  return "";
+}
+
+function idempotencyKeyOf(request: Request): string {
+  const value =
+    request.headers.get("idempotency-key") ?? request.headers.get("x-idempotency-key") ?? "";
+  return value.trim();
 }
 
 export interface BoardKick {
@@ -159,6 +172,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
     const pathname = url.pathname.length > 1 && url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+    if (isKickPath(pathname)) return handleKick(request, deps.store, logger);
     if (!BOARD_PATHS.has(pathname)) return json(404, { error: "not found" });
     if (request.method !== "GET") return json(405, { error: "method not allowed" });
     // Edge identity only. The webhook HMAC secret and auth token are not accepted here.
@@ -183,4 +197,75 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     if (grantLine) body.grant = grantLine;
     return json(200, body);
   };
+}
+
+async function handleKick(
+  request: Request,
+  store: ReviewJobStore,
+  logger: (message: string) => void
+): Promise<Response> {
+  if (request.method !== "POST") return json(405, { error: "method not allowed" });
+  // Edge identity only. The actor never comes from a body field.
+  const actor = edgeActor(request);
+  if (!actor) return json(401, { error: "missing edge identity" });
+  let body: unknown;
+  try {
+    const text = await request.text();
+    body = text.trim() === "" ? {} : (JSON.parse(text) as unknown);
+  } catch {
+    return json(400, { error: "invalid JSON" });
+  }
+  const parsed = parseKickBody(body, idempotencyKeyOf(request));
+  if ("error" in parsed) return json(400, { error: parsed.error });
+  const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+  try {
+    const outcome = await store.requeueKick({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      prNumber: parsed.number,
+      headSha: parsed.commit,
+      kick: parsed.kick,
+      actor,
+      idempotencyKey: parsed.idempotencyKey,
+      delivery,
+    });
+    if (outcome.status === "ok") {
+      logger(
+        `kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} @ ${parsed.commit} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
+      );
+      return json(200, {
+        ok: true,
+        jobId: outcome.job.id,
+        newJobId: outcome.job.id,
+        key: outcome.job.jobKey,
+        terminalJobId: outcome.terminalId,
+        deduped: outcome.deduped,
+      });
+    }
+    logger(
+      `kick ${outcome.code} actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} @ ${parsed.commit} kick=${JSON.stringify(parsed.kick)}: ${outcome.why}`
+    );
+    const status =
+      outcome.code === "not-found"
+        ? 404
+        : outcome.code === "stale-kick" || outcome.code === "conflict"
+          ? 409
+          : outcome.code === "not-kickable"
+            ? 422
+            : 400;
+    return json(status, {
+      error: outcome.why,
+      code: outcome.code,
+      terminalJobId: outcome.terminalId,
+      newJobId: outcome.newJobId,
+      ...(outcome.deduped ? { deduped: true } : {}),
+    });
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    logger(`kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
 }
