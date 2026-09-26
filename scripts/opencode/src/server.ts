@@ -11,6 +11,7 @@ import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
+import { isQuotaWaitError } from "./quota.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
@@ -97,6 +98,8 @@ export interface RunReviewJobExtras {
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   now?: () => number;
+  /** Previous job error (quota-wait marker) for the wait-budget decision. */
+  previousError?: string | null;
 }
 
 export async function runReviewJob(
@@ -188,6 +191,7 @@ export async function runReviewJob(
       ciRelistDelayMs: extras.ciRelistDelayMs,
       inspectOtherChecks: false,
       noCiNote,
+      previousError: extras.previousError,
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;
@@ -584,6 +588,7 @@ export async function processEngineTick(
       ...extras,
       abortSignal: abort.signal,
       jobId: String(row.id),
+      previousError: row.error ?? extras.previousError ?? null,
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;
@@ -642,6 +647,29 @@ export async function processEngineTick(
           : `engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`
     );
     stopHeartbeat();
+    if (!shutdown && !abort.signal.aborted && isQuotaWaitError(err)) {
+      try {
+        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        logDiagnostic(logger, "opencode_quota_wait", {
+          count: err.count,
+          next_at: new Date(Date.now() + err.backoffMs).toISOString(),
+          budget_remaining_ms: err.budgetRemainingMs,
+        });
+        logger(`quota-wait ${row.jobKey} backoff=${err.backoffMs} n=${err.count}`);
+      } catch (quotaErr) {
+        logger(
+          `engine quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
+        );
+        try {
+          await store.expireLease(row.id, leasedBy);
+        } catch (expireErr) {
+          logger(
+            `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+          );
+        }
+      }
+      return "processed";
+    }
     if (!shutdown && !abort.signal.aborted && isInfraFailure(err)) {
       breaker.recordInfra();
       try {

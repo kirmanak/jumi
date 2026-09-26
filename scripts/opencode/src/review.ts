@@ -23,7 +23,8 @@ import type {
   Task,
 } from "./ports.ts";
 import { buildIncompleteWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, isQuotaWaitError, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
   CONTRACT_PATH,
   contractEnvIssues,
@@ -135,6 +136,8 @@ export interface ReviewOptions {
   inspectOtherChecks?: boolean;
   /** Prepended to the review when the lookup budget expired with no checks at all. */
   noCiNote?: string;
+  /** Previous job error (e.g. quota-wait marker) for the wait-budget decision. */
+  previousError?: string | null;
 }
 
 export type PersistReviewResult =
@@ -1195,7 +1198,16 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       // Only the quota path in git.ts returns engine `stuck`; gate on the
       // message so a future non-quota `stuck` producer falls through to the
       // fingerprint path instead of setting the human-clear quota flag.
+      // A resetting quota with wait budget left throws QuotaWaitError so the
+      // same head is requeued; only hard or budget-exhausted quota parks here.
       if (engineResult.status === "stuck" && isQuotaText(engineResult.message)) {
+        throwIfQuotaWait({
+          result: engineResult,
+          model: opts.model,
+          fallbackModel: opts.fallbackModel,
+          chain: opts.chain,
+          previousError: opts.previousError,
+        });
         if (opts.home) {
           await markQuotaStuck(
             reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
@@ -1310,7 +1322,18 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
     if (isInfraFailure(err)) throw err;
+    if (isQuotaWaitError(err)) throw err;
     if (isQuotaError(err)) {
+      // Resetting quota with wait budget left waits and retries the same
+      // head; QuotaWaitError propagates to the queue. Hard or exhausted
+      // quota falls through to the day-long skip below.
+      throwIfQuotaWait({
+        err,
+        model: opts.model,
+        fallbackModel: opts.fallbackModel,
+        chain: opts.chain,
+        previousError: opts.previousError,
+      });
       if (opts.home) {
         await markQuotaStuck(
           reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
