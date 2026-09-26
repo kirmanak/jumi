@@ -34,6 +34,7 @@ import {
   type ReviewJobStore,
   renderQueueMetrics,
 } from "./review_jobs.ts";
+import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { orderedRunners } from "./runners.ts";
 import { installProcessShutdown, releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import type { ReviewJob } from "./types.ts";
@@ -634,6 +635,11 @@ export async function processEngineTick(
     const state = publishedState(result);
     await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
     recordJobCompleted(row.kind, state);
+    if (result.status === "skipped" && result.reason) {
+      await rememberSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, result.reason, logger);
+    } else {
+      await clearSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, logger);
+    }
     await handoverFollowUp(store, api, config, row, result, logger);
     breaker.recordModelReached();
     return "processed";
@@ -871,6 +877,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
               logger,
             }),
           logger,
+          sits: store.sits,
         },
       }),
       logger,
