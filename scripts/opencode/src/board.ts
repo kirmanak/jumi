@@ -317,6 +317,7 @@ function forgeOf(item, data) { return item.forge || data.forge || "gitea"; }
 function forgeHref(item, data) {
   const base = (data.forgeUrl || "").replace(/\\/+$/, "");
   if (!base) return null;
+  if (item.kind === "sit") return null;
   const forge = forgeOf(item, data);
   const path = item.kind === "review" ? (forge === "github" ? "pull" : "pulls") : "issues";
   return base + "/" + item.owner + "/" + item.repo + "/" + path + "/" + item.number;
@@ -343,7 +344,7 @@ async function load() {
   const serverForge = data.forge || "gitea";
   if (!$("forge-switch").dataset.touched) state.forge = serverForge;
   $("forge-switch").value = state.forge;
-  state.catalogOk = !data.catalog || data.catalog === PAGE_CATALOG;
+  state.catalogOk = data.catalog === PAGE_CATALOG;
   $("catalog-mismatch").hidden = state.catalogOk;
   if (!state.catalogOk) closeConfirm();
   const grant = $("grant");
