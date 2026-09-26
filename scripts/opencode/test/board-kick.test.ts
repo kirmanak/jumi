@@ -65,7 +65,14 @@ describe("board kick contract (#162)", () => {
 
     // Same key reused for a different item is a client error, never the first job.
     const mismatch = await handler(
-      kickRequest({ owner: "kirmanak", repo: "demo", number: 8, commit: "def456", kick: "boom", idempotencyKey: "key-1" })
+      kickRequest({
+        owner: "kirmanak",
+        repo: "demo",
+        number: 8,
+        commit: "def456",
+        kick: "boom",
+        idempotencyKey: "key-1",
+      })
     );
     expect(mismatch.status).toBe(400);
     const mismatchBody = (await mismatch.json()) as Record<string, unknown>;
