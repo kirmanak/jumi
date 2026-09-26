@@ -34,6 +34,7 @@ import {
   renderQueueMetrics,
 } from "./review_jobs.ts";
 import { orderedRunners } from "./runners.ts";
+import { installProcessShutdown, releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import type { ReviewJob } from "./types.ts";
 import {
   isReviewWebhookAction,
@@ -564,6 +565,10 @@ export async function processEngineTick(
     heartbeatStopped = true;
     clearInterval(heartbeat);
   };
+  const untrack = trackInFlightLease(async () => {
+    stopHeartbeat();
+    await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "engine expire failed");
+  });
 
   try {
     const job: ReviewJob = {
@@ -679,25 +684,21 @@ export async function processEngineTick(
       );
     }
     if (!published) {
-      try {
-        if (shutdown) {
-          const released = await store.releaseLease(row.id, leasedBy);
-          if (released) {
-            logger(`released ${row.jobKey} on shutdown`);
-          } else {
-            await store.expireLease(row.id, leasedBy);
-          }
-        } else if (!abort.signal.aborted) {
+      if (shutdown) {
+        await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "engine expire failed");
+      } else if (!abort.signal.aborted) {
+        try {
           await store.expireLease(row.id, leasedBy);
+        } catch (expireErr) {
+          logger(
+            `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+          );
         }
-      } catch (expireErr) {
-        logger(
-          `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-        );
       }
     }
     return "processed";
   } finally {
+    untrack();
     stopHeartbeat();
   }
 }
@@ -910,12 +911,7 @@ async function main() {
   const config = loadConfig();
   scrubSecretEnv();
   const shutdown = new AbortController();
-  const onSignal = (signal: string) => {
-    log(`received ${signal}, shutting down`);
-    shutdown.abort();
-  };
-  process.once("SIGTERM", () => onSignal("SIGTERM"));
-  process.once("SIGINT", () => onSignal("SIGINT"));
+  installProcessShutdown(shutdown, log);
   await startReviewer(config, { signal: shutdown.signal });
 }
 
