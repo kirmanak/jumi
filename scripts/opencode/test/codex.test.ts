@@ -8,12 +8,7 @@ import { resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { codexThreadPath, withEngineChain } from "../src/fallback.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
-import {
-  CODEX_DEFAULT_EFFORT,
-  formatRunnerStamp,
-  type NamedRunner,
-  runnerStamp,
-} from "../src/runners.ts";
+import { CODEX_DEFAULT_EFFORT, formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
 const originalPath = process.env.PATH;
