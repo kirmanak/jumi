@@ -649,13 +649,24 @@ export async function processEngineTick(
     stopHeartbeat();
     if (!shutdown && !abort.signal.aborted && isQuotaWaitError(err)) {
       try {
-        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
-        logDiagnostic(logger, "opencode_quota_wait", {
-          count: err.count,
-          next_at: new Date(Date.now() + err.backoffMs).toISOString(),
-          budget_remaining_ms: err.budgetRemainingMs,
-        });
-        logger(`quota-wait ${row.jobKey} backoff=${err.backoffMs} n=${err.count}`);
+        const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        if (!ok) {
+          logger(`engine quota requeue failed ${row.jobKey}: lease lost or result persisted`);
+          try {
+            await store.expireLease(row.id, leasedBy);
+          } catch (expireErr) {
+            logger(
+              `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+            );
+          }
+        } else {
+          logDiagnostic(logger, "opencode_quota_wait", {
+            count: err.count,
+            next_at: new Date(Date.now() + err.backoffMs).toISOString(),
+            budget_remaining_ms: err.budgetRemainingMs,
+          });
+          logger(`quota-wait ${row.jobKey} backoff=${err.backoffMs} n=${err.count}`);
+        }
       } catch (quotaErr) {
         logger(
           `engine quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
