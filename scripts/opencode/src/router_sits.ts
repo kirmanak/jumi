@@ -168,6 +168,7 @@ export interface RouterSitStore {
   remember(owner: string, repo: string, number: number, reason: RouterSitReason): Promise<void>;
   clear(owner: string, repo: string, number: number): Promise<void>;
   get(owner: string, repo: string, number: number): Promise<RouterSitRecord | undefined>;
+  list(): Promise<RouterSitRecord[]>;
 }
 
 export class MemoryRouterSitStore implements RouterSitStore {
@@ -193,6 +194,16 @@ export class MemoryRouterSitStore implements RouterSitStore {
   async get(owner: string, repo: string, number: number): Promise<RouterSitRecord | undefined> {
     const row = this.rows.get(this.key(owner, repo, number));
     return row ? { ...row } : undefined;
+  }
+
+  async list(): Promise<RouterSitRecord[]> {
+    return [...this.rows.values()]
+      .map((row) => ({ ...row }))
+      .sort((a, b) => {
+        if (a.owner !== b.owner) return a.owner < b.owner ? -1 : 1;
+        if (a.repo !== b.repo) return a.repo < b.repo ? -1 : 1;
+        return a.number - b.number;
+      });
   }
 }
 
@@ -288,6 +299,39 @@ export class PgRouterSitStore implements RouterSitStore {
         decidedAt: epoch(row.decided_at),
         updatedAt: epoch(row.updated_at),
       };
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async list(): Promise<RouterSitRecord[]> {
+    try {
+      const rows = asRows<{
+        owner: unknown;
+        repo: unknown;
+        number: unknown;
+        reason: unknown;
+        decided_at: unknown;
+        updated_at: unknown;
+      }>(
+        await this.sql.unsafe(
+          `SELECT owner, repo, number, reason, decided_at, updated_at FROM router_sits ORDER BY owner ASC, repo ASC, number ASC LIMIT 500`
+        )
+      );
+      const out: RouterSitRecord[] = [];
+      for (const row of rows) {
+        const reason = String(row.reason);
+        if (!isKickableSitReason(reason)) continue;
+        out.push({
+          owner: String(row.owner),
+          repo: String(row.repo),
+          number: num(row.number),
+          reason,
+          decidedAt: epoch(row.decided_at),
+          updatedAt: epoch(row.updated_at),
+        });
+      }
+      return out;
     } catch (err) {
       wrapSqlError(err);
     }
